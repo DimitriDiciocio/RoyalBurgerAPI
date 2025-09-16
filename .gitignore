@@ -1,0 +1,78 @@
+# Arquivo .gitignore para o Monorepo Royal Burger
+
+# ===============================================================
+# Python / Flask (Backend - packages/api)
+# ===============================================================
+# Ambiente virtual
+.venv/
+venv/
+*.venv
+
+# Arquivos de cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos de log e banco de dados local (se aplicável)
+*.log
+*.sqlite3
+
+# Pacotes de dependências
+pip-freeze.txt
+wheelhouse/
+.pytest_cache/
+
+# ===============================================================
+# Node.js / React / React Native (Frontend - packages/*)
+# ===============================================================
+# Pasta de dependências
+node_modules/
+
+# Arquivos de log do Node
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Pastas de build/distribuição
+dist/
+build/
+.expo/
+.expo-shared/
+
+# Arquivos de configuração local e de ambiente
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ===============================================================
+# Configurações de IDEs e Editores
+# ===============================================================
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+
+# ===============================================================
+# Arquivos de Sistema Operacional (OS)
+# ===============================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini

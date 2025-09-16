@@ -1,0 +1,10 @@
+Flask
+Flask-JWT-Extended
+Flask-SocketIO
+Flask-Mail
+python-dotenv
+bcrypt
+fdb
+validate-docbr
+flask-swagger-ui
+PyYAML
