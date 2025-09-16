@@ -14,10 +14,22 @@ def create_user(user_data):
     full_name = user_data.get('full_name')
     email = user_data.get('email')
     password = user_data.get('password')
+    phone = user_data.get('phone')
     # NOVO: Coleta a data de nascimento
     date_of_birth = user_data.get('date_of_birth')
 
-    # (A validação de senha continua a mesma)
+    # Validação de e-mail
+    is_valid, message = validators.is_valid_email(email)
+    if not is_valid:
+        return (None, message)
+
+    # Validação de telefone (se fornecido)
+    if phone:
+        is_valid, message = validators.is_valid_phone(phone)
+        if not is_valid:
+            return (None, message)
+
+    # Validação de senha
     is_strong, message = validators.is_strong_password(password)
     if not is_strong:
         return (None, message)
@@ -72,15 +84,19 @@ def create_user(user_data):
         if conn: conn.close()
 
 
-def get_users_by_role(role='customer'):
-    """Busca todos os usuários ativos de um determinado papel."""
+def get_users_by_role(roles):
+    """Busca todos os usuários ativos de determinados papéis."""
+    if isinstance(roles, str):
+        roles = [roles]
+    
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        sql = "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF FROM USERS WHERE ROLE = ? AND IS_ACTIVE = TRUE ORDER BY FULL_NAME;"
-        cur.execute(sql, (role,))
-        users = [{"id": row[0], "full_name": row[1], "email": row[2], "phone": row[3], "cpf": row[4]} for row in
+        placeholders = ', '.join(['?' for _ in roles])
+        sql = f"SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE FROM USERS WHERE ROLE IN ({placeholders}) AND IS_ACTIVE = TRUE ORDER BY FULL_NAME;"
+        cur.execute(sql, tuple(roles))
+        users = [{"id": row[0], "full_name": row[1], "email": row[2], "phone": row[3], "cpf": row[4], "role": row[5]} for row in
                  cur.fetchall()]
         return users
     except fdb.Error as e:
@@ -126,9 +142,14 @@ def update_user(user_id, update_data):
         if not cur.fetchone():
             return (False, "Usuário não encontrado.")
 
-        # --- Validações Específicas (continuam iguais) ---
+        # --- Validações Específicas ---
         if 'email' in update_data:
             new_email = update_data['email']
+            # Validação de formato de e-mail
+            is_valid, message = validators.is_valid_email(new_email)
+            if not is_valid:
+                return (False, message)
+            
             sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ?;"
             cur.execute(sql_check_email, (new_email, user_id))
             if cur.fetchone():
@@ -137,6 +158,11 @@ def update_user(user_id, update_data):
         if 'phone' in update_data:
             new_phone = update_data['phone']
             if new_phone:
+                # Validação de formato de telefone
+                is_valid, message = validators.is_valid_phone(new_phone)
+                if not is_valid:
+                    return (False, message)
+                
                 sql_check_phone = "SELECT ID FROM USERS WHERE PHONE = ? AND ID <> ?;"
                 cur.execute(sql_check_phone, (new_phone, user_id))
                 if cur.fetchone():

@@ -11,7 +11,7 @@ notification_bp = Blueprint('notifications', __name__)
 @require_role('admin', 'manager', 'attendant', 'customer') # Todos podem ver suas notificações
 def get_my_notifications_route():
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
     notifications = notification_service.get_unread_notifications(user_id)
     return jsonify(notifications), 200
 
@@ -19,7 +19,7 @@ def get_my_notifications_route():
 @require_role('admin', 'manager', 'attendant', 'customer')
 def mark_as_read_route(notification_id):
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
     if notification_service.mark_notification_as_read(notification_id, user_id):
         return jsonify({"msg": "Notificação marcada como lida."}), 200
     return jsonify({"error": "Não foi possível marcar a notificação como lida."}), 404
@@ -30,7 +30,7 @@ def mark_as_read_route(notification_id):
 def mark_all_as_read_route():
     """Marca todas as notificações do usuário logado como lidas."""
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
 
     rows_affected = notification_service.mark_all_notifications_as_read(user_id)
 

@@ -1,1065 +1,586 @@
 openapi: 3.0.0
 info:
   title: Royal Burger API
-  description: API para o sistema de delivery da hamburgueria Royal Burger.
-  version: "1.0.0"
+  description: |
+    API completa para o sistema de delivery da hamburgueria Royal Burger.
+
+    ## Funcionalidades Principais
+    - Sistema de autenticação JWT
+    - Gestão de clientes e funcionários
+    - Catálogo de produtos e ingredientes
+    - Sistema de pedidos com rastreamento
+    - Chat em tempo real
+    - Sistema de notificações
+    - Programa de fidelidade
+    - Gestão de endereços
+
+    ## Autenticação
+    A API utiliza JWT (JSON Web Tokens) para autenticação. Inclua o token no header:
+    ```
+    Authorization: Bearer <seu_token>
+    ```
+  version: "2.1.0"
+  contact:
+    name: Royal Burger Development Team
+    email: dev@royalburger.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
 servers:
   - url: http://127.0.0.1:5000/api
     description: Servidor de Desenvolvimento Local
+  - url: https://api.royalburger.com/api
+    description: Servidor de Produção
+
 components:
   securitySchemes:
-    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Token JWT obtido através do endpoint /users/login"
+
   schemas:
     MessageResponse:
       type: object
-      properties: {msg: {type: string, example: "Operação realizada com sucesso."}}
-    ChatMessage:
+      properties:
+        msg:
+          type: string
+          example: "Operação realizada com sucesso."
+
+    ErrorResponse:
       type: object
-      properties: {id: {type: integer, example: 101}, sender_id: {type: integer, example: 2}, sender_name: {type: string, example: "Atendente Ana"}, message: {type: string, example: "Olá! Seu pedido já saiu para entrega."}, timestamp: {type: string, format: date-time, example: "2025-09-15T18:30:00"}}
-    NewChatMessage:
+      properties:
+        error:
+          type: string
+          example: "Mensagem de erro específica"
+
+    LoginRequest:
       type: object
-      required: [message]
-      properties: {message: {type: string, example: "Obrigado!"}}
-    Customer:
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "admin@royalburger.com"
+        password:
+          type: string
+          example: "MinhaSenh@123"
+
+    LoginResponse:
       type: object
-      properties: {id: {type: integer, example: 3}, full_name: {type: string, example: "João da Silva"}, email: {type: string, format: email, example: "joao.silva@email.com"}, phone_number: {type: string, example: "14999998888"}, role: {type: string, example: "customer"}, is_active: {type: boolean, example: true}}
+      properties:
+        access_token:
+          type: string
+          example: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."
+
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "cliente@email.com"
+
+    PasswordResetConfirm:
+      type: object
+      required: [token, new_password]
+      properties:
+        token:
+          type: string
+          example: "abc123def456"
+        new_password:
+          type: string
+          example: "NovaSenh@123"
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        full_name:
+          type: string
+          example: "João da Silva"
+        email:
+          type: string
+          format: email
+          example: "joao@email.com"
+        phone:
+          type: string
+          example: "14999998888"
+        cpf:
+          type: string
+          example: "12345678901"
+        role:
+          type: string
+          enum: [customer, admin, manager, attendant]
+          example: "customer"
+        date_of_birth:
+          type: string
+          format: date
+          example: "1990-01-15"
+        is_active:
+          type: boolean
+          example: true
+
+    NewUser:
+      type: object
+      required: [full_name, email, password, role]
+      properties:
+        full_name:
+          type: string
+          example: "Maria Oliveira"
+        email:
+          type: string
+          format: email
+          example: "maria@email.com"
+        password:
+          type: string
+          example: "MinhaSenh@123"
+        role:
+          type: string
+          enum: [admin, manager, attendant]
+          example: "attendant"
+        phone:
+          type: string
+          example: "14988887777"
+        cpf:
+          type: string
+          example: "98765432100"
+        date_of_birth:
+          type: string
+          format: date
+          example: "1985-05-20"
+
     NewCustomer:
       type: object
-      required: [full_name, email, password, password_confirmation, date_of_birth]
+      required:
+        [full_name, email, password, password_confirmation, date_of_birth]
       properties:
-        full_name: {type: string, example: "Maria Oliveira"}
-        email: {type: string, format: email, example: "maria.oliveira@email.com"}
-        password: {type: string, example: "SenhaForte123"}
-        password_confirmation: {type: string, example: "SenhaForte123"}
-        phone_number: {type: string, example: "14988887777"}
-        date_of_birth: {type: string, format: date, example: "1995-05-20"}
-    UpdateCustomer:
-      type: object
-      properties:
-        full_name: {type: string, example: "João da Silva Santos"}
-        email: {type: string, format: email, example: "joao.santos@email.com"}
-        phone: {type: string, example: "14999991234"}
-        cpf: {type: string, example: "12345678900"}
-        date_of_birth: {type: string, format: date, example: "1990-07-22"}
+        full_name:
+          type: string
+          example: "Carlos Santos"
+        email:
+          type: string
+          format: email
+          example: "carlos@email.com"
+        password:
+          type: string
+          example: "MinhaSenh@123"
+        password_confirmation:
+          type: string
+          example: "MinhaSenh@123"
+        date_of_birth:
+          type: string
+          format: date
+          example: "1992-03-10"
+        phone:
+          type: string
+          example: "14977776666"
+        cpf:
+          type: string
+          example: "11122233344"
+
     Address:
       type: object
-      properties: {id: {type: integer, example: 1}, street: {type: string, example: "Rua das Flores"}, number: {type: string, example: "123"}, complement: {type: string, example: "Apto 4B"}, neighborhood: {type: string, example: "Centro"}, city: {type: string, example: "Lins"}, state: {type: string, example: "SP"}, zip_code: {type: string, example: "16400-000"}}
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: integer
+          example: 1
+        city:
+          type: string
+          example: "São Paulo"
+        neighborhood:
+          type: string
+          example: "Centro"
+        street:
+          type: string
+          example: "Rua das Flores"
+        number:
+          type: string
+          example: "123"
+        complement:
+          type: string
+          example: "Apto 45"
+        zip_code:
+          type: string
+          example: "01234-567"
+        is_default:
+          type: boolean
+          example: true
+
     NewAddress:
       type: object
-      required: [street, number, neighborhood, city]
-      properties: {street: {type: string, example: "Avenida Brasil"}, number: {type: string, example: "1000"}, complement: {type: string}, neighborhood: {type: string, example: "Jardim Americano"}, city: {type: string, example: "Lins"}, state: {type: string, example: "SP"}, zip_code: {type: string, example: "16400-123"}}
-    LoyaltyBalance:
-      type: object
-      properties: {accumulated_points: {type: integer, example: 500}, spent_points: {type: integer, example: 100}, current_balance: {type: integer, example: 400}}
-    LoyaltyHistoryEntry:
-      type: object
-      properties: {points: {type: integer, example: 50}, reason: {type: string, example: "Pedido ID: 123"}, date: {type: string, format: date-time, example: "2025-09-15T20:30:00"}}
-    Ingredient:
-      type: object
-      properties: {id: {type: integer, example: 25}, name: {type: string, example: "Queijo Cheddar Fatiado"}, price: {type: number, format: float, example: 1.50}, is_available: {type: boolean, example: true}}
-    NewIngredient:
-      type: object
-      required: [name]
-      properties: {name: {type: string, example: "Cebola Roxa"}, price: {type: number, format: float, example: 0.50}}
-    UpdateIngredientAvailability:
-      type: object
-      required: [is_available]
-      properties: {is_available: {type: boolean, example: false}}
-    Notification:
-      type: object
-      properties: {id: {type: integer, example: 5}, message: {type: string, example: "Seu pedido #123 foi atualizado para 'A caminho'."}, link: {type: string, example: "/my-orders/123"}, is_read: {type: boolean, example: false}, created_at: {type: string, format: date-time, example: "2025-09-15T21:00:00"}}
-    OrderItemExtra:
-      type: object
-      properties: {ingredient_id: {type: integer, example: 10}, quantity: {type: integer, example: 2}}
-    OrderItem:
-      type: object
-      required: [product_id, quantity]
+      required: [city, neighborhood, street, number]
       properties:
-        product_id: {type: integer, example: 1}
-        quantity: {type: integer, example: 1}
-        extras:
-          type: array
-          items: {$ref: '#/components/schemas/OrderItemExtra'}
+        city:
+          type: string
+          example: "São Paulo"
+        neighborhood:
+          type: string
+          example: "Centro"
+        street:
+          type: string
+          example: "Rua das Flores"
+        number:
+          type: string
+          example: "123"
+        complement:
+          type: string
+          example: "Apto 45"
+        zip_code:
+          type: string
+          example: "01234-567"
+        is_default:
+          type: boolean
+          example: false
+
+    Product:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "Hambúrguer Clássico"
+        description:
+          type: string
+          example: "Hambúrguer com carne, alface, tomate e queijo"
+        price:
+          type: number
+          format: float
+          example: 25.90
+        image_url:
+          type: string
+          example: "https://example.com/burger.jpg"
+        is_available:
+          type: boolean
+          example: true
+        section_id:
+          type: integer
+          example: 1
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00"
+
+    NewProduct:
+      type: object
+      required: [name, price]
+      properties:
+        name:
+          type: string
+          example: "Hambúrguer Especial"
+        description:
+          type: string
+          example: "Hambúrguer com ingredientes especiais"
+        price:
+          type: number
+          format: float
+          example: 35.90
+        image_url:
+          type: string
+          example: "https://example.com/special-burger.jpg"
+        section_id:
+          type: integer
+          example: 1
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: integer
+          example: 1
+        address_id:
+          type: integer
+          example: 1
+        status:
+          type: string
+          enum:
+            [
+              pending,
+              confirmed,
+              preparing,
+              ready,
+              out_for_delivery,
+              delivered,
+              cancelled,
+            ]
+          example: "pending"
+        total_amount:
+          type: number
+          format: float
+          example: 51.80
+        payment_method:
+          type: string
+          example: "credit_card"
+        notes:
+          type: string
+          example: "Sem cebola"
+        confirmation_code:
+          type: string
+          example: "ABC12345"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T18:30:00"
+        estimated_delivery:
+          type: string
+          format: date-time
+          example: "2024-01-15T19:00:00"
+
     NewOrder:
       type: object
       required: [address_id, items, payment_method]
       properties:
-        address_id: {type: integer, example: 1}
+        address_id:
+          type: integer
+          example: 1
         items:
           type: array
-          items: {$ref: '#/components/schemas/OrderItem'}
-        payment_method: {type: string, enum: [credit, debit, pix, cash], example: "cash"}
-        change_for_amount: {type: number, format: float, example: 50.00, description: "Opcional. Usado apenas se payment_method for 'cash'."}
-        notes: {type: string, example: "Por favor, sem cebola."}
-        cpf_on_invoice: {type: string, example: "12345678900"}
+          items:
+            type: object
+            properties:
+              product_id:
+                type: integer
+                example: 1
+              quantity:
+                type: integer
+                example: 2
+        payment_method:
+          type: string
+          enum: [credit_card, debit_card, money, pix]
+          example: "credit_card"
+        notes:
+          type: string
+          example: "Sem cebola"
+        change_for_amount:
+          type: number
+          format: float
+          example: 50.00
+        cpf_on_invoice:
+          type: string
+          example: "12345678901"
         points_to_redeem:
           type: integer
           example: 100
-          description: "Número de pontos que o cliente deseja resgatar. O sistema validará se o saldo (não expirado) é suficiente."
-    OrderSummary:
-      type: object
-      properties:
-        id: {type: integer, example: 124}
-        status: {type: string, example: "delivered"}
-        confirmation_code: {type: string, example: "A4B9"}
-        created_at: {type: string, format: date-time}
-        total_amount: {type: number, format: float, example: 25.80}
-    OrderDetailItem:
-      type: object
-      properties:
-        quantity: {type: integer, example: 1}
-        unit_price: {type: number, format: float, example: 19.90}
-        product_name: {type: string, example: "X-Salada Clássico"}
-        product_description: {type: string, example: "Pão, hambúrguer, queijo..."}
-    OrderDetails:
-      type: object
-      properties:
-        id: {type: integer, example: 124}
-        user_id: {type: integer, example: 3}
-        address_id: {type: integer, example: 1}
-        status: {type: string, example: "preparing"}
-        confirmation_code: {type: string, example: "A4B9"}
-        notes: {type: string, example: "Sem cebola"}
-        payment_method: {type: string, example: "cash"}
-        change_for_amount: {type: number, format: float, example: 50.00}
-        cpf_on_invoice: {type: string, example: "12345678900"}
-        discount_amount: {type: number, format: float, example: 5.00}
-        created_at: {type: string, format: date-time}
-        items:
-          type: array
-          items: {$ref: '#/components/schemas/OrderDetailItem'}
-    UpdateOrderStatus:
-      type: object
-      required: [status]
-      properties:
-        status: {type: string, enum: [pending, preparing, on_the_way, delivered, cancelled], example: "preparing"}
-    Product:
-      type: object
-      properties: {id: {type: integer, example: 1}, name: {type: string, example: "X-Salada Clássico"}, description: {type: string, example: "Um clássico pão, hambúrguer de 150g, queijo mussarela, alface e tomate frescos."}, price: {type: number, format: float, example: 19.90}, image_url: {type: string, example: "https://seusite.com/imagens/x-salada.png"}, section_id: {type: integer, example: 2}, is_active: {type: boolean, example: true}}
-    NewProduct:
-      type: object
-      required: [name, price, section_id]
-      properties: {name: {type: string, example: "Batata Frita Especial"}, description: {type: string, example: "Porção de 300g de batatas fritas crocantes com cheddar e bacon."}, price: {type: number, format: float, example: 15.00}, image_url: {type: string, example: "https://seusite.com/imagens/batata-frita.png"}, section_id: {type: integer, example: 3}}
-    ProductIngredient:
-      type: object
-      properties:
-        ingredient_id: {type: integer, example: 15}
-        name: {type: string, example: "Picles"}
-        quantity: {type: number, format: float, example: 4.0, description: "A quantidade do ingrediente na receita (ex: 2.0 para duas fatias)"}
-    NewProductIngredient:
-      type: object
-      required: [ingredient_id, quantity]
-      properties: {ingredient_id: {type: integer, example: 10}, quantity: {type: number, format: float, example: 2.0}}
-    Section:
-      type: object
-      properties: {id: {type: integer, example: 2}, name: {type: string, example: "Lanches"}, display_order: {type: integer, example: 1, description: "A ordem em que a seção deve aparecer no cardápio (menor primeiro)."}}
-    SectionWithProducts:
-      allOf:
-        - {$ref: '#/components/schemas/Section'}
-        - type: object
-          properties:
-            products:
-              type: array
-              items: {$ref: '#/components/schemas/Product'}
-    NewSection:
-      type: object
-      required: [name]
-      properties: {name: {type: string, example: "Bebidas"}, display_order: {type: integer, example: 2}}
-    User:
-      type: object
-      properties: {id: {type: integer, example: 2}, full_name: {type: string, example: "Gerente Silva"}, email: {type: string, format: email, example: "gerente@royalburger.com"}, role: {type: string, enum: [admin, manager, attendant], example: "manager"}, is_active: {type: boolean, example: true}}
-    NewUser:
-      type: object
-      required: [full_name, email, password, role]
-      properties: {full_name: {type: string, example: "Atendente Carlos"}, email: {type: string, format: email, example: "carlos@royalburger.com"}, password: {type: string, example: "SenhaSegura456"}, role: {type: string, enum: [admin, manager, attendant], example: "attendant"}}
-    UserLogin:
-      type: object
-      required: [email, password]
-      properties: {email: {type: string, example: "admin@royalburger.com"}, password: {type: string, example: "supersecret"}}
-    TokenResponse:
-      type: object
-      properties: {access_token: {type: string, example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."}}
-    PasswordResetRequest:
-      type: object
-      required: [email]
-      properties: {email: {type: string, format: email, example: "gerente@royalburger.com"}}
-    PasswordResetFinalize:
-      type: object
-      required: [token, new_password]
-      properties: {token: {type: string, example: "um_token_jwt_especial_de_reset"}, new_password: {type: string, example: "NovaSenha@123"}}
-security:
-  - bearerAuth: []
+
 paths:
-  /chats/{order_id}:
-    get:
-      summary: Busca o histórico de mensagens de um pedido.
-      tags: [Chat]
-      parameters:
-        - name: order_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Histórico de mensagens retornado com sucesso.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/ChatMessage'}
-  /chats/{order_id}/messages:
-    post:
-      summary: Envia uma nova mensagem para o chat de um pedido.
-      tags: [Chat]
-      parameters:
-        - name: order_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewChatMessage'
-      responses:
-        '201':
-          description: Mensagem criada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ChatMessage'
-  /customers:
-    post:
-      summary: Cria um novo cliente (cadastro).
-      security: []
-      tags: [Clientes]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewCustomer'
-      responses:
-        '201':
-          description: Cliente criado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Customer'
-    get:
-      summary: (Admin) Lista todos os clientes.
-      tags: [Clientes]
-      responses:
-        '200':
-          description: Lista de clientes.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/Customer'}
-  /customers/{user_id}:
-    get:
-      summary: Busca dados de um cliente específico.
-      tags: [Clientes]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Dados do cliente.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Customer'
-    put:
-      summary: Atualiza os dados de um cliente.
-      description: |-
-        Atualiza um ou mais campos do perfil de um cliente. 
-        A API valida o formato do CPF e a unicidade do e-mail e telefone antes de salvar.
-        Um cliente só pode atualizar seus próprios dados, a menos que o solicitante seja um admin.
-      tags: [Clientes]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateCustomer'
-      responses:
-        '200':
-          description: Dados atualizados com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-        '400':
-          description: "Requisição Inválida / Erro de Validação. Ocorre se os dados enviados são inválidos (ex: CPF incorreto, e-mail ou telefone já em uso)."
-        '403':
-          description: Acesso proibido.
-        '404':
-          description: Cliente não encontrado.
-    delete:
-      summary: Inativa a conta de um cliente.
-      tags: [Clientes]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Conta inativada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /customers/{user_id}/addresses:
-    get:
-      summary: Lista os endereços de um cliente.
-      tags: [Endereços]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Lista de endereços.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/Address'}
-    post:
-      summary: Adiciona um novo endereço para um cliente.
-      tags: [Endereços]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewAddress'
-      responses:
-        '201':
-          description: Endereço criado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Address'
-  /customers/addresses/{address_id}:
-    put:
-      summary: Atualiza um endereço específico.
-      tags: [Endereços]
-      parameters:
-        - name: address_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewAddress'
-      responses:
-        '200':
-          description: Endereço atualizado.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-    delete:
-      summary: Deleta um endereço específico.
-      tags: [Endereços]
-      parameters:
-        - name: address_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Endereço deletado.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /customers/{user_id}/loyalty/balance:
-    get:
-      summary: Consulta o saldo de pontos de fidelidade.
-      description: Consulta o saldo de pontos do cliente. Importante - Esta rota verifica e zera o saldo se os pontos tiverem expirado por inatividade (+60 dias).
-      tags: [Fidelidade]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Saldo de pontos.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LoyaltyBalance'
-  /customers/{user_id}/loyalty/history:
-    get:
-      summary: Consulta o histórico de pontos de fidelidade.
-      description: Retorna o histórico de transações de pontos, incluindo ganhos, resgates e expirações por inatividade.
-      tags: [Fidelidade]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Histórico de transações de pontos.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/LoyaltyHistoryEntry'}
-  /ingredients:
-    get:
-      summary: (Admin) Lista todos os ingredientes.
-      tags: [Ingredientes]
-      responses:
-        '200':
-          description: Lista de ingredientes.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/Ingredient'}
-    post:
-      summary: (Admin) Cria um novo ingrediente.
-      tags: [Ingredientes]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewIngredient'
-      responses:
-        '201':
-          description: Ingrediente criado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Ingredient'
-  /ingredients/{ingredient_id}:
-    put:
-      summary: (Admin) Atualiza um ingrediente.
-      tags: [Ingredientes]
-      parameters:
-        - name: ingredient_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewIngredient'
-      responses:
-        '200':
-          description: Ingrediente atualizado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-    delete:
-      summary: (Admin) Inativa um ingrediente.
-      tags: [Ingredientes]
-      parameters:
-        - name: ingredient_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Ingrediente inativado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /ingredients/{ingredient_id}/availability:
-    patch:
-      summary: (Admin) Atualiza a disponibilidade de um ingrediente.
-      tags: [Ingredientes]
-      parameters:
-        - name: ingredient_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateIngredientAvailability'
-      responses:
-        '200':
-          description: Disponibilidade atualizada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /notifications:
-    get:
-      summary: Lista as notificações do usuário.
-      tags: [Notificações]
-      responses:
-        '200':
-          description: Lista de notificações.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/Notification'}
-  /notifications/read-all:
-    patch:
-      summary: Marca todas as notificações como lidas.
-      tags: [Notificações]
-      responses:
-        '200':
-          description: Notificações marcadas como lidas.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /notifications/{notification_id}/read:
-    patch:
-      summary: Marca uma notificação específica como lida.
-      tags: [Notificações]
-      parameters:
-        - name: notification_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Notificação marcada como lida.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /orders:
-    post:
-      summary: (Cliente) Cria um novo pedido.
-      tags: [Pedidos]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewOrder'
-      responses:
-        '201':
-          description: Pedido criado com sucesso.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  order_id: {type: integer, example: 124}
-                  confirmation_code: {type: string, example: "A4B9"}
-                  status: {type: string, example: "pending"}
-    get:
-      summary: (Cliente) Lista seus próprios pedidos.
-      tags: [Pedidos]
-      responses:
-        '200':
-          description: Histórico de pedidos.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/OrderSummary'}
-  /orders/all:
-    get:
-      summary: (Admin) Lista todos os pedidos do sistema.
-      tags: [Pedidos]
-      responses:
-        '200':
-          description: Lista de todos os pedidos.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/OrderSummary'}
-  /orders/{order_id}:
-    get:
-      summary: Busca os detalhes de um pedido específico.
-      tags: [Pedidos]
-      parameters:
-        - name: order_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Detalhes do pedido.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OrderDetails'
-  /orders/{order_id}/status:
-    patch:
-      summary: (Admin) Atualiza o status de um pedido.
-      tags: [Pedidos]
-      parameters:
-        - name: order_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateOrderStatus'
-      responses:
-        '200':
-          description: Status atualizado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /orders/{order_id}/cancel:
-    post:
-      summary: (Cliente) Cancela um pedido.
-      tags: [Pedidos]
-      parameters:
-        - name: order_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Pedido cancelado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /products:
-    get:
-      summary: Lista todos os produtos ativos (Cardápio).
-      security: []
-      tags: [Produtos]
-      responses:
-        '200':
-          description: Cardápio retornado com sucesso.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/Product'}
-    post:
-      summary: (Admin) Cria um novo produto.
-      tags: [Produtos]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewProduct'
-      responses:
-        '201':
-          description: Produto criado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Product'
-  /products/{product_id}:
-    get:
-      summary: Busca os detalhes de um produto específico.
-      security: []
-      tags: [Produtos]
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Detalhes do produto.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Product'
-    put:
-      summary: (Admin) Atualiza um produto.
-      tags: [Produtos]
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewProduct'
-      responses:
-        '200':
-          description: Produto atualizado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-    delete:
-      summary: (Admin) Inativa um produto.
-      tags: [Produtos]
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Produto inativado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /products/{product_id}/ingredients:
-    get:
-      summary: Lista os ingredientes de um produto.
-      security: []
-      tags: [Produtos]
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Lista de ingredientes do produto.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/ProductIngredient'}
-    post:
-      summary: (Admin) Adiciona um ingrediente a um produto.
-      tags: [Produtos]
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewProductIngredient'
-      responses:
-        '201':
-          description: Ingrediente associado/atualizado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /products/{product_id}/ingredients/{ingredient_id}:
-    delete:
-      summary: (Admin) Remove um ingrediente de um produto.
-      tags: [Produtos]
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-        - name: ingredient_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Ingrediente desassociado com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /sections:
-    get:
-      summary: Lista todas as seções com seus respectivos produtos.
-      security: []
-      tags: [Seções]
-      responses:
-        '200':
-          description: Cardápio completo retornado com sucesso.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/SectionWithProducts'}
-    post:
-      summary: (Admin) Cria uma nova seção.
-      tags: [Seções]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewSection'
-      responses:
-        '201':
-          description: Seção criada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Section'
-  /sections/{section_id}:
-    get:
-      summary: Busca uma seção específica com seus produtos.
-      security: []
-      tags: [Seções]
-      parameters:
-        - name: section_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Detalhes da seção.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SectionWithProducts'
-    put:
-      summary: (Admin) Atualiza uma seção.
-      tags: [Seções]
-      parameters:
-        - name: section_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewSection'
-      responses:
-        '200':
-          description: Seção atualizada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-    delete:
-      summary: (Admin) Deleta uma seção.
-      tags: [Seções]
-      parameters:
-        - name: section_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Seção deletada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-  /sections/{section_id}/products/{product_id}:
-    post:
-      summary: (Admin) Associa um produto a uma seção.
-      tags: [Seções]
-      parameters:
-        - name: section_id
-          in: path
-          required: true
-          schema:
-            type: integer
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '201':
-          description: Associação realizada com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-    delete:
-      summary: (Admin) Remove a associação de um produto a uma seção.
-      tags: [Seções]
-      parameters:
-        - name: section_id
-          in: path
-          required: true
-          schema:
-            type: integer
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Associação removida com sucesso.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
+  # Endpoints de Autenticação
   /users/login:
     post:
-      summary: Autentica um funcionário.
+      tags: [Autenticação]
+      summary: Fazer login
+      description: Autentica um usuário e retorna um token JWT
       security: []
-      tags: [Autenticação (Funcionários)]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UserLogin'
+              $ref: "#/components/schemas/LoginRequest"
       responses:
-        '200':
-          description: Autenticação bem-sucedida.
+        "200":
+          description: Login realizado com sucesso
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenResponse'
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Credenciais inválidas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /users/logout:
+    post:
+      tags: [Autenticação]
+      summary: Fazer logout
+      description: Invalida o token JWT do usuário logado
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Logout realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /users/request-password-reset:
     post:
-      summary: Inicia o processo de redefinição de senha.
+      tags: [Autenticação]
+      summary: Solicitar recuperação de senha
+      description: Envia um e-mail com link para recuperação de senha
       security: []
-      tags: [Autenticação (Funcionários)]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PasswordResetRequest'
+              $ref: "#/components/schemas/PasswordResetRequest"
       responses:
-        '200':
-          description: Se o e-mail existir, uma instrução será enviada.
+        "200":
+          description: E-mail de recuperação enviado
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageResponse'
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /users/reset-password:
     post:
-      summary: Finaliza a redefinição de senha.
+      tags: [Autenticação]
+      summary: Redefinir senha
+      description: Redefine a senha usando o token de recuperação
       security: []
-      tags: [Autenticação (Funcionários)]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PasswordResetFinalize'
+              $ref: "#/components/schemas/PasswordResetConfirm"
       responses:
-        '200':
-          description: Senha redefinida com sucesso.
+        "200":
+          description: Senha redefinida com sucesso
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageResponse'
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Token inválido ou senha fraca
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # Endpoints de Usuários
   /users/profile:
     get:
-      summary: Busca o perfil do funcionário logado.
-      tags: [Usuários (Funcionários)]
+      tags: [Usuários]
+      summary: Obter perfil do usuário logado
+      description: Retorna os dados do usuário autenticado
+      security:
+        - bearerAuth: []
       responses:
-        '200':
-          description: Perfil do usuário.
+        "200":
+          description: Perfil obtido com sucesso
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /users:
     get:
-      summary: (Admin) Lista todos os funcionários.
-      tags: [Usuários (Funcionários)]
+      tags: [Usuários]
+      summary: Listar todos os funcionários
+      description: Lista todos os funcionários (admin, manager, attendant)
+      security:
+        - bearerAuth: []
       responses:
-        '200':
-          description: Lista de funcionários.
+        "200":
+          description: Lista de funcionários
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/User'
+                  $ref: "#/components/schemas/User"
+        "401":
+          description: Não autenticado
+        "403":
+          description: Acesso negado
     post:
-      summary: (Admin) Cria um novo funcionário.
-      tags: [Usuários (Funcionários)]
+      tags: [Usuários]
+      summary: Criar novo funcionário
+      description: Cria um novo funcionário (apenas admin)
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/NewUser'
+              $ref: "#/components/schemas/NewUser"
       responses:
-        '201':
-          description: Funcionário criado com sucesso.
+        "201":
+          description: Funcionário criado com sucesso
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Dados inválidos
+        "401":
+          description: Não autenticado
+        "403":
+          description: Acesso negado
+        "409":
+          description: E-mail já em uso
+
   /users/{user_id}:
     get:
-      summary: (Admin) Busca um funcionário por ID.
-      tags: [Usuários (Funcionários)]
+      tags: [Usuários]
+      summary: Obter funcionário por ID
+      description: Busca um funcionário específico pelo ID
+      security:
+        - bearerAuth: []
       parameters:
         - name: user_id
           in: path
           required: true
           schema:
             type: integer
+          description: ID do funcionário
       responses:
-        '200':
-          description: Dados do funcionário.
+        "200":
+          description: Funcionário encontrado
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Funcionário não encontrado
     put:
-      summary: (Admin) Atualiza um funcionário.
-      tags: [Usuários (Funcionários)]
+      tags: [Usuários]
+      summary: Atualizar funcionário
+      description: Atualiza dados de um funcionário
+      security:
+        - bearerAuth: []
       parameters:
         - name: user_id
           in: path
@@ -1067,20 +588,37 @@ paths:
           schema:
             type: integer
       requestBody:
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/NewUser'
+              type: object
+              properties:
+                full_name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+                cpf:
+                  type: string
+                date_of_birth:
+                  type: string
+                  format: date
       responses:
-        '200':
-          description: Funcionário atualizado.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
+        "200":
+          description: Funcionário atualizado com sucesso
+        "400":
+          description: Dados inválidos
+        "404":
+          description: Funcionário não encontrado
     delete:
-      summary: (Admin) Inativa um funcionário.
-      tags: [Usuários (Funcionários)]
+      tags: [Usuários]
+      summary: Inativar funcionário
+      description: Inativa um funcionário (soft delete)
+      security:
+        - bearerAuth: []
       parameters:
         - name: user_id
           in: path
@@ -1088,9 +626,529 @@ paths:
           schema:
             type: integer
       responses:
-        '200':
-          description: Funcionário inativado.
+        "200":
+          description: Funcionário inativado com sucesso
+        "404":
+          description: Funcionário não encontrado
+
+  # Endpoints de Clientes
+  /customers:
+    get:
+      tags: [Clientes]
+      summary: Listar todos os clientes
+      description: Lista todos os clientes cadastrados (admin/manager)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de clientes
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageResponse'
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+    post:
+      tags: [Clientes]
+      summary: Cadastrar novo cliente
+      description: Cria uma nova conta de cliente
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewCustomer"
+      responses:
+        "201":
+          description: Cliente cadastrado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Dados inválidos
+        "409":
+          description: E-mail já em uso
+
+  /customers/{user_id}:
+    get:
+      tags: [Clientes]
+      summary: Obter cliente por ID
+      description: Busca um cliente específico (próprio cliente ou admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Cliente encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "403":
+          description: Acesso negado
+        "404":
+          description: Cliente não encontrado
+    put:
+      tags: [Clientes]
+      summary: Atualizar dados do cliente
+      description: Atualiza dados do cliente (próprio cliente ou admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                full_name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+                cpf:
+                  type: string
+                date_of_birth:
+                  type: string
+                  format: date
+      responses:
+        "200":
+          description: Cliente atualizado com sucesso
+        "400":
+          description: Dados inválidos
+        "403":
+          description: Acesso negado
+        "404":
+          description: Cliente não encontrado
+    delete:
+      tags: [Clientes]
+      summary: Inativar conta do cliente
+      description: Inativa a conta do cliente (próprio cliente ou admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Conta inativada com sucesso
+        "403":
+          description: Acesso negado
+        "404":
+          description: Cliente não encontrado
+
+  /customers/delete-account:
+    delete:
+      tags: [Clientes]
+      summary: Deletar própria conta
+      description: Cliente deleta sua própria conta permanentemente
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Conta deletada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "403":
+          description: Apenas clientes podem deletar suas próprias contas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Falha ao deletar conta
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # Endpoints de Endereços
+  /customers/{user_id}/addresses:
+    get:
+      tags: [Endereços]
+      summary: Listar endereços do cliente
+      description: Lista todos os endereços de um cliente
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Lista de endereços
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Address"
+        "403":
+          description: Acesso negado
+    post:
+      tags: [Endereços]
+      summary: Adicionar endereço
+      description: Adiciona um novo endereço para o cliente
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewAddress"
+      responses:
+        "201":
+          description: Endereço adicionado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Address"
+        "400":
+          description: Dados inválidos
+        "403":
+          description: Acesso negado
+
+  /customers/addresses/{address_id}:
+    put:
+      tags: [Endereços]
+      summary: Atualizar endereço
+      description: Atualiza um endereço específico
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: address_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewAddress"
+      responses:
+        "200":
+          description: Endereço atualizado com sucesso
+        "400":
+          description: Dados inválidos
+        "403":
+          description: Acesso negado
+        "404":
+          description: Endereço não encontrado
+    delete:
+      tags: [Endereços]
+      summary: Remover endereço
+      description: Remove um endereço específico
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: address_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Endereço removido com sucesso
+        "403":
+          description: Acesso negado
+        "404":
+          description: Endereço não encontrado
+
+  # Endpoints de Produtos
+  /products:
+    get:
+      tags: [Produtos]
+      summary: Listar todos os produtos
+      description: Lista todos os produtos disponíveis
+      security: []
+      responses:
+        "200":
+          description: Lista de produtos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Product"
+    post:
+      tags: [Produtos]
+      summary: Criar novo produto
+      description: Cria um novo produto (admin/manager)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewProduct"
+      responses:
+        "201":
+          description: Produto criado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "400":
+          description: Dados inválidos
+        "401":
+          description: Não autenticado
+        "403":
+          description: Acesso negado
+
+  /products/{product_id}:
+    get:
+      tags: [Produtos]
+      summary: Obter produto por ID
+      description: Busca um produto específico pelo ID
+      security: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Produto encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "404":
+          description: Produto não encontrado
+    put:
+      tags: [Produtos]
+      summary: Atualizar produto
+      description: Atualiza um produto (admin/manager)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewProduct"
+      responses:
+        "200":
+          description: Produto atualizado com sucesso
+        "400":
+          description: Dados inválidos
+        "404":
+          description: Produto não encontrado
+    delete:
+      tags: [Produtos]
+      summary: Inativar produto
+      description: Inativa um produto (admin/manager)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Produto inativado com sucesso
+        "404":
+          description: Produto não encontrado
+
+  # Endpoints de Pedidos
+  /orders:
+    get:
+      tags: [Pedidos]
+      summary: Listar pedidos do cliente
+      description: Lista todos os pedidos do cliente logado
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de pedidos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+    post:
+      tags: [Pedidos]
+      summary: Criar novo pedido
+      description: Cria um novo pedido (cliente)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewOrder"
+      responses:
+        "201":
+          description: Pedido criado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400":
+          description: Dados inválidos
+        "403":
+          description: Endereço inválido
+        "409":
+          description: Loja fechada
+
+  /orders/all:
+    get:
+      tags: [Pedidos]
+      summary: Listar todos os pedidos
+      description: Lista todos os pedidos do sistema (admin/manager)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de todos os pedidos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+
+  /orders/{order_id}:
+    get:
+      tags: [Pedidos]
+      summary: Obter pedido por ID
+      description: Busca um pedido específico
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Pedido encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "404":
+          description: Pedido não encontrado
+
+  /orders/{order_id}/status:
+    patch:
+      tags: [Pedidos]
+      summary: Atualizar status do pedido
+      description: Atualiza o status de um pedido (admin/manager/attendant)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum:
+                    [
+                      pending,
+                      confirmed,
+                      preparing,
+                      ready,
+                      out_for_delivery,
+                      delivered,
+                      cancelled,
+                    ]
+                  example: "confirmed"
+      responses:
+        "200":
+          description: Status atualizado com sucesso
+        "400":
+          description: Status inválido
+        "404":
+          description: Pedido não encontrado
+
+  /orders/{order_id}/cancel:
+    post:
+      tags: [Pedidos]
+      summary: Cancelar pedido
+      description: Cancela um pedido (cliente)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Pedido cancelado com sucesso
+        "403":
+          description: Não é possível cancelar este pedido
+        "404":
+          description: Pedido não encontrado
+
+  # Endpoint de Saúde
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Verificar saúde da API
+      description: Verifica se a API está funcionando
+      security: []
+      responses:
+        "200":
+          description: API funcionando
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "API is running!"

@@ -19,7 +19,7 @@ def create_order_route():
         return jsonify({"error": message}), 409
     
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
     data = request.get_json()
 
     # Coleta dos dados
@@ -63,7 +63,7 @@ def create_order_route():
 @require_role('customer')
 def get_my_orders_route():
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
     orders = order_service.get_orders_by_user_id(user_id)
     return jsonify(orders), 200
 
@@ -94,9 +94,9 @@ def update_order_status_route(order_id):
 @jwt_required()
 def get_order_details_route(order_id):
     claims = get_jwt()
-    user_id = claims.get('id')
-    user_role = claims.get('role')
-    order = order_service.get_order_details(order_id, user_id, user_role)
+    user_id = int(claims.get('sub'))
+    user_roles = claims.get('roles', [])
+    order = order_service.get_order_details(order_id, user_id, user_roles)
     if order:
         return jsonify(order), 200
     else:
@@ -108,7 +108,7 @@ def get_order_details_route(order_id):
 @require_role('customer')
 def cancel_order_route(order_id):
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
     success, message = order_service.cancel_order_by_customer(order_id, user_id)
     if success:
         return jsonify({"msg": message}), 200

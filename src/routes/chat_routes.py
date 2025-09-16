@@ -17,10 +17,10 @@ def get_chat_history_route(order_id):
     tratada dentro do serviço.
     """
     claims = get_jwt()
-    user_id = claims.get('id')
-    user_role = claims.get('role')
+    user_id = int(claims.get('sub'))
+    user_roles = claims.get('roles', [])
 
-    history = chat_service.get_chat_history(order_id, user_id, user_role)
+    history = chat_service.get_chat_history(order_id, user_id, user_roles)
 
     if history is None:
         return jsonify({"error": "Pedido não encontrado"}), 404
@@ -39,7 +39,7 @@ def post_message_route(order_id):
     O remetente é identificado pelo token JWT.
     """
     claims = get_jwt()
-    sender_id = claims.get('id')
+    sender_id = int(claims.get('sub'))
 
     data = request.get_json()
     message_text = data.get('message')

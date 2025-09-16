@@ -56,8 +56,8 @@ def require_role(*roles):
         @jwt_required()
         def decorated_function(*args, **kwargs):
             claims = get_jwt()
-            user_role = claims.get("role")
-            if user_role in roles:
+            user_roles = claims.get("roles", [])
+            if any(role in user_roles for role in roles):
                 return f(*args, **kwargs)
             else:
                 return jsonify({"msg": "Acesso não autorizado para esta função."}), 403

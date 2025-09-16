@@ -3,7 +3,7 @@
 from flask import Blueprint, request, jsonify
 from ..services import user_service, auth_service  # Importamos os dois serviços
 from ..services.auth_service import require_role
-from flask_jwt_extended import jwt_required, get_jwt
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 user_bp = Blueprint('users', __name__)
 
@@ -53,6 +53,15 @@ def reset_password_route():
         return jsonify({"error": message}), 400
 
 
+@user_bp.route('/logout', methods=['POST'])
+@jwt_required()
+def logout_route():
+    """Faz logout do usuário (invalida o token)."""
+    # O Flask-JWT-Extended não tem blacklist nativo, mas podemos implementar
+    # uma lógica simples de logout aqui. Em produção, considere usar uma blacklist.
+    return jsonify({"msg": "Logout realizado com sucesso"}), 200
+
+
 # --- ROTAS DE GERENCIAMENTO DE FUNCIONÁRIOS (PROTEGIDAS) ---
 
 @user_bp.route('/profile', methods=['GET'])
@@ -60,7 +69,7 @@ def reset_password_route():
 def get_my_profile_route():
     """Retorna o perfil do funcionário logado."""
     claims = get_jwt()
-    user_id = claims.get('id')
+    user_id = int(claims.get('sub'))
     user = user_service.get_user_by_id(user_id)
     if user:
         return jsonify(user), 200

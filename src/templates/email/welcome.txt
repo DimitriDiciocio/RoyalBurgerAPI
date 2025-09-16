@@ -1,0 +1,19 @@
+Bem-vindo ao Royal Burger!
+
+Olá {{ user.full_name }},
+
+É com grande prazer que damos as boas-vindas ao Royal Burger!
+
+Sua conta foi criada com sucesso e agora você pode:
+- Fazer pedidos online
+- Acompanhar o status do seu pedido em tempo real
+- Acumular pontos de fidelidade
+- Receber ofertas exclusivas
+
+Estamos ansiosos para atendê-lo com os melhores hambúrgueres da cidade!
+
+Atenciosamente,
+Equipe Royal Burger
+
+---
+Este é um e-mail automático, por favor não responda.

@@ -11,6 +11,7 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'uma-chave-secreta-muito-dificil-de-adivinhar'
     DEBUG = True
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'uma-outra-chave-jwt-muito-segura'
+    JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 3600))  # 1 hora por padrão
 
     # --- Configurações do Banco de Dados Firebird ---
     DATABASE_PATH = os.path.join(PROJECT_ROOT, 'database', 'royalburger.fdb')

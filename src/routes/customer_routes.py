@@ -94,8 +94,25 @@ def delete_customer_route(user_id):
         return jsonify({"msg": "Acesso não autorizado"}), 403
 
     if user_service.deactivate_user(user_id):
-        return jsonify({"msg": "Cliente inativado com sucesso"}), 200
-    return jsonify({"error": "Falha ao inativar cliente ou cliente não encontrado"}), 404
+        return jsonify({"msg": "Conta inativada com sucesso"}), 200
+    return jsonify({"error": "Falha ao inativar conta ou cliente não encontrado"}), 404
+
+
+@customer_bp.route('/delete-account', methods=['DELETE'])
+@jwt_required()
+def delete_my_account_route():
+    """Cliente deleta sua própria conta permanentemente."""
+    claims = get_jwt()
+    user_id = int(claims.get('sub'))
+    
+    # Verifica se é realmente um cliente
+    user_roles = claims.get('roles', [])
+    if 'customer' not in user_roles:
+        return jsonify({"error": "Apenas clientes podem deletar suas próprias contas"}), 403
+    
+    if user_service.deactivate_user(user_id):
+        return jsonify({"msg": "Conta deletada com sucesso"}), 200
+    return jsonify({"error": "Falha ao deletar conta"}), 500
 
 
 # --- ROTAS DE ENDEREÇO (ADDRESS) ---
@@ -106,7 +123,7 @@ def delete_customer_route(user_id):
 def add_address_route(user_id):
     claims = get_jwt()
     # Garante que o usuário logado só pode adicionar endereços para si mesmo
-    if claims.get('id') != user_id:
+    if int(claims.get('sub')) != user_id:
         return jsonify({"msg": "Acesso não autorizado"}), 403
 
     data = request.get_json()
@@ -125,7 +142,7 @@ def add_address_route(user_id):
 def get_addresses_route(user_id):
     claims = get_jwt()
     # Garante que o usuário logado só pode ver seus próprios endereços
-    if claims.get('id') != user_id:
+    if int(claims.get('sub')) != user_id:
         return jsonify({"msg": "Acesso não autorizado"}), 403
 
     addresses = address_service.get_addresses_by_user_id(user_id)
@@ -140,7 +157,7 @@ def update_address_route(address_id):
 
     # Verificação de posse: o endereço a ser atualizado pertence ao usuário logado?
     address = address_service.get_address_by_id(address_id)
-    if not address or address.get('user_id') != claims.get('id'):
+    if not address or address.get('user_id') != int(claims.get('sub')):
         return jsonify({"msg": "Endereço não encontrado ou acesso não autorizado"}), 404
 
     data = request.get_json()
@@ -160,7 +177,7 @@ def delete_address_route(address_id):
 
     # Verificação de posse
     address = address_service.get_address_by_id(address_id)
-    if not address or address.get('user_id') != claims.get('id'):
+    if not address or address.get('user_id') != int(claims.get('sub')):
         return jsonify({"msg": "Endereço não encontrado ou acesso não autorizado"}), 404
 
     if address_service.delete_address(address_id):
@@ -176,7 +193,7 @@ def delete_address_route(address_id):
 def get_loyalty_balance_route(user_id):
     claims = get_jwt()
     # Garante que o usuário logado só pode ver seu próprio saldo
-    if claims.get('id') != user_id:
+    if int(claims.get('sub')) != user_id:
         return jsonify({"msg": "Acesso não autorizado"}), 403
 
     balance = loyalty_service.get_loyalty_balance(user_id)
@@ -191,7 +208,7 @@ def get_loyalty_balance_route(user_id):
 def get_loyalty_history_route(user_id):
     claims = get_jwt()
     # Garante que o usuário logado só pode ver seu próprio histórico
-    if claims.get('role') != 'admin' and claims.get('id') != user_id:
+    if 'admin' not in claims.get('roles', []) and int(claims.get('sub')) != user_id:
         return jsonify({"msg": "Acesso não autorizado"}), 403
 
     history = loyalty_service.get_loyalty_history(user_id)

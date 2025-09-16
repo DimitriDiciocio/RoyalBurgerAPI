@@ -72,10 +72,10 @@ def handle_send_message(data):
     try:
         # 1. Validação do Token para saber quem está enviando
         decoded_token = decode_token(token)
-        user_role = decoded_token.get('role')  # Pegamos a 'role' que salvamos no token
+        user_roles = decoded_token.get('roles', [])  # Pegamos as 'roles' que salvamos no token
 
         # Determina o tipo de remetente com base no cargo
-        sender_type = 'customer' if user_role == 'customer' else 'attendant'
+        sender_type = 'customer' if 'customer' in user_roles else 'attendant'
 
         # 2. Salva a mensagem no banco de dados através do nosso serviço
         chat_service.save_message(chat_id, sender_type, content)
