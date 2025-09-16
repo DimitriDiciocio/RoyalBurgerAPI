@@ -4,6 +4,7 @@ from flask import Blueprint, request, jsonify
 from ..services import user_service, auth_service  # Importamos os dois serviços
 from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
+from datetime import datetime, timezone
 
 user_bp = Blueprint('users', __name__)
 
@@ -56,9 +57,19 @@ def reset_password_route():
 @user_bp.route('/logout', methods=['POST'])
 @jwt_required()
 def logout_route():
-    """Faz logout do usuário (invalida o token)."""
-    # O Flask-JWT-Extended não tem blacklist nativo, mas podemos implementar
-    # uma lógica simples de logout aqui. Em produção, considere usar uma blacklist.
+    """
+    Faz logout do usuário adicionando o JTI do token atual à blacklist.
+    """
+    # Pega o 'jti' (ID único) do token que está sendo usado nesta requisição
+    jti = get_jwt()['jti']
+    
+    # Pega a data de expiração do token para guardar no banco
+    exp_timestamp = get_jwt()['exp']
+    expires_at = datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
+    
+    # Chama o serviço para adicionar o token à blacklist
+    auth_service.add_token_to_blacklist(jti, expires_at)
+    
     return jsonify({"msg": "Logout realizado com sucesso"}), 200
 
 

@@ -1152,3 +1152,28 @@ paths:
               schema:
                 type: string
                 example: "API is running!"
+  /customers/{user_id}/reactivate:
+    post:
+      summary: (Admin) Reativa a conta de um cliente.
+      description: Reverte a inativação de uma conta de cliente, marcando-a como ativa novamente. Requer privilégios de administrador.
+      tags: [Clientes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: O ID do cliente a ser reativado.
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Conta reativada com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Acesso não autorizado.
+        '404':
+          description: Cliente não encontrado.

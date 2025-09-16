@@ -5,6 +5,7 @@ from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
 from flask_mail import Mail
 from .config import Config
+import src.services.auth_service as auth_service
 
 # NOVO: Importa os blueprints da documentação que criamos
 from .routes.swagger_route import swagger_bp, swaggerui_blueprint
@@ -22,6 +23,14 @@ def create_app():
     app.config.from_object(Config)
 
     jwt = JWTManager(app)
+
+    app.config["JWT_BLOCKLIST_ENABLED"] = True
+    app.config["JWT_BLOCKLIST_TOKEN_CHECKS"] = ["access", "refresh"]
+
+    @jwt.token_in_blocklist_loader
+    def check_if_token_in_blocklist(jwt_header, jwt_payload):
+        return auth_service.is_token_revoked(jwt_payload)
+
     socketio.init_app(app)
     mail.init_app(app)
 

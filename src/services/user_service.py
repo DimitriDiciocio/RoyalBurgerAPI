@@ -206,10 +206,21 @@ def deactivate_user(user_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        sql = "UPDATE USERS SET IS_ACTIVE = FALSE WHERE ID = ?;"
-        cur.execute(sql, (user_id,))
+
+        # Etapa 1: Verifica se o usuário existe
+        sql_check = "SELECT 1 FROM USERS WHERE ID = ?;"
+        cur.execute(sql_check, (user_id,))
+        if not cur.fetchone():
+            return False # Usuário não existe, retorna falha
+
+        # Etapa 2: Executa a atualização
+        sql_update = "UPDATE USERS SET IS_ACTIVE = FALSE WHERE ID = ?;"
+        cur.execute(sql_update, (user_id,))
         conn.commit()
-        return cur.rowcount > 0
+
+        # Se não houve erro, a operação é um sucesso
+        return True
+        
     except fdb.Error as e:
         print(f"Erro ao inativar usuário: {e}")
         if conn: conn.rollback()
@@ -340,5 +351,33 @@ def finalize_password_reset(token, new_password):
         print(f"Erro no banco de dados ao finalizar a recuperação de senha: {e}")
         if conn: conn.rollback()
         return (False, "Ocorreu um erro interno. Tente novamente mais tarde.")
+    finally:
+        if conn: conn.close()
+
+def reactivate_user(user_id):
+    """Reativa um usuário que estava inativo."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Etapa 1: Verifica se o usuário existe
+        sql_check = "SELECT 1 FROM USERS WHERE ID = ?;"
+        cur.execute(sql_check, (user_id,))
+        if not cur.fetchone():
+            return False # Usuário não existe, retorna falha
+
+        # Etapa 2: Executa a atualização
+        sql_update = "UPDATE USERS SET IS_ACTIVE = TRUE WHERE ID = ?;"
+        cur.execute(sql_update, (user_id,))
+        conn.commit()
+
+        # Se não houve erro, a operação é um sucesso
+        return True
+        
+    except fdb.Error as e:
+        print(f"Erro ao reativar usuário: {e}")
+        if conn: conn.rollback()
+        return False
     finally:
         if conn: conn.close()

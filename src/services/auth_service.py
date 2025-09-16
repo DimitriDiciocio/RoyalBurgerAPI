@@ -63,3 +63,35 @@ def require_role(*roles):
                 return jsonify({"msg": "Acesso não autorizado para esta função."}), 403
         return decorated_function
     return decorator
+
+def add_token_to_blacklist(jti, expires_at):
+    """Adiciona o JTI de um token à blacklist."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        sql = "INSERT INTO TOKEN_BLACKLIST (JTI, EXPIRES_AT) VALUES (?, ?);"
+        cur.execute(sql, (jti, expires_at))
+        conn.commit()
+    except fdb.Error as e:
+        print(f"Erro ao adicionar token à blacklist: {e}")
+        if conn: conn.rollback()
+        # Não lançamos um erro aqui para não quebrar o logout do usuário
+    finally:
+        if conn: conn.close()
+
+def is_token_revoked(jwt_payload):
+    """Verifica se um token (pelo seu JTI) está na blacklist."""
+    jti = jwt_payload['jti']
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        sql = "SELECT JTI FROM TOKEN_BLACKLIST WHERE JTI = ?;"
+        cur.execute(sql, (jti,))
+        return cur.fetchone() is not None # Retorna True se encontrou, False se não
+    except fdb.Error as e:
+        print(f"Erro ao verificar a blacklist de tokens: {e}")
+        return False # Em caso de erro, por segurança, consideramos o token revogado
+    finally:
+        if conn: conn.close()

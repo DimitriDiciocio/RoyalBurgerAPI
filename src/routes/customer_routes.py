@@ -213,3 +213,19 @@ def get_loyalty_history_route(user_id):
 
     history = loyalty_service.get_loyalty_history(user_id)
     return jsonify(history), 200
+
+@customer_bp.route('/<int:user_id>/reactivate', methods=['POST'])
+@jwt_required()
+def reactivate_customer_route(user_id):
+    """
+    (Admin) Reativa a conta de um cliente que foi previamente inativada.
+    """
+    claims = get_jwt()
+    # Garante que apenas administradores possam reativar contas
+    if 'admin' not in claims.get('roles', []):
+        return jsonify({"msg": "Acesso não autorizado. Apenas administradores podem reativar contas."}), 403
+
+    if user_service.reactivate_user(user_id):
+        return jsonify({"msg": "Cliente reativado com sucesso"}), 200
+    else:
+        return jsonify({"error": "Falha ao reativar cliente ou cliente não encontrado"}), 404
