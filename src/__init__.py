@@ -31,6 +31,38 @@ def create_app():
     def check_if_token_in_blocklist(jwt_header, jwt_payload):
         return auth_service.is_token_revoked(jwt_payload)
 
+    @jwt.revoked_token_loader
+    def revoked_token_callback(jwt_header, jwt_payload):
+        return {
+            "error": "Token revogado, faça login novamente",
+            "code": "TOKEN_REVOKED",
+            "message": "Este token foi revogado (logout realizado). Por favor, faça login novamente."
+        }, 401
+
+    @jwt.expired_token_loader
+    def expired_token_callback(jwt_header, jwt_payload):
+        return {
+            "error": "Sua sessão expirou, faça login novamente",
+            "code": "SESSION_EXPIRED",
+            "message": "Sua sessão expirou após 2 horas de inatividade. Por favor, faça login novamente para continuar."
+        }, 401
+
+    @jwt.invalid_token_loader
+    def invalid_token_callback(error):
+        return {
+            "error": "Token inválido, faça login novamente",
+            "code": "INVALID_TOKEN",
+            "message": "O token de acesso é inválido ou corrompido. Por favor, faça login novamente."
+        }, 401
+
+    @jwt.unauthorized_loader
+    def missing_token_callback(error):
+        return {
+            "error": "Token de acesso necessário",
+            "code": "MISSING_TOKEN",
+            "message": "Esta operação requer autenticação. Por favor, faça login para continuar."
+        }, 401
+
     socketio.init_app(app)
     mail.init_app(app)
 

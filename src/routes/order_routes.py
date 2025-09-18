@@ -40,7 +40,7 @@ def create_order_route():
         return jsonify({"error": "Endereço inválido ou não pertence a este usuário"}), 403
 
     # Chamada de serviço agora passa todos os parâmetros, incluindo os pontos
-    new_order = order_service.create_order(
+    new_order, error_code, error_message = order_service.create_order(
         user_id,
         address_id,
         items,
@@ -54,8 +54,17 @@ def create_order_route():
     if new_order:
         return jsonify(new_order), 201
     
-    # Mensagem de erro mais específica vinda do serviço
-    return jsonify({"error": "Não foi possível criar o pedido. Verifique os dados ou se um ingrediente está esgotado."}), 400
+    # Retorna códigos de status HTTP específicos baseados no erro
+    if error_code == "STORE_CLOSED":
+        return jsonify({"error": error_message}), 409
+    elif error_code in ["INVALID_CPF", "EMPTY_ORDER", "MISSING_PAYMENT_METHOD", "INVALID_DISCOUNT"]:
+        return jsonify({"error": error_message}), 400
+    elif error_code == "INGREDIENT_UNAVAILABLE":
+        return jsonify({"error": error_message}), 422
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": error_message}), 500
+    else:
+        return jsonify({"error": "Não foi possível criar o pedido."}), 500
 
 
 # GET /src/orders/ -> Cliente logado vê seu histórico de pedidos

@@ -18,14 +18,23 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                  points_to_redeem=0):
     """
     Cria um novo pedido validando TUDO: horário da loja, disponibilidade de ingredientes, CPF, etc.
+    Retorna uma tupla: (order_data, error_code, error_message)
     """
-    # NOVO: Adicionar a verificação de loja aberta NO INÍCIO da função
+    # Verificação de loja aberta
     is_open, message = store_service.is_store_open()
     if not is_open:
-        raise ValueError(message)  # Interrompe a criação do pedido se a loja estiver fechada
+        return (None, "STORE_CLOSED", message)
 
+    # Validação de CPF
     if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
-        raise ValueError(f"O CPF informado '{cpf_on_invoice}' é inválido.")
+        return (None, "INVALID_CPF", f"O CPF informado '{cpf_on_invoice}' é inválido.")
+
+    # Validação de dados básicos
+    if not items or len(items) == 0:
+        return (None, "EMPTY_ORDER", "O pedido deve conter pelo menos um item.")
+
+    if not payment_method:
+        return (None, "MISSING_PAYMENT_METHOD", "Método de pagamento é obrigatório.")
 
     conn = None
     try:
@@ -60,7 +69,7 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
             cur.execute(sql_check_availability, tuple(required_ingredients))
             unavailable_ingredient = cur.fetchone()
             if unavailable_ingredient:
-                raise ValueError(f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
+                return (None, "INGREDIENT_UNAVAILABLE", f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
 
         # ETAPAS 2 E 3 ... (TODA A LÓGICA DE PREÇOS, PONTOS E INSERÇÃO NO BANCO)
         # ...
@@ -93,7 +102,7 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                         order_total += extra_prices.get(extra['ingredient_id'], 0) * extra.get('quantity', 1)
 
         if discount_amount > order_total:
-            raise ValueError("O valor do desconto não pode ser maior que o total do pedido.")
+            return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
 
         confirmation_code = _generate_confirmation_code()
         sql_order = """
@@ -127,13 +136,12 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
         new_order_data = {"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}
         # ... (código de notificações e e-mails que já temos) ...
 
-        return new_order_data
+        return (new_order_data, None, None)
 
-    except (fdb.Error, ValueError) as e:
+    except fdb.Error as e:
         print(f"Erro ao criar pedido: {e}")
         if conn: conn.rollback()
-        # Retornamos a mensagem de erro específica para a rota
-        return None, str(e)
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
 

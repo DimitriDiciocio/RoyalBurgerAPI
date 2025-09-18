@@ -10,19 +10,33 @@ def create_product(product_data):
     description = product_data.get('description')
     price = product_data.get('price')
 
+    # Validações básicas
+    if not name or not name.strip():
+        return (None, "INVALID_NAME", "Nome do produto é obrigatório")
+    
+    if price is None or price <= 0:
+        return (None, "INVALID_PRICE", "Preço deve ser maior que zero")
+
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Verifica se já existe um produto com o mesmo nome
+        sql_check = "SELECT ID FROM PRODUCTS WHERE UPPER(NAME) = UPPER(?) AND IS_ACTIVE = TRUE;"
+        cur.execute(sql_check, (name,))
+        if cur.fetchone():
+            return (None, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")
+        
         sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE) VALUES (?, ?, ?) RETURNING ID;"
         cur.execute(sql, (name, description, price))
         new_product_id = cur.fetchone()[0]
         conn.commit()
-        return {"id": new_product_id, "name": name, "description": description, "price": price}
+        return ({"id": new_product_id, "name": name, "description": description, "price": price}, None, None)
     except fdb.Error as e:
         print(f"Erro ao criar produto: {e}")
         if conn: conn.rollback()
-        return None
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
 
@@ -67,24 +81,52 @@ def get_product_by_id(product_id):
 def update_product(product_id, update_data):
     """Atualiza dados de um produto."""
     allowed_fields = ['name', 'description', 'price']
-    set_parts = [f"{key} = ?" for key in update_data if key in allowed_fields]
-    if not set_parts: return False
+    fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}
+    
+    if not fields_to_update:
+        return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")
 
-    values = [update_data[key] for key in update_data if key in allowed_fields]
-    values.append(product_id)
+    # Validações específicas
+    if 'name' in fields_to_update:
+        name = fields_to_update['name']
+        if not name or not name.strip():
+            return (False, "INVALID_NAME", "Nome do produto é obrigatório")
+    
+    if 'price' in fields_to_update:
+        price = fields_to_update['price']
+        if price is None or price <= 0:
+            return (False, "INVALID_PRICE", "Preço deve ser maior que zero")
 
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Verifica se o produto existe
+        sql_check_exists = "SELECT 1 FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+        cur.execute(sql_check_exists, (product_id,))
+        if not cur.fetchone():
+            return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado")
+        
+        # Se está atualizando o nome, verifica se não há duplicata
+        if 'name' in fields_to_update:
+            sql_check_name = "SELECT ID FROM PRODUCTS WHERE UPPER(NAME) = UPPER(?) AND ID <> ? AND IS_ACTIVE = TRUE;"
+            cur.execute(sql_check_name, (fields_to_update['name'], product_id))
+            if cur.fetchone():
+                return (False, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")
+
+        set_parts = [f"{key} = ?" for key in fields_to_update]
+        values = list(fields_to_update.values())
+        values.append(product_id)
+
         sql = f"UPDATE PRODUCTS SET {', '.join(set_parts)} WHERE ID = ? AND IS_ACTIVE = TRUE;"
         cur.execute(sql, tuple(values))
         conn.commit()
-        return cur.rowcount > 0
+        return (True, None, "Produto atualizado com sucesso")
     except fdb.Error as e:
         print(f"Erro ao atualizar produto: {e}")
         if conn: conn.rollback()
-        return False
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
 

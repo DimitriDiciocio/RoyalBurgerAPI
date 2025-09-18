@@ -18,13 +18,30 @@ def login_route():
     password = data.get('password')
 
     if not email or not password:
-        return jsonify({"msg": "E-mail e senha são obrigatórios"}), 400
+        return jsonify({"error": "E-mail e senha são obrigatórios"}), 400
 
-    token = auth_service.authenticate(email, password)
+    token, error_code, error_message = auth_service.authenticate(email, password)
 
     if token:
-        return jsonify(access_token=token), 200
-    return jsonify({"msg": "Credenciais inválidas"}), 401
+        # Busca o nome do usuário diretamente do banco para a mensagem de boas-vindas
+        user = user_service.get_user_by_email(email)
+        full_name = user.get('full_name', 'Usuário') if user else 'Usuário'
+        return jsonify({
+            "access_token": token,
+            "message": f"Bem-vindo, {full_name}"
+        }), 200
+    
+    # Retorna códigos de status HTTP específicos baseados no erro
+    if error_code == "USER_NOT_FOUND":
+        return jsonify({"error": "E-mail ou senha incorretos"}), 404
+    elif error_code == "ACCOUNT_INACTIVE":
+        return jsonify({"error": error_message}), 403
+    elif error_code == "INVALID_PASSWORD":
+        return jsonify({"error": "E-mail ou senha incorretos"}), 401
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": error_message}), 500
+    else:
+        return jsonify({"error": "Erro interno do servidor"}), 500
 
 
 @user_bp.route('/request-password-reset', methods=['POST'])
@@ -108,13 +125,27 @@ def create_user_route():
     if data['role'] not in ['admin', 'manager', 'attendant']:
         return jsonify({"error": "Cargo inválido."}), 400
 
-    new_user, error_message = user_service.create_user(data)
+    new_user, error_code, error_message = user_service.create_user(data)
 
     if new_user:
-        return jsonify(new_user), 201
+        return jsonify({
+            **new_user,
+            "message": "Usuário registrado com sucesso"
+        }), 201
     else:
-        # Usa a mensagem de erro específica do serviço (ex: senha fraca)
-        return jsonify({"error": error_message or "Não foi possível criar o usuário."}), 409
+        # Retorna códigos de status HTTP específicos baseados no erro
+        if error_code == "EMAIL_ALREADY_EXISTS":
+            return jsonify({"error": "E-mail já cadastrado"}), 409
+        elif error_code == "PHONE_ALREADY_EXISTS":
+            return jsonify({"error": "Telefone já cadastrado"}), 409
+        elif error_code == "CPF_ALREADY_EXISTS":
+            return jsonify({"error": "CPF já cadastrado"}), 409
+        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD"]:
+            return jsonify({"error": error_message}), 400
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": error_message}), 500
+        else:
+            return jsonify({"error": "Não foi possível criar o usuário."}), 500
 
 
 @user_bp.route('/<int:user_id>', methods=['GET'])
@@ -135,9 +166,22 @@ def update_user_route(user_id):
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
 
-    if user_service.update_user(user_id, data):
-        return jsonify({"msg": "Funcionário atualizado com sucesso"}), 200
-    return jsonify({"error": "Falha ao atualizar ou funcionário não encontrado"}), 404
+    success, error_code, message = user_service.update_user(user_id, data)
+    
+    if success:
+        return jsonify({"msg": "Dados atualizados com sucesso"}), 200
+    
+    # Retorna códigos de status HTTP específicos baseados no erro
+    if error_code == "USER_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:
+        return jsonify({"error": message}), 409
+    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS"]:
+        return jsonify({"error": message}), 400
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    else:
+        return jsonify({"error": "Falha ao atualizar funcionário"}), 500
 
 
 @user_bp.route('/<int:user_id>', methods=['DELETE'])

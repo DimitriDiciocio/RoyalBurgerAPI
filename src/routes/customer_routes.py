@@ -31,13 +31,27 @@ def create_customer_route():
     # 3. Se tudo estiver certo, chama o serviço.
     #    Note que não passamos o 'password_confirmation' para o serviço.
     #    Ele já cumpriu sua função.
-    new_user, error_message = user_service.create_user(data)
+    new_user, error_code, error_message = user_service.create_user(data)
 
     if new_user:
-        return jsonify(new_user), 201
+        return jsonify({
+            **new_user,
+            "message": "Usuário registrado com sucesso"
+        }), 201
     else:
-        # A mensagem de erro específica vem do serviço (ex: senha fraca, e-mail em uso)
-        return jsonify({"error": error_message}), 409
+        # Retorna códigos de status HTTP específicos baseados no erro
+        if error_code == "EMAIL_ALREADY_EXISTS":
+            return jsonify({"error": "E-mail já cadastrado"}), 409
+        elif error_code == "PHONE_ALREADY_EXISTS":
+            return jsonify({"error": "Telefone já cadastrado"}), 409
+        elif error_code == "CPF_ALREADY_EXISTS":
+            return jsonify({"error": "CPF já cadastrado"}), 409
+        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD"]:
+            return jsonify({"error": error_message}), 400
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": error_message}), 500
+        else:
+            return jsonify({"error": "Não foi possível criar o usuário."}), 500
 
 # GET /src/customers/ -> Rota protegida para admins/managers verem todos os clientes
 @customer_bp.route('/', methods=['GET'])
@@ -76,12 +90,22 @@ def update_customer_route(user_id):
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
 
-    success, message = user_service.update_user(user_id, data)
+    success, error_code, message = user_service.update_user(user_id, data)
 
     if success:
-        return jsonify({"msg": message}), 200
+        return jsonify({"msg": "Dados atualizados com sucesso"}), 200
     else:
-        return jsonify({"error": message}), 400
+        # Retorna códigos de status HTTP específicos baseados no erro
+        if error_code == "USER_NOT_FOUND":
+            return jsonify({"error": message}), 404
+        elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:
+            return jsonify({"error": message}), 409
+        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS"]:
+            return jsonify({"error": message}), 400
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": message}), 500
+        else:
+            return jsonify({"error": "Falha ao atualizar dados"}), 500
 
 
 # DELETE /src/customers/<id> -> Rota para um cliente inativar sua conta
@@ -94,8 +118,8 @@ def delete_customer_route(user_id):
         return jsonify({"msg": "Acesso não autorizado"}), 403
 
     if user_service.deactivate_user(user_id):
-        return jsonify({"msg": "Conta inativada com sucesso"}), 200
-    return jsonify({"error": "Falha ao inativar conta ou cliente não encontrado"}), 404
+        return jsonify({"msg": "Conta excluída com sucesso"}), 200
+    return jsonify({"error": "Falha ao excluir conta ou cliente não encontrado"}), 404
 
 
 @customer_bp.route('/delete-account', methods=['DELETE'])
@@ -111,8 +135,8 @@ def delete_my_account_route():
         return jsonify({"error": "Apenas clientes podem deletar suas próprias contas"}), 403
     
     if user_service.deactivate_user(user_id):
-        return jsonify({"msg": "Conta deletada com sucesso"}), 200
-    return jsonify({"error": "Falha ao deletar conta"}), 500
+        return jsonify({"msg": "Conta excluída com sucesso"}), 200
+    return jsonify({"error": "Falha ao excluir conta"}), 500
 
 
 # --- ROTAS DE ENDEREÇO (ADDRESS) ---

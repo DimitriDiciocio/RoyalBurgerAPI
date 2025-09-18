@@ -29,10 +29,19 @@ def create_product_route():
     data = request.get_json()
     if not data or not data.get('name') or not data.get('price'):
         return jsonify({"error": "Nome e preço são obrigatórios"}), 400
-    new_product = product_service.create_product(data)
+    new_product, error_code, error_message = product_service.create_product(data)
     if new_product:
         return jsonify(new_product), 201
-    return jsonify({"error": "Não foi possível criar o produto"}), 500
+    
+    # Retorna códigos de status HTTP específicos baseados no erro
+    if error_code == "PRODUCT_NAME_EXISTS":
+        return jsonify({"error": error_message}), 409
+    elif error_code in ["INVALID_NAME", "INVALID_PRICE"]:
+        return jsonify({"error": error_message}), 400
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": error_message}), 500
+    else:
+        return jsonify({"error": "Não foi possível criar o produto"}), 500
 
 
 @product_bp.route('/<int:product_id>', methods=['PUT'])
@@ -41,9 +50,22 @@ def update_product_route(product_id):
     data = request.get_json()
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
-    if product_service.update_product(product_id, data):
-        return jsonify({"msg": "Produto atualizado com sucesso"}), 200
-    return jsonify({"error": "Falha ao atualizar produto ou produto não encontrado"}), 404
+    success, error_code, message = product_service.update_product(product_id, data)
+    
+    if success:
+        return jsonify({"msg": message}), 200
+    
+    # Retorna códigos de status HTTP específicos baseados no erro
+    if error_code == "PRODUCT_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    elif error_code == "PRODUCT_NAME_EXISTS":
+        return jsonify({"error": message}), 409
+    elif error_code in ["INVALID_NAME", "INVALID_PRICE", "NO_VALID_FIELDS"]:
+        return jsonify({"error": message}), 400
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    else:
+        return jsonify({"error": "Falha ao atualizar produto"}), 500
 
 
 @product_bp.route('/<int:product_id>', methods=['DELETE'])
