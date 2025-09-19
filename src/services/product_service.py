@@ -9,6 +9,8 @@ def create_product(product_data):
     name = product_data.get('name')
     description = product_data.get('description')
     price = product_data.get('price')
+    cost_price = product_data.get('cost_price', 0.0)
+    preparation_time_minutes = product_data.get('preparation_time_minutes', 0)
 
     # Validações básicas
     if not name or not name.strip():
@@ -16,6 +18,12 @@ def create_product(product_data):
     
     if price is None or price <= 0:
         return (None, "INVALID_PRICE", "Preço deve ser maior que zero")
+    
+    if cost_price is not None and cost_price < 0:
+        return (None, "INVALID_COST_PRICE", "Preço de custo não pode ser negativo")
+    
+    if preparation_time_minutes is not None and preparation_time_minutes < 0:
+        return (None, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")
 
     conn = None
     try:
@@ -28,11 +36,11 @@ def create_product(product_data):
         if cur.fetchone():
             return (None, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")
         
-        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE) VALUES (?, ?, ?) RETURNING ID;"
-        cur.execute(sql, (name, description, price))
+        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES) VALUES (?, ?, ?, ?, ?) RETURNING ID;"
+        cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes))
         new_product_id = cur.fetchone()[0]
         conn.commit()
-        return ({"id": new_product_id, "name": name, "description": description, "price": price}, None, None)
+        return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes}, None, None)
     except fdb.Error as e:
         print(f"Erro ao criar produto: {e}")
         if conn: conn.rollback()
@@ -47,9 +55,9 @@ def get_all_products():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        sql = "SELECT ID, NAME, DESCRIPTION, PRICE FROM PRODUCTS WHERE IS_ACTIVE = TRUE ORDER BY NAME;"
+        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES FROM PRODUCTS WHERE IS_ACTIVE = TRUE ORDER BY NAME;"
         cur.execute(sql)
-        products = [{"id": row[0], "name": row[1], "description": row[2], "price": str(row[3])} for row in
+        products = [{"id": row[0], "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0} for row in
                     cur.fetchall()]
         return products
     except fdb.Error as e:
@@ -65,11 +73,11 @@ def get_product_by_id(product_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        sql = "SELECT ID, NAME, DESCRIPTION, PRICE FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"
         cur.execute(sql, (product_id,))
         row = cur.fetchone()
         if row:
-            return {"id": row[0], "name": row[1], "description": row[2], "price": str(row[3])}
+            return {"id": row[0], "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0}
         return None
     except fdb.Error as e:
         print(f"Erro ao buscar produto por ID: {e}")
@@ -80,7 +88,7 @@ def get_product_by_id(product_id):
 
 def update_product(product_id, update_data):
     """Atualiza dados de um produto."""
-    allowed_fields = ['name', 'description', 'price']
+    allowed_fields = ['name', 'description', 'price', 'cost_price', 'preparation_time_minutes', 'is_active']
     fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}
     
     if not fields_to_update:
@@ -96,6 +104,16 @@ def update_product(product_id, update_data):
         price = fields_to_update['price']
         if price is None or price <= 0:
             return (False, "INVALID_PRICE", "Preço deve ser maior que zero")
+    
+    if 'cost_price' in fields_to_update:
+        cost_price = fields_to_update['cost_price']
+        if cost_price is not None and cost_price < 0:
+            return (False, "INVALID_COST_PRICE", "Preço de custo não pode ser negativo")
+    
+    if 'preparation_time_minutes' in fields_to_update:
+        prep_time = fields_to_update['preparation_time_minutes']
+        if prep_time is not None and prep_time < 0:
+            return (False, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")
 
     conn = None
     try:
@@ -312,5 +330,58 @@ def get_section_by_id(section_id):
     except fdb.Error as e:
         print(f"Erro ao buscar seção por ID: {e}")
         return None
+    finally:
+        if conn: conn.close()
+
+
+def get_menu_summary():
+    """Retorna os KPIs do cardápio."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Total de itens ativos
+        cur.execute("SELECT COUNT(*) FROM PRODUCTS WHERE IS_ACTIVE = TRUE")
+        total_items = cur.fetchone()[0]
+        
+        # Preço médio
+        cur.execute("SELECT AVG(PRICE) FROM PRODUCTS WHERE IS_ACTIVE = TRUE AND PRICE > 0")
+        price_result = cur.fetchone()
+        avg_price = float(price_result[0]) if price_result and price_result[0] else 0.0
+        
+        # Margem média (preço - custo)
+        cur.execute("""
+            SELECT AVG(PRICE - COST_PRICE) 
+            FROM PRODUCTS 
+            WHERE IS_ACTIVE = TRUE AND PRICE > 0 AND COST_PRICE > 0
+        """)
+        margin_result = cur.fetchone()
+        avg_margin = float(margin_result[0]) if margin_result and margin_result[0] else 0.0
+        
+        # Tempo médio de preparo
+        cur.execute("""
+            SELECT AVG(PREPARATION_TIME_MINUTES) 
+            FROM PRODUCTS 
+            WHERE IS_ACTIVE = TRUE AND PREPARATION_TIME_MINUTES > 0
+        """)
+        prep_result = cur.fetchone()
+        avg_prep_time = float(prep_result[0]) if prep_result and prep_result[0] else 0.0
+        
+        return {
+            "total_items": total_items,
+            "average_price": round(avg_price, 2),
+            "average_margin": round(avg_margin, 2),
+            "average_preparation_time": round(avg_prep_time, 1)
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar resumo do cardápio: {e}")
+        return {
+            "total_items": 0,
+            "average_price": 0.0,
+            "average_margin": 0.0,
+            "average_preparation_time": 0.0
+        }
     finally:
         if conn: conn.close()

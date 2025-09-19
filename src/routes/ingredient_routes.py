@@ -10,7 +10,8 @@ ingredient_bp = Blueprint('ingredients', __name__)
 @ingredient_bp.route('/', methods=['GET'])
 @require_role('admin', 'manager') # Alterado para admin, pois a versão pública pode vir dos produtos
 def get_all_ingredients_route():
-    ingredients = ingredient_service.get_all_ingredients()
+    status_filter = request.args.get('status')  # ?status=low_stock|out_of_stock|in_stock
+    ingredients = ingredient_service.get_all_ingredients(status_filter)
     return jsonify(ingredients), 200
 
 # POST /src/ingredients/ -> Cria um novo ingrediente
@@ -62,3 +63,30 @@ def update_availability_route(ingredient_id):
         return jsonify({"msg": f"Ingrediente marcado como {status_text} com sucesso."}), 200
     else:
         return jsonify({"error": "Ingrediente não encontrado ou falha ao atualizar"}), 404
+
+
+# POST /src/ingredients/<id>/stock -> Ajusta o estoque de um ingrediente
+@ingredient_bp.route('/<int:ingredient_id>/stock', methods=['POST'])
+@require_role('admin', 'manager')
+def adjust_ingredient_stock_route(ingredient_id):
+    data = request.get_json()
+    change = data.get('change')
+    
+    if change is None:
+        return jsonify({"error": "O campo 'change' é obrigatório"}), 400
+    
+    try:
+        change_amount = float(change)
+    except (ValueError, TypeError):
+        return jsonify({"error": "O campo 'change' deve ser um número válido"}), 400
+    
+    success, error_code, message = ingredient_service.adjust_ingredient_stock(ingredient_id, change_amount)
+    
+    if success:
+        return jsonify({"msg": message}), 200
+    elif error_code == "INGREDIENT_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    elif error_code == "NEGATIVE_STOCK":
+        return jsonify({"error": message}), 400
+    else:
+        return jsonify({"error": "Erro interno do servidor"}), 500

@@ -299,6 +299,13 @@ components:
           type: number
           format: float
           example: 25.90
+        cost_price:
+          type: number
+          format: float
+          example: 15.50
+        preparation_time_minutes:
+          type: integer
+          example: 12
         image_url:
           type: string
           example: "https://example.com/burger.jpg"
@@ -327,12 +334,76 @@ components:
           type: number
           format: float
           example: 35.90
+        cost_price:
+          type: number
+          format: float
+          example: 20.50
+        preparation_time_minutes:
+          type: integer
+          example: 15
         image_url:
           type: string
           example: "https://example.com/special-burger.jpg"
         section_id:
           type: integer
           example: 1
+
+    Ingredient:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "Carne de Hambúrguer"
+        description:
+          type: string
+          example: "Carne bovina moída para hambúrguer"
+        price:
+          type: number
+          format: float
+          example: 8.50
+        is_available:
+          type: boolean
+          example: true
+        current_stock:
+          type: number
+          format: float
+          example: 25.5
+        stock_unit:
+          type: string
+          example: "kg"
+        min_stock_threshold:
+          type: number
+          format: float
+          example: 5.0
+
+    NewIngredient:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: "Carne de Hambúrguer"
+        description:
+          type: string
+          example: "Carne bovina moída para hambúrguer"
+        price:
+          type: number
+          format: float
+          example: 8.50
+        current_stock:
+          type: number
+          format: float
+          example: 25.5
+        stock_unit:
+          type: string
+          example: "kg"
+        min_stock_threshold:
+          type: number
+          format: float
+          example: 5.0
 
     Order:
       type: object
@@ -1159,6 +1230,154 @@ paths:
         "404":
           description: Produto não encontrado
 
+  # Endpoints de Ingredientes
+  /ingredients:
+    get:
+      tags: [Ingredientes]
+      summary: Listar todos os ingredientes
+      description: Lista todos os ingredientes com filtros opcionais de status de estoque
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [low_stock, out_of_stock, in_stock]
+          description: Filtro por status de estoque
+      responses:
+        "200":
+          description: Lista de ingredientes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Ingredient"
+        "401":
+          description: Não autenticado
+        "403":
+          description: Acesso negado
+
+    post:
+      tags: [Ingredientes]
+      summary: Criar novo ingrediente
+      description: Cria um novo ingrediente com campos de estoque
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewIngredient"
+      responses:
+        "201":
+          description: Ingrediente criado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ingredient"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+        "403":
+          description: Acesso negado
+        "500":
+          description: Erro interno do servidor
+
+  /ingredients/{ingredient_id}:
+    put:
+      tags: [Ingredientes]
+      summary: Atualizar ingrediente
+      description: Atualiza dados de um ingrediente
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ingredient_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewIngredient"
+      responses:
+        "200":
+          description: Ingrediente atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos
+        "404":
+          description: Ingrediente não encontrado
+        "500":
+          description: Erro interno do servidor
+
+    delete:
+      tags: [Ingredientes]
+      summary: Inativar ingrediente
+      description: Inativa um ingrediente (soft delete)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ingredient_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Ingrediente inativado com sucesso
+        "404":
+          description: Ingrediente não encontrado
+
+  /ingredients/{ingredient_id}/availability:
+    patch:
+      tags: [Ingredientes]
+      summary: Atualizar disponibilidade
+      description: Atualiza o status de disponibilidade de um ingrediente
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ingredient_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_available]
+              properties:
+                is_available:
+                  type: boolean
+                  example: true
+      responses:
+        "200":
+          description: Disponibilidade atualizada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos
+        "404":
+          description: Ingrediente não encontrado
+
   # Endpoints de Pedidos
   /orders:
     get:
@@ -1344,6 +1563,7 @@ paths:
               schema:
                 type: string
                 example: "API is running!"
+
   /customers/{user_id}/reactivate:
     post:
       summary: (Admin) Reativa a conta de um cliente.
@@ -1369,3 +1589,517 @@ paths:
           description: Acesso não autorizado.
         "404":
           description: Cliente não encontrado.
+
+  # Novos endpoints para o painel administrativo
+
+  # Dashboard
+  /dashboard/metrics:
+    get:
+      tags: [Dashboard]
+      summary: Métricas do dashboard
+      description: Retorna as principais métricas de performance do restaurante em tempo real
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Métricas obtidas com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_orders_today:
+                    type: integer
+                    example: 45
+                  revenue_today:
+                    type: number
+                    format: float
+                    example: 1250.50
+                  average_ticket:
+                    type: number
+                    format: float
+                    example: 27.79
+                  average_preparation_time:
+                    type: number
+                    format: float
+                    example: 15.5
+                  completed_orders:
+                    type: integer
+                    example: 38
+                  ongoing_orders:
+                    type: integer
+                    example: 7
+                  low_stock_items_count:
+                    type: integer
+                    example: 3
+                  cancelled_orders:
+                    type: integer
+                    example: 2
+                  order_distribution:
+                    type: object
+                    example: { "delivery": 30, "on_site": 10, "takeaway": 5 }
+                  recent_orders:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        total_amount:
+                          type: number
+                        status:
+                          type: string
+                        order_type:
+                          type: string
+                        created_at:
+                          type: string
+
+  # Estoque
+  /stock/summary:
+    get:
+      tags: [Estoque]
+      summary: Resumo do estoque
+      description: Retorna os KPIs de estoque
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Resumo obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_stock_value:
+                    type: number
+                    format: float
+                    example: 2500.75
+                  out_of_stock_count:
+                    type: integer
+                    example: 2
+                  low_stock_count:
+                    type: integer
+                    example: 5
+                  in_stock_count:
+                    type: integer
+                    example: 18
+
+  /ingredients/{ingredient_id}/stock:
+    post:
+      tags: [Estoque]
+      summary: Ajustar estoque de ingrediente
+      description: Adiciona ou subtrai quantidade do estoque de um ingrediente
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ingredient_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [change]
+              properties:
+                change:
+                  type: number
+                  format: float
+                  example: 1.5
+                  description: Quantidade a ser adicionada (positiva) ou subtraída (negativa)
+      responses:
+        "200":
+          description: Estoque ajustado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Quantidade inválida ou estoque negativo
+        "404":
+          description: Ingrediente não encontrado
+
+  /stock/purchase-order:
+    post:
+      tags: [Estoque]
+      summary: Gerar pedido de compra
+      description: Gera uma lista de ingredientes que precisam ser comprados
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Pedido gerado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        ingredient_id:
+                          type: integer
+                        name:
+                          type: string
+                        current_stock:
+                          type: number
+                        min_threshold:
+                          type: number
+                        suggested_quantity:
+                          type: number
+                        estimated_cost:
+                          type: number
+                  total_items:
+                    type: integer
+                  total_estimated_cost:
+                    type: number
+
+  # Cardápio
+  /menu/summary:
+    get:
+      tags: [Cardápio]
+      summary: Resumo do cardápio
+      description: Retorna os KPIs do cardápio
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Resumo obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_items:
+                    type: integer
+                    example: 25
+                  average_price:
+                    type: number
+                    format: float
+                    example: 28.90
+                  average_margin:
+                    type: number
+                    format: float
+                    example: 15.50
+                  average_preparation_time:
+                    type: number
+                    format: float
+                    example: 12.5
+
+  # Relatórios
+  /reports:
+    get:
+      tags: [Relatórios]
+      summary: Gerar relatórios
+      description: Gera relatórios e analytics baseados no tipo e período
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [sales, financial, performance, employees]
+          description: Tipo de relatório
+        - name: period
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [last_7_days, last_30_days, this_month]
+          description: Período do relatório
+      responses:
+        "200":
+          description: Relatório gerado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                  period:
+                    type: object
+                    properties:
+                      start_date:
+                        type: string
+                      end_date:
+                        type: string
+                  # Dados específicos variam conforme o tipo de relatório
+
+  # Financeiro
+  /financials/summary:
+    get:
+      tags: [Financeiro]
+      summary: Resumo financeiro
+      description: Retorna os KPIs financeiros
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [this_month]
+          description: Período do resumo
+      responses:
+        "200":
+          description: Resumo obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current_balance:
+                    type: number
+                    format: float
+                    example: 12500.75
+                  total_revenue:
+                    type: number
+                    format: float
+                    example: 25000.00
+                  total_expense:
+                    type: number
+                    format: float
+                    example: 12500.25
+                  profit_loss:
+                    type: number
+                    format: float
+                    example: 12499.75
+                  period:
+                    type: string
+
+  /financials/transactions:
+    get:
+      tags: [Financeiro]
+      summary: Listar transações financeiras
+      description: Lista todas as transações com filtros opcionais
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [revenue, expense]
+      responses:
+        "200":
+          description: Lista de transações
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    description:
+                      type: string
+                    amount:
+                      type: number
+                    type:
+                      type: string
+                    transaction_date:
+                      type: string
+                    payment_method:
+                      type: string
+                    notes:
+                      type: string
+                    created_by_name:
+                      type: string
+
+    post:
+      tags: [Financeiro]
+      summary: Criar transação financeira
+      description: Adiciona uma nova transação financeira
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description, amount, type]
+              properties:
+                description:
+                  type: string
+                  example: "Venda de produtos"
+                amount:
+                  type: number
+                  format: float
+                  example: 1250.50
+                type:
+                  type: string
+                  enum: [revenue, expense]
+                  example: "revenue"
+                payment_method:
+                  type: string
+                  example: "credit_card"
+                notes:
+                  type: string
+                  example: "Pagamento via PIX"
+      responses:
+        "201":
+          description: Transação criada com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  description:
+                    type: string
+                  amount:
+                    type: number
+                  type:
+                    type: string
+                  transaction_date:
+                    type: string
+                  payment_method:
+                    type: string
+                  notes:
+                    type: string
+
+  # Métricas de usuários
+  /users/{user_id}/metrics:
+    get:
+      tags: [Usuários]
+      summary: Métricas de funcionário
+      description: Retorna as métricas de performance de um funcionário específico
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Métricas obtidas com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id:
+                    type: integer
+                  role:
+                    type: string
+                  total_completed_orders:
+                    type: integer
+                    example: 45
+                  total_revenue:
+                    type: number
+                    format: float
+                    example: 2250.75
+                  average_service_time_minutes:
+                    type: number
+                    format: float
+                    example: 12.5
+                  ongoing_orders:
+                    type: integer
+                    example: 3
+                  average_rating:
+                    type: number
+                    format: float
+                    example: 4.8
+        "404":
+          description: Usuário não encontrado ou não é funcionário
+
+  # Configurações
+  /settings:
+    get:
+      tags: [Configurações]
+      summary: Listar configurações
+      description: Lista todas as configurações globais do sistema
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de configurações
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        value:
+                          type: string
+                        description:
+                          type: string
+                        updated_at:
+                          type: string
+                        updated_by:
+                          type: integer
+
+    put:
+      tags: [Configurações]
+      summary: Atualizar configurações
+      description: Atualiza múltiplas configurações do sistema
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings:
+                  type: array
+                  items:
+                    type: object
+                    required: [key, value]
+                    properties:
+                      key:
+                        type: string
+                        example: "delivery_fee"
+                      value:
+                        type: string
+                        example: "7.50"
+      responses:
+        "200":
+          description: Configurações atualizadas com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  msg:
+                    type: string
+                  updated_settings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        value:
+                          type: string

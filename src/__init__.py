@@ -93,6 +93,25 @@ def create_app():
     from .routes.notification_routes import notification_bp
     app.register_blueprint(notification_bp, url_prefix='/api/notifications')
 
+    # Novas rotas para o painel administrativo
+    from .routes.dashboard_routes import dashboard_bp
+    app.register_blueprint(dashboard_bp, url_prefix='/api/dashboard')
+
+    from .routes.stock_routes import stock_bp
+    app.register_blueprint(stock_bp, url_prefix='/api/stock')
+
+    from .routes.menu_routes import menu_bp
+    app.register_blueprint(menu_bp, url_prefix='/api/menu')
+
+    from .routes.reports_routes import reports_bp
+    app.register_blueprint(reports_bp, url_prefix='/api/reports')
+
+    from .routes.financial_routes import financial_bp
+    app.register_blueprint(financial_bp, url_prefix='/api/financials')
+
+    from .routes.settings_routes import settings_bp
+    app.register_blueprint(settings_bp, url_prefix='/api/settings')
+
     app.register_blueprint(swagger_bp, url_prefix='/api/docs')
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')
 

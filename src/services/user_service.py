@@ -418,3 +418,73 @@ def reactivate_user(user_id):
         return False
     finally:
         if conn: conn.close()
+
+
+def get_user_metrics(user_id):
+    """Retorna as métricas de performance de um funcionário específico."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se o usuário existe e é um funcionário
+        cur.execute("SELECT ROLE FROM USERS WHERE ID = ? AND IS_ACTIVE = TRUE", (user_id,))
+        user_row = cur.fetchone()
+        if not user_row:
+            return None
+        
+        user_role = user_row[0]
+        if user_role not in ['attendant', 'manager', 'admin']:
+            return None
+        
+        # Conta pedidos concluídos pelo atendente
+        cur.execute("""
+            SELECT COUNT(*) as total_orders,
+                   SUM(TOTAL_AMOUNT) as total_revenue
+            FROM ORDERS 
+            WHERE ATTENDANT_ID = ? AND STATUS = 'delivered'
+        """, (user_id,))
+        
+        order_stats = cur.fetchone()
+        total_orders = order_stats[0] if order_stats and order_stats[0] else 0
+        total_revenue = float(order_stats[1]) if order_stats and order_stats[1] else 0.0
+        
+        # Calcula tempo médio de atendimento
+        cur.execute("""
+            SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60) as avg_service_time
+            FROM ORDERS 
+            WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
+        """, (user_id,))
+        
+        avg_service_time = cur.fetchone()
+        avg_service_time = round(float(avg_service_time[0]), 1) if avg_service_time and avg_service_time[0] else 0.0
+        
+        # Pedidos em andamento
+        cur.execute("""
+            SELECT COUNT(*) 
+            FROM ORDERS 
+            WHERE ATTENDANT_ID = ? AND STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
+        """, (user_id,))
+        
+        ongoing_result = cur.fetchone()
+        ongoing_orders = ongoing_result[0] if ongoing_result and ongoing_result[0] else 0
+        
+        # Média de avaliações (assumindo que existe uma tabela ORDER_RATINGS)
+        # Como não existe na estrutura atual, retornamos 0
+        average_rating = 0.0
+        
+        return {
+            "user_id": user_id,
+            "role": user_role,
+            "total_completed_orders": total_orders,
+            "total_revenue": total_revenue,
+            "average_service_time_minutes": avg_service_time,
+            "ongoing_orders": ongoing_orders,
+            "average_rating": average_rating
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar métricas do usuário: {e}")
+        return None
+    finally:
+        if conn: conn.close()

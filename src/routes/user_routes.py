@@ -191,3 +191,15 @@ def delete_user_route(user_id):
     if user_service.deactivate_user(user_id):
         return jsonify({"msg": "Funcionário inativado com sucesso"}), 200
     return jsonify({"error": "Falha ao inativar ou funcionário não encontrado"}), 404
+
+
+@user_bp.route('/<int:user_id>/metrics', methods=['GET'])
+@require_role('admin', 'manager')
+def get_user_metrics_route(user_id):
+    """Retorna as métricas de performance de um funcionário."""
+    metrics = user_service.get_user_metrics(user_id)
+    
+    if metrics is None:
+        return jsonify({"error": "Usuário não encontrado ou não é um funcionário"}), 404
+    
+    return jsonify(metrics), 200
