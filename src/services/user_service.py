@@ -9,6 +9,27 @@ from ..utils import token_helper
 from ..utils import validators
 
 
+def convert_date_format(date_string):
+    """
+    Converte data do formato DD-MM-YYYY (frontend) para YYYY-MM-DD (Firebird).
+    Retorna a data convertida ou None se inválida.
+    """
+    if not date_string:
+        return None
+    
+    try:
+        # Tenta converter DD-MM-YYYY para YYYY-MM-DD
+        if len(date_string) == 10 and date_string.count('-') == 2:
+            day, month, year = date_string.split('-')
+            if len(day) == 2 and len(month) == 2 and len(year) == 4:
+                return f"{year}-{month}-{day}"
+    except:
+        pass
+    
+    # Se já estiver no formato correto ou for inválido, retorna como está
+    return date_string
+
+
 def create_user(user_data):
     """Cria um novo usuário (cliente ou interno) e envia e-mail de boas-vindas."""
     full_name = user_data.get('full_name')
@@ -16,12 +37,31 @@ def create_user(user_data):
     password = user_data.get('password')
     phone = user_data.get('phone')
     cpf = user_data.get('cpf')
-    date_of_birth = user_data.get('date_of_birth')
+    date_of_birth = convert_date_format(user_data.get('date_of_birth'))
 
     # Validação de e-mail
     is_valid, message = validators.is_valid_email(email)
     if not is_valid:
         return (None, "INVALID_EMAIL", message)
+
+    # Validação de data de nascimento
+    if date_of_birth:
+        try:
+            # Tenta criar um objeto datetime para validar a data
+            datetime.strptime(date_of_birth, '%Y-%m-%d')
+            
+            # Verifica se a pessoa tem pelo menos 18 anos
+            birth_date = datetime.strptime(date_of_birth, '%Y-%m-%d')
+            today = datetime.now()
+            age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+            
+            if age < 18:
+                return (None, "INVALID_DATE", "Você deve ter pelo menos 18 anos para se cadastrar.")
+            if age > 120:
+                return (None, "INVALID_DATE", "Data de nascimento inválida.")
+                
+        except ValueError:
+            return (None, "INVALID_DATE", "Formato de data inválido. Use DD-MM-AAAA.")
 
     # Validação de telefone (se fornecido)
     if phone:

@@ -14,12 +14,13 @@ customer_bp = Blueprint('customers', __name__)
 @customer_bp.route('/', methods=['POST'])
 def create_customer_route():
     data = request.get_json()
+    print(data)
 
     # 1. Verifica se todos os campos obrigatórios foram enviados
-    required_fields = ['full_name', 'email', 'password', 'password_confirmation', 'date_of_birth']
+    required_fields = ['full_name', 'email', 'password', 'password_confirmation', 'date_of_birth', 'phone']
     if not data or not all(field in data for field in required_fields):
         return jsonify({
-                           "error": "Todos os campos são obrigatórios: nome completo, email, senha, confirmação de senha e data de nascimento."}), 400
+                           "error": "Todos os campos são obrigatórios: nome completo, email, senha, confirmação de senha, data de nascimento e telefone."}), 400
 
     password = data.get('password')
     password_confirmation = data.get('password_confirmation')
@@ -46,7 +47,7 @@ def create_customer_route():
             return jsonify({"error": "Telefone já cadastrado"}), 409
         elif error_code == "CPF_ALREADY_EXISTS":
             return jsonify({"error": "CPF já cadastrado"}), 409
-        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD"]:
+        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD", "INVALID_DATE"]:
             return jsonify({"error": error_message}), 400
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": error_message}), 500
