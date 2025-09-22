@@ -28,7 +28,8 @@ def login_route():
         full_name = user.get('full_name', 'Usuário') if user else 'Usuário'
         return jsonify({
             "access_token": token,
-            "message": f"Bem-vindo, {full_name}"
+            "message": f"Bem-vindo, {full_name}",
+            "user": user
         }), 200
     
     # Retorna códigos de status HTTP específicos baseados no erro
