@@ -2,6 +2,7 @@ Flask
 Flask-JWT-Extended
 Flask-SocketIO
 Flask-Mail
+Flask-Cors
 python-dotenv
 bcrypt
 fdb

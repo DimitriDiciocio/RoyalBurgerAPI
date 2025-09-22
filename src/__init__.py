@@ -6,6 +6,7 @@ from flask_socketio import SocketIO
 from flask_mail import Mail
 from .config import Config
 import src.services.auth_service as auth_service
+from flask_cors import CORS
 
 # NOVO: Importa os blueprints da documentação que criamos
 from .routes.swagger_route import swagger_bp, swaggerui_blueprint
@@ -21,6 +22,9 @@ def create_app():
     """
     app = Flask(__name__)
     app.config.from_object(Config)
+
+    # Habilita CORS para as rotas da API
+    CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
     jwt = JWTManager(app)
 
