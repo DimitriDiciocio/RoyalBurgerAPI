@@ -82,7 +82,8 @@ def create_user(user_data):  # função para criar novo usuário
             if cur.fetchone():  # se CPF já existe
                 return (None, "CPF_ALREADY_EXISTS", "Este CPF já está em uso por outra conta.")  # retorna erro de CPF duplicado
 
-        sql = """  # query para inserir novo usuário
+        # query para inserir novo usuário
+        sql = """
             INSERT INTO USERS (FULL_NAME, EMAIL, PASSWORD_HASH, ROLE, DATE_OF_BIRTH, PHONE, CPF) 
             VALUES (?, ?, ?, ?, ?, ?, ?) 
             RETURNING ID;
@@ -353,7 +354,8 @@ def finalize_password_reset(token, new_password):  # função para finalizar rec
         conn = get_db_connection()  # estabelece conexão com banco
         cur = conn.cursor()  # cria cursor para execução de queries
 
-        sql_find_token = """  # query para buscar token
+        # query para buscar token
+        sql_find_token = """
             SELECT USER_ID, EXPIRES_AT, USED_AT
             FROM PASSWORD_RESET_TOKENS
             WHERE TOKEN = ?;
@@ -430,7 +432,7 @@ def get_user_metrics(user_id):  # função para buscar métricas do usuário
         if user_role not in ['attendant', 'manager', 'admin']:  # se não for funcionário
             return None  # retorna None
         
-        cur.execute("""  # query para contar pedidos concluídos
+        cur.execute("""
             SELECT COUNT(*) as total_orders,
                    SUM(TOTAL_AMOUNT) as total_revenue
             FROM ORDERS 
@@ -441,7 +443,7 @@ def get_user_metrics(user_id):  # função para buscar métricas do usuário
         total_orders = order_stats[0] if order_stats and order_stats[0] else 0  # extrai total de pedidos
         total_revenue = float(order_stats[1]) if order_stats and order_stats[1] else 0.0  # extrai receita total
         
-        cur.execute("""  # query para calcular tempo médio de atendimento
+        cur.execute("""
             SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60) as avg_service_time
             FROM ORDERS 
             WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
@@ -450,7 +452,7 @@ def get_user_metrics(user_id):  # função para buscar métricas do usuário
         avg_service_time = cur.fetchone()  # obtém tempo médio
         avg_service_time = round(float(avg_service_time[0]), 1) if avg_service_time and avg_service_time[0] else 0.0  # arredonda tempo médio
         
-        cur.execute("""  # query para contar pedidos em andamento
+        cur.execute("""
             SELECT COUNT(*) 
             FROM ORDERS 
             WHERE ATTENDANT_ID = ? AND STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
