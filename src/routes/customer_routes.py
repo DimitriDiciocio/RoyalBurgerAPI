@@ -187,7 +187,7 @@ def get_loyalty_history_route(user_id):  # função handler do histórico de fid
     history = loyalty_service.get_loyalty_history(user_id)  # busca histórico no serviço
     return jsonify(history), 200  # retorna 200 com histórico
 
-@customer_bp.route('/<int:user_id>/reactivate', methods:['POST'])  # define rota POST para reativar cliente (admin)
+@customer_bp.route('/<int:user_id>/reactivate', methods=['POST'])  # define rota POST para reativar cliente (admin)
 @jwt_required()  # exige autenticação JWT
 def reactivate_customer_route(user_id):  # função handler da reativação de cliente
     claims = get_jwt()  # obtém claims do token
