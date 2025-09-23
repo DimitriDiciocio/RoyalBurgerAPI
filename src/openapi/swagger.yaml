@@ -87,6 +87,16 @@ components:
           type: string
           example: "Mensagem de erro específica"
 
+    VerifyPassword:
+      type: object
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          example: "SenhaForte123"
+          description: "A senha atual do usuário para verificação."
+
     DetailedErrorResponse:
       type: object
       properties:
@@ -966,6 +976,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /customers/me/verify-password:
+    post:
+      summary: Verifica a senha do cliente autenticado.
+      description: Permite que um usuário logado confirme sua senha atual antes de realizar uma ação sensível, como desativar a conta.
+      tags: [Clientes]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyPassword'
+      responses:
+        '200':
+          description: Senha verificada com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Requisição inválida (ex: campo 'password' ausente).
+        '401':
+          description: Senha incorreta.
         "500":
           description: Falha ao deletar conta
           content:

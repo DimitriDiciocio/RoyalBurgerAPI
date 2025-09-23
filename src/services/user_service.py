@@ -146,6 +146,36 @@ def create_user(user_data):
         if conn: conn.close()
 
 
+def verify_user_password(user_id, password):
+    """Verifica se a senha fornecida corresponde ao hash salvo para o usuário.
+
+    Retorna True se a senha estiver correta, caso contrário False. Também retorna False se o usuário não existir.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        sql = "SELECT PASSWORD_HASH FROM USERS WHERE ID = ?;"
+        cur.execute(sql, (user_id,))
+        row = cur.fetchone()
+
+        if not row:
+            return False
+
+        stored_hash = row[0]
+        if not stored_hash:
+            return False
+
+        return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+    except fdb.Error as e:
+        print(f"Erro ao verificar senha do usuário: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
 def get_users_by_role(roles):
     """Busca todos os usuários ativos de determinados papéis."""
     if isinstance(roles, str):

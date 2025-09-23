@@ -140,6 +140,25 @@ def delete_my_account_route():
     return jsonify({"error": "Falha ao excluir conta"}), 500
 
 
+# POST /src/customers/me/verify-password -> Verifica a senha do cliente autenticado
+@customer_bp.route('/me/verify-password', methods=['POST'])
+@jwt_required()
+def verify_my_password_route():
+    data = request.get_json() or {}
+    password = data.get('password')
+
+    if not password:
+        return jsonify({"error": "O campo 'password' é obrigatório"}), 400
+
+    user_id = int(get_jwt_identity())
+
+    is_valid = user_service.verify_user_password(user_id, password)
+    if is_valid:
+        return jsonify({"msg": "Senha verificada com sucesso"}), 200
+    else:
+        return jsonify({"error": "Senha incorreta"}), 401
+
+
 # --- ROTAS DE ENDEREÇO (ADDRESS) ---
 
 # POST /src/customers/<user_id>/addresses -> Cria um novo endereço para o cliente
