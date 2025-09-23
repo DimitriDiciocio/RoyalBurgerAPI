@@ -1,23 +1,17 @@
-# src/database.py
+import fdb  # importa driver do Firebird
+from .config import Config  # importa configurações da aplicação
 
-import fdb
-from .config import Config
-
-def get_db_connection():
-    """
-    Cria e retorna uma nova conexão com o banco de dados Firebird.
-    """
-    try:
-        # CORREÇÃO: Usamos os parâmetros separados em vez de um DSN
-        conn = fdb.connect(
-            host=Config.FIREBIRD_HOST,
-            port=Config.FIREBIRD_PORT,
-            database=Config.DATABASE_PATH,  # Usamos o caminho do arquivo aqui
-            user=Config.FIREBIRD_USER,
-            password=Config.FIREBIRD_PASSWORD,
-            charset='UTF-8'
+def get_db_connection():  # função para criar conexão com o banco
+    try:  # tenta conectar ao banco
+        conn = fdb.connect(  # cria conexão usando parâmetros separados
+            host=Config.FIREBIRD_HOST,  # host do servidor
+            port=Config.FIREBIRD_PORT,  # porta do servidor
+            database=Config.DATABASE_PATH,  # caminho do arquivo do banco
+            user=Config.FIREBIRD_USER,  # usuário de conexão
+            password=Config.FIREBIRD_PASSWORD,  # senha de conexão
+            charset='UTF-8'  # codificação de caracteres
         )
-        return conn
-    except fdb.Error as e:
-        print(f"Erro ao conectar ao Firebird: {e}")
-        return None
+        return conn  # retorna conexão estabelecida
+    except fdb.Error as e:  # captura erros do Firebird
+        print(f"Erro ao conectar ao Firebird: {e}")  # exibe erro no console
+        return None  # retorna None em caso de falha

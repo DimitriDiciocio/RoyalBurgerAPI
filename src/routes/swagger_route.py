@@ -1,33 +1,28 @@
-# packages/api/src/routes/swagger_route.py
+from flask import Blueprint, jsonify, current_app  # importa Blueprint, jsonify e current_app do Flask
+from flask_swagger_ui import get_swaggerui_blueprint  # importa integrador da Swagger UI
+import yaml  # importa parser YAML
+import os  # importa utilidades de sistema
 
-from flask import Blueprint, jsonify, current_app
-from flask_swagger_ui import get_swaggerui_blueprint
-import yaml
-import os
+swagger_bp = Blueprint('swagger', __name__)  # cria o blueprint do Swagger
 
-# 1. O Blueprint para servir o arquivo .yaml continua simples
-swagger_bp = Blueprint('swagger', __name__)
+SWAGGER_URL = '/api/docs'  # URL onde a UI será servida
+API_URL = '/api/docs/swagger.yaml'  # URL do arquivo de especificação
 
-# 2. A configuração da UI agora contém o caminho completo
-SWAGGER_URL = '/api/docs'  # A URL COMPLETA ONDE A UI VAI APARECER
-API_URL = '/api/docs/swagger.yaml'  # A URL COMPLETA para o nosso arquivo de especificação
-
-swaggerui_blueprint = get_swaggerui_blueprint(
+swaggerui_blueprint = get_swaggerui_blueprint(  # configura a Swagger UI
     SWAGGER_URL,
     API_URL,
     config={'app_name': "Royal Burger API Docs"}
 )
 
-# Rota para servir o arquivo swagger.yaml (esta parte continua igual)
-@swagger_bp.route('/swagger.yaml')
-def serve_swagger_yaml():
-    try:
-        root_path = current_app.root_path
-        yaml_path = os.path.join(root_path, 'openapi', 'swagger.yaml')
-        with open(yaml_path, 'r', encoding='utf-8') as f:
-            swagger_spec = yaml.safe_load(f)
-        return jsonify(swagger_spec)
-    except FileNotFoundError:
-        return jsonify({"error": f"Arquivo swagger.yaml não encontrado: {yaml_path}"}), 404
-    except Exception as e:
-        return jsonify({"error": f"Não foi possível carregar o swagger.yaml: {e}"}), 500
+@swagger_bp.route('/swagger.yaml')  # rota para servir o arquivo swagger.yaml
+def serve_swagger_yaml():  # função handler para servir swagger.yaml
+    try:  # tenta carregar o arquivo
+        root_path = current_app.root_path  # raiz do app
+        yaml_path = os.path.join(root_path, 'openapi', 'swagger.yaml')  # caminho do YAML
+        with open(yaml_path, 'r', encoding='utf-8') as f:  # abre arquivo
+            swagger_spec = yaml.safe_load(f)  # carrega YAML
+        return jsonify(swagger_spec)  # retorna JSON da especificação
+    except FileNotFoundError:  # arquivo não encontrado
+        return jsonify({"error": f"Arquivo swagger.yaml não encontrado: {yaml_path}"}), 404  # retorna 404
+    except Exception as e:  # outros erros
+        return jsonify({"error": f"Não foi possível carregar o swagger.yaml: {e}"}), 500  # retorna 500
