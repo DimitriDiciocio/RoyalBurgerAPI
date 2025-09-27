@@ -1,4 +1,4 @@
-# src/services/order_service.py
+
 
 import fdb
 import random
@@ -20,16 +20,16 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
     Cria um novo pedido validando TUDO: horário da loja, disponibilidade de ingredientes, CPF, etc.
     Retorna uma tupla: (order_data, error_code, error_message)
     """
-    # Verificação de loja aberta
+    
     is_open, message = store_service.is_store_open()
     if not is_open:
         return (None, "STORE_CLOSED", message)
 
-    # Validação de CPF
+    
     if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
         return (None, "INVALID_CPF", f"O CPF informado '{cpf_on_invoice}' é inválido.")
 
-    # Validação de dados básicos
+    
     if not items or len(items) == 0:
         return (None, "EMPTY_ORDER", "O pedido deve conter pelo menos um item.")
 
@@ -40,11 +40,11 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # --- INÍCIO DA TRANSAÇÃO ---
+        
 
-        # ... (O RESTO DA SUA FUNÇÃO CONTINUA EXATAMENTE IGUAL) ...
+        
 
-        # ETAPA 1: AGREGAÇÃO E VERIFICAÇÃO DE DISPONIBILIDADE DE INGREDIENTES
+        
         required_ingredients = set()
         product_ids = {item['product_id'] for item in items}
         extra_ingredient_ids = set()
@@ -71,8 +71,8 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
             if unavailable_ingredient:
                 return (None, "INGREDIENT_UNAVAILABLE", f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
 
-        # ETAPAS 2 E 3 ... (TODA A LÓGICA DE PREÇOS, PONTOS E INSERÇÃO NO BANCO)
-        # ...
+        
+        
         sql_get_id = "SELECT GEN_ID(GEN_ORDERS_ID, 1) FROM RDB$DATABASE;"
         cur.execute(sql_get_id)
         new_order_id = cur.fetchone()[0]
@@ -131,10 +131,10 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                     cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_price))
 
         conn.commit()
-        # --- FIM DA TRANSAÇÃO ---
+        
 
         new_order_data = {"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}
-        # ... (código de notificações e e-mails que já temos) ...
+        
 
         return (new_order_data, None, None)
 
@@ -151,7 +151,7 @@ def get_orders_by_user_id(user_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Trazemos também alguns detalhes do endereço para conveniência
+        
         sql = """
             SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, a.STREET, a."NUMBER"
             FROM ORDERS o
@@ -180,7 +180,7 @@ def get_all_orders():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Usamos JOIN para trazer o nome do cliente, enriquecendo o resultado
+        
         sql = """
             SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, u.FULL_NAME
             FROM ORDERS o
@@ -214,7 +214,7 @@ def update_order_status(order_id, new_status):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # --- Início da Transação ---
+        
         sql_update = "UPDATE ORDERS SET STATUS = ? WHERE ID = ?;"
         cur.execute(sql_update, (new_status, order_id))
 
@@ -227,16 +227,16 @@ def update_order_status(order_id, new_status):
                 loyalty_service.add_points_for_order(user_id, order_id, cur)
 
         conn.commit()
-        # --- Fim da Transação ---
+        
 
-        # Notificação para o cliente (fora da transação)
-        # (código da notificação que já implementamos)
+        
+        
         sql_get_user = "SELECT USER_ID FROM ORDERS WHERE ID = ?;"
         cur.execute(sql_get_user, (order_id,))
         result = cur.fetchone()
         if result:
             user_id = result[0]
-            notification_message = f"O status do seu pedido #{order_id} foi atualizado para: {new_status}."
+            notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
             notification_link = f"/my-orders/{order_id}"
             notification_service.create_notification(user_id, notification_message, notification_link)
             customer = user_service.get_user_by_id(user_id)
@@ -268,7 +268,7 @@ def get_order_details(order_id, user_id, user_role):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1. Busca os dados principais do pedido
+        
         sql_order = """
             SELECT ID, USER_ID, ADDRESS_ID, STATUS, CONFIRMATION_CODE, NOTES,
                    PAYMENT_METHOD, CHANGE_FOR_AMOUNT, CPF_ON_INVOICE,
@@ -279,9 +279,9 @@ def get_order_details(order_id, user_id, user_role):
         order_row = cur.fetchone()
 
         if not order_row:
-            return None # Pedido não encontrado
+            return None 
 
-        # Converte a linha do pedido para um dicionário
+        
         order_details = {
             "id": order_row[0], "user_id": order_row[1], "address_id": order_row[2],
             "status": order_row[3], "confirmation_code": order_row[4], "notes": order_row[5],
@@ -290,12 +290,12 @@ def get_order_details(order_id, user_id, user_role):
             "created_at": order_row[10].strftime('%Y-%m-%d %H:%M:%S')
         }
 
-        # 2. VERIFICAÇÃO DE POSSE
-        # Se o usuário é um cliente, ele só pode ver o próprio pedido.
+        
+        
         if user_role == 'customer' and order_details['user_id'] != user_id:
-            return None # Não autorizado, retorna None como se não tivesse encontrado
+            return None 
 
-        # 3. Busca os itens do pedido
+        
         sql_items = """
             SELECT oi.QUANTITY, oi.UNIT_PRICE, p.NAME, p.DESCRIPTION
             FROM ORDER_ITEMS oi
@@ -313,7 +313,7 @@ def get_order_details(order_id, user_id, user_role):
                 "product_description": item_row[3]
             })
 
-        # 4. Adiciona os itens ao dicionário do pedido e retorna
+        
         order_details['items'] = order_items
         return order_details
 
@@ -334,7 +334,7 @@ def cancel_order_by_customer(order_id, user_id):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1. Busca o pedido para verificar o dono e o status
+        
         sql_find = "SELECT USER_ID, STATUS FROM ORDERS WHERE ID = ?;"
         cur.execute(sql_find, (order_id,))
         order_record = cur.fetchone()
@@ -344,22 +344,22 @@ def cancel_order_by_customer(order_id, user_id):
 
         owner_id, status = order_record
 
-        # 2. Verificação de posse
+        
         if owner_id != user_id:
             return (False, "Você não tem permissão para cancelar este pedido.")
 
-        # 3. Verificação de status
+        
         if status != 'pending':
             return (False, f"Não é possível cancelar um pedido que já está com o status '{status}'.")
 
-        # 4. Se todas as verificações passarem, atualiza o status
+        
         sql_update = "UPDATE ORDERS SET STATUS = 'cancelled' WHERE ID = ?;"
         cur.execute(sql_update, (order_id,))
         conn.commit()
 
-        # 5. (Opcional, mas recomendado) Envia notificação e e-mail de cancelamento
+        
         try:
-            message = f"Seu pedido #{order_id} foi cancelado com sucesso."
+            message = f"Seu pedido #{order_id} foi cancelado com sucesso!"
             link = f"/my-orders/{order_id}"
             notification_service.create_notification(user_id, message, link)
 
@@ -368,7 +368,7 @@ def cancel_order_by_customer(order_id, user_id):
                  email_service.send_email(
                     to=customer['email'],
                     subject=f"Seu pedido #{order_id} foi cancelado",
-                    template='order_status_update', # Reutilizamos o template
+                    template='order_status_update', 
                     user=customer,
                     order={"order_id": order_id},
                     new_status='cancelled'

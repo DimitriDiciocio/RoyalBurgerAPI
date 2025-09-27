@@ -1,84 +1,84 @@
-import fdb  # importa driver do Firebird
-from datetime import datetime, date  # importa classes de data
-from ..database import get_db_connection  # importa função de conexão com o banco
+import fdb  
+from datetime import datetime, date  
+from ..database import get_db_connection  
 
-def get_dashboard_metrics():  # função para obter métricas do dashboard
-    conn = None  # inicializa conexão
-    try:  # tenta buscar métricas
-        conn = get_db_connection()  # abre conexão
-        cur = conn.cursor()  # cria cursor
-        today = date.today()  # data atual
+def get_dashboard_metrics():  
+    conn = None  
+    try:  
+        conn = get_db_connection()  
+        cur = conn.cursor()  
+        today = date.today()  
         cur.execute("""
             SELECT COUNT(*) 
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ?
-        """, (today,))  # conta pedidos do dia
-        total_orders_today = cur.fetchone()[0]  # extrai total de pedidos
+        """, (today,))  
+        total_orders_today = cur.fetchone()[0]  
         cur.execute("""
             SELECT COALESCE(SUM(TOTAL_AMOUNT), 0) 
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ? AND STATUS != 'cancelled'
-        """, (today,))  # soma receita do dia (exclui cancelados)
-        revenue_today = float(cur.fetchone()[0])  # extrai receita
+        """, (today,))  
+        revenue_today = float(cur.fetchone()[0])  
         cur.execute("""
             SELECT COALESCE(AVG(TOTAL_AMOUNT), 0) 
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ? AND STATUS != 'cancelled'
-        """, (today,))  # calcula ticket médio do dia
-        average_ticket = float(cur.fetchone()[0])  # extrai ticket médio
+        """, (today,))  
+        average_ticket = float(cur.fetchone()[0])  
         cur.execute("""
             SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60), 0)
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
-        """, (today,))  # calcula tempo médio de preparo em minutos
-        avg_prep_time = float(cur.fetchone()[0])  # extrai tempo médio
+        """, (today,))  
+        avg_prep_time = float(cur.fetchone()[0])  
         cur.execute("""
             SELECT COUNT(*) 
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ? AND STATUS = 'delivered'
-        """, (today,))  # conta pedidos entregues no dia
-        completed_orders = cur.fetchone()[0]  # extrai total entregues
+        """, (today,))  
+        completed_orders = cur.fetchone()[0]  
         cur.execute("""
             SELECT COUNT(*) 
             FROM ORDERS 
             WHERE STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
-        """)  # conta pedidos em andamento
-        ongoing_orders = cur.fetchone()[0]  # extrai total em andamento
+        """)  
+        ongoing_orders = cur.fetchone()[0]  
         cur.execute("""
             SELECT COUNT(*) 
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ? AND STATUS = 'cancelled'
-        """, (today,))  # conta pedidos cancelados no dia
-        cancelled_orders = cur.fetchone()[0]  # extrai total cancelados
+        """, (today,))  
+        cancelled_orders = cur.fetchone()[0]  
         cur.execute("""
             SELECT COUNT(*) 
             FROM INGREDIENTS 
             WHERE CURRENT_STOCK <= MIN_STOCK_THRESHOLD
-        """)  # conta ingredientes com estoque baixo
-        low_stock_items_count = cur.fetchone()[0]  # extrai total com baixo estoque
+        """)  
+        low_stock_items_count = cur.fetchone()[0]  
         cur.execute("""
             SELECT ORDER_TYPE, COUNT(*) 
             FROM ORDERS 
             WHERE DATE(CREATED_AT) = ?
             GROUP BY ORDER_TYPE
-        """, (today,))  # agrupa pedidos por tipo
-        order_distribution = {row[0]: row[1] for row in cur.fetchall()}  # monta distribuição por canal
+        """, (today,))  
+        order_distribution = {row[0]: row[1] for row in cur.fetchall()}  
         cur.execute("""
             SELECT ID, TOTAL_AMOUNT, STATUS, ORDER_TYPE, CREATED_AT
             FROM ORDERS 
             ORDER BY CREATED_AT DESC 
             LIMIT 5
-        """)  # busca últimos 5 pedidos
-        recent_orders = []  # lista de pedidos recentes
-        for row in cur.fetchall():  # itera resultados
-            recent_orders.append({  # monta dicionário do pedido
+        """)  
+        recent_orders = []  
+        for row in cur.fetchall():  
+            recent_orders.append({  
                 "id": row[0],
                 "total_amount": float(row[1]),
                 "status": row[2],
                 "order_type": row[3],
                 "created_at": row[4].isoformat() if row[4] else None
             })
-        return {  # retorna métricas consolidadas
+        return {  
             "total_orders_today": total_orders_today,
             "revenue_today": revenue_today,
             "average_ticket": round(average_ticket, 2),
@@ -90,9 +90,9 @@ def get_dashboard_metrics():  # função para obter métricas do dashboard
             "order_distribution": order_distribution,
             "recent_orders": recent_orders
         }
-    except fdb.Error as e:  # captura erros do banco
-        print(f"Erro ao buscar métricas do dashboard: {e}")  # exibe erro
-        return {  # retorna estrutura padrão em caso de erro
+    except fdb.Error as e:  
+        print(f"Erro ao buscar métricas do dashboard: {e}")  
+        return {  
             "total_orders_today": 0,
             "revenue_today": 0.0,
             "average_ticket": 0.0,
@@ -104,5 +104,5 @@ def get_dashboard_metrics():  # função para obter métricas do dashboard
             "order_distribution": {},
             "recent_orders": []
         }
-    finally:  # sempre executa
-        if conn: conn.close()  # fecha conexão
+    finally:  
+        if conn: conn.close()  

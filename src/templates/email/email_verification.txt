@@ -1,0 +1,21 @@
+🍔 ROYAL BURGER - Verificação de Email
+
+Olá, {{ user.full_name }}!
+
+Para completar a verificação do seu email, use o código abaixo:
+
+CÓDIGO DE VERIFICAÇÃO: {{ verification_code }}
+
+IMPORTANTE:
+- Este código expira em 15 minutos
+- Não compartilhe este código com ninguém
+- Se você não solicitou esta verificação, ignore este email
+
+Se você não conseguir usar este código, você pode solicitar um novo código de verificação.
+
+Atenciosamente,
+Equipe Royal Burger
+
+---
+Este é um email automático, não responda a esta mensagem.
+Royal Burger - Sua lanchonete premium
