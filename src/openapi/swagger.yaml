@@ -27,8 +27,8 @@ info:
     name: MIT
     url: https://opensource.org/licenses/MIT
 
-# Códigos de Erro Comuns
-error_codes:
+# Códigos de Erro Comuns (vendor extension)
+x-error-codes:
   # Autenticação
   USER_NOT_FOUND: "Usuário não encontrado"
   ACCOUNT_INACTIVE: "Conta inativa"
@@ -245,12 +245,6 @@ components:
         user_id:
           type: integer
           example: 1
-        city:
-          type: string
-          example: "São Paulo"
-        neighborhood:
-          type: string
-          example: "Centro"
         street:
           type: string
           example: "Rua das Flores"
@@ -260,23 +254,26 @@ components:
         complement:
           type: string
           example: "Apto 45"
+        neighborhood:
+          type: string
+          example: "Centro"
+        city:
+          type: string
+          example: "São Paulo"
+        state:
+          type: string
+          example: "SP"
         zip_code:
           type: string
           example: "01234-567"
-        is_default:
+        is_active:
           type: boolean
           example: true
 
     NewAddress:
       type: object
-      required: [city, neighborhood, street, number]
+      required: [street, number, neighborhood, city, state]
       properties:
-        city:
-          type: string
-          example: "São Paulo"
-        neighborhood:
-          type: string
-          example: "Centro"
         street:
           type: string
           example: "Rua das Flores"
@@ -286,12 +283,18 @@ components:
         complement:
           type: string
           example: "Apto 45"
+        neighborhood:
+          type: string
+          example: "Centro"
+        city:
+          type: string
+          example: "São Paulo"
+        state:
+          type: string
+          example: "SP"
         zip_code:
           type: string
           example: "01234-567"
-        is_default:
-          type: boolean
-          example: false
 
     Product:
       type: object
@@ -991,16 +994,24 @@ paths:
             schema:
               $ref: '#/components/schemas/VerifyPassword'
       responses:
-        '200':
+        "200":
           description: Senha verificada com sucesso.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageResponse'
-        '400':
-          description: Requisição inválida (ex: campo 'password' ausente).
-        '401':
-          description: Senha incorreta.
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: "Requisição inválida (ex: campo 'password' ausente)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Senha incorreta."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Falha ao deletar conta
           content:
@@ -1063,14 +1074,19 @@ paths:
         "403":
           description: Acesso negado
 
-  /customers/addresses/{address_id}:
+  /customers/{user_id}/addresses/{address_id}:
     put:
       tags: [Endereços]
       summary: Atualizar endereço
-      description: Atualiza um endereço específico
+      description: Atualiza um endereço específico do usuário (apenas endereços ativos)
       security:
         - bearerAuth: []
       parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
         - name: address_id
           in: path
           required: true
@@ -1085,19 +1101,32 @@ paths:
       responses:
         "200":
           description: Endereço atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
         "400":
           description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "403":
           description: Acesso negado
         "404":
           description: Endereço não encontrado
     delete:
       tags: [Endereços]
-      summary: Remover endereço
-      description: Remove um endereço específico
+      summary: Inativar endereço
+      description: Inativa um endereço específico do usuário (soft delete)
       security:
         - bearerAuth: []
       parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
         - name: address_id
           in: path
           required: true

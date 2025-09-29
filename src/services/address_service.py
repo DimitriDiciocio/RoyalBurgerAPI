@@ -2,16 +2,22 @@ import fdb
 from ..database import get_db_connection  
 
 def create_address(user_id, address_data):  
-    fields = ['city', 'neighborhood', 'street', 'number', 'complement', 'reference_point']  
-    values = [address_data.get(field) for field in fields]  
-    values.insert(0, user_id)  
+    # Ordem deve refletir as colunas do INSERT abaixo
+    street = address_data.get('street')  
+    number = address_data.get('number')  
+    complement = address_data.get('complement')  
+    neighborhood = address_data.get('neighborhood')  
+    city = address_data.get('city')  
+    state = address_data.get('state')  
+    zip_code = address_data.get('zip_code')  
+    values = [user_id, street, number, complement, neighborhood, city, state, zip_code]  
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
         sql = """
-            INSERT INTO ADDRESSES (USER_ID, CITY, NEIGHBORHOOD, STREET, "NUMBER", COMPLEMENT, REFERENCE_POINT)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ADDRESSES (USER_ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING ID;
         """  
         cur.execute(sql, tuple(values))  
@@ -19,6 +25,7 @@ def create_address(user_id, address_data):
         conn.commit()  
         address_data['id'] = new_address_id  
         address_data['user_id'] = user_id  
+        address_data['is_active'] = True  
         return address_data  
     except fdb.Error as e:  
         print(f"Erro ao criar endereço: {e}")  
@@ -32,14 +39,19 @@ def get_addresses_by_user_id(user_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = 'SELECT ID, CITY, NEIGHBORHOOD, STREET, "NUMBER", COMPLEMENT, REFERENCE_POINT FROM ADDRESSES WHERE USER_ID = ?;'  
+        sql = 'SELECT ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE FROM ADDRESSES WHERE USER_ID = ? AND IS_ACTIVE = TRUE;'  
         cur.execute(sql, (user_id,))  
         addresses = []  
         for row in cur.fetchall():  
             addresses.append({  
-                "id": row[0], "city": row[1], "neighborhood": row[2],
-                "street": row[3], "number": row[4], "complement": row[5],
-                "reference_point": row[6]
+                "id": row[0],
+                "street": row[1],
+                "number": row[2],
+                "complement": row[3],
+                "neighborhood": row[4],
+                "city": row[5],
+                "state": row[6],
+                "zip_code": row[7]
             })
         return addresses  
     except fdb.Error as e:  
@@ -53,14 +65,21 @@ def get_address_by_id(address_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = 'SELECT ID, USER_ID, CITY, NEIGHBORHOOD, STREET, "NUMBER", COMPLEMENT, REFERENCE_POINT FROM ADDRESSES WHERE ID = ?;'  
+        sql = 'SELECT ID, USER_ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE, IS_ACTIVE FROM ADDRESSES WHERE ID = ?;'  
         cur.execute(sql, (address_id,))  
         row = cur.fetchone()  
         if row:  
             return {  
-                "id": row[0], "user_id": row[1], "city": row[2], "neighborhood": row[3],
-                "street": row[4], "number": row[5], "complement": row[6],
-                "reference_point": row[7]
+                "id": row[0],
+                "user_id": row[1],
+                "street": row[2],
+                "number": row[3],
+                "complement": row[4],
+                "neighborhood": row[5],
+                "city": row[6],
+                "state": row[7],
+                "zip_code": row[8],
+                "is_active": bool(row[9]) if row[9] is not None else True
             }
         return None  
     except fdb.Error as e:  
@@ -70,23 +89,60 @@ def get_address_by_id(address_id):
         if conn: conn.close()  
 
 def update_address(address_id, update_data):  
-    allowed_fields = ['city', 'neighborhood', 'street', 'number', 'complement', 'reference_point']  
-    set_parts = [f'"{key.upper()}" = ?' if key == 'number' else f"{key.upper()} = ?" for key in update_data if key in allowed_fields]  
-    if not set_parts: return False  
-    values = [value for key, value in update_data.items() if key in allowed_fields]  
-    values.append(address_id)  
+    allowed_fields = ['street', 'number', 'complement', 'neighborhood', 'city', 'state', 'zip_code']  
+    column_name_for_key = lambda key: '"NUMBER"' if key == 'number' else key.upper()  
+    # Normalização de valores em branco para None
+    normalized_update = {}
+    for key, value in update_data.items():
+        if key in ['zip_code', 'complement'] and isinstance(value, str) and value.strip() == "":
+            normalized_update[key] = None
+        else:
+            normalized_update[key] = value
+    # Se não há campos permitidos, nada a fazer
+    if not any(k in allowed_fields for k in normalized_update.keys()):
+        return False, None  
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = f"UPDATE ADDRESSES SET {', '.join(set_parts)} WHERE ID = ?;"  
+        # Busca valores atuais para comparação e status
+        cur.execute('SELECT STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE, IS_ACTIVE FROM ADDRESSES WHERE ID = ?;', (address_id,))
+        row = cur.fetchone()
+        if not row:
+            return False, None
+        if row[7] is False:
+            # Não permitir atualização de endereço inativo
+            return False, None
+        current = {
+            'street': row[0],
+            'number': row[1],
+            'complement': row[2],
+            'neighborhood': row[3],
+            'city': row[4],
+            'state': row[5],
+            'zip_code': row[6],
+        }
+        # Compara apenas os campos enviados
+        unchanged = True
+        for key, value in normalized_update.items():
+            if key in allowed_fields:
+                if current.get(key) != value:
+                    unchanged = False
+                    break
+        if unchanged:
+            return True, False
+        # Monta UPDATE apenas para campos fornecidos
+        set_parts = [f"{column_name_for_key(key)} = ?" for key in normalized_update if key in allowed_fields]
+        values = [normalized_update[key] for key in normalized_update if key in allowed_fields]
+        values.append(address_id)
+        sql = f"UPDATE ADDRESSES SET {', '.join(set_parts)} WHERE ID = ? AND IS_ACTIVE = TRUE;"  
         cur.execute(sql, tuple(values))  
         conn.commit()  
-        return cur.rowcount > 0  
+        return True, True  
     except fdb.Error as e:  
         print(f"Erro ao atualizar endereço: {e}")  
         if conn: conn.rollback()  
-        return False  
+        return False, None  
     finally:  
         if conn: conn.close()  
 
@@ -95,10 +151,19 @@ def delete_address(address_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = "DELETE FROM ADDRESSES WHERE ID = ?;"  
+        sql = "UPDATE ADDRESSES SET IS_ACTIVE = FALSE WHERE ID = ? AND IS_ACTIVE = TRUE;"  
         cur.execute(sql, (address_id,))  
+        affected = cur.rowcount  
         conn.commit()  
-        return cur.rowcount > 0  
+        if affected and affected > 0:
+            return True
+        # Se já estava inativo ou não existe, considere sucesso idempotente
+        cur = conn.cursor()
+        cur.execute('SELECT IS_ACTIVE FROM ADDRESSES WHERE ID = ?;', (address_id,))
+        row = cur.fetchone()
+        if not row:
+            return True
+        return row[0] is False  
     except fdb.Error as e:  
         print(f"Erro ao deletar endereço: {e}")  
         if conn: conn.rollback()  

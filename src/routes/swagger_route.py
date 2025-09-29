@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, current_app  
+from flask import Blueprint, jsonify, current_app, send_file  
 from flask_swagger_ui import get_swaggerui_blueprint  
 import yaml  
 import os  
@@ -19,9 +19,8 @@ def serve_swagger_yaml():
     try:  
         root_path = current_app.root_path  
         yaml_path = os.path.join(root_path, 'openapi', 'swagger.yaml')  
-        with open(yaml_path, 'r', encoding='utf-8') as f:  
-            swagger_spec = yaml.safe_load(f)  
-        return jsonify(swagger_spec)  
+        # Envia o arquivo bruto para o Swagger UI interpretar (YAML é suportado nativamente)
+        return send_file(yaml_path, mimetype='application/x-yaml')  
     except FileNotFoundError:  
         return jsonify({"error": f"Arquivo swagger.yaml não encontrado: {yaml_path}"}), 404  
     except Exception as e:  

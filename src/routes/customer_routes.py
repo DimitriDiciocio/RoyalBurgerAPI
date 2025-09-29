@@ -113,12 +113,27 @@ def add_address_route(user_id):
     if int(claims.get('sub')) != user_id:  
         return jsonify({"msg": "Acesso não autorizado"}), 403  
     data = request.get_json()  
-    if not data or not all(k in data for k in ['city', 'neighborhood', 'street', 'number']):  
-        return jsonify({"error": "Campos obrigatórios: city, neighborhood, street, number"}), 400  
+    # Validação de campos obrigatórios (zip_code e complement são opcionais)
+    required_fields = ['street', 'number', 'neighborhood', 'city', 'state']
+    if not data:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    missing = [f for f in required_fields if not data.get(f)]
+    if missing:
+        return jsonify({"error": f"Campos obrigatórios ausentes: {', '.join(missing)}"}), 400
+    # Validações de formato
+    state = (data.get('state') or '').strip()
+    if len(state) != 2:
+        return jsonify({"error": "O campo state deve possuir 2 caracteres (UF)."}), 400
+    zip_code = data.get('zip_code')
+    if zip_code is not None and isinstance(zip_code, str) and zip_code.strip() == "":
+        data['zip_code'] = None
+    complement = data.get('complement')
+    if complement is not None and isinstance(complement, str) and complement.strip() == "":
+        data['complement'] = None
     new_address = address_service.create_address(user_id, data)  
     if new_address:  
         return jsonify(new_address), 201  
-    return jsonify({"error": "Não foi possível adicionar o endereço"}), 500  
+    return jsonify({"error": "Não foi possível adicionar o endereço"}), 500
 
 @customer_bp.route('/<int:user_id>/addresses', methods=['GET'])  
 @jwt_required()  
@@ -129,26 +144,49 @@ def get_addresses_route(user_id):
     addresses = address_service.get_addresses_by_user_id(user_id)  
     return jsonify(addresses), 200  
 
-@customer_bp.route('/addresses/<int:address_id>', methods=['PUT'])  
+@customer_bp.route('/<int:user_id>/addresses/<int:address_id>', methods=['PUT'])  
 @jwt_required()  
-def update_address_route(address_id):  
+def update_address_route(user_id, address_id):  
     claims = get_jwt()  
+    if int(claims.get('sub')) != user_id:  
+        return jsonify({"msg": "Acesso não autorizado"}), 403  
     address = address_service.get_address_by_id(address_id)  
-    if not address or address.get('user_id') != int(claims.get('sub')):  
+    if not address or address.get('user_id') != user_id or not address.get('is_active', True):  
         return jsonify({"msg": "Endereço não encontrado ou acesso não autorizado"}), 404  
     data = request.get_json()  
     if not data:  
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400  
-    if address_service.update_address(address_id, data):  
-        return jsonify({"msg": "Endereço atualizado com sucesso"}), 200  
+    # Se qualquer campo essencial for enviado, exija todos (PUT semântico de substituição)
+    core_fields = ['street', 'number', 'neighborhood', 'city', 'state']
+    any_core_present = any(k in data for k in core_fields)
+    if any_core_present:
+        missing = [f for f in core_fields if not data.get(f)]
+        if missing:
+            return jsonify({"error": f"Campos obrigatórios ausentes: {', '.join(missing)}"}), 400
+        state = (data.get('state') or '').strip()
+        if len(state) != 2:
+            return jsonify({"error": "O campo state deve possuir 2 caracteres (UF)."}), 400
+    # Normaliza opcionais vazios para null
+    if 'zip_code' in data and isinstance(data.get('zip_code'), str) and data.get('zip_code').strip() == "":
+        data['zip_code'] = None
+    if 'complement' in data and isinstance(data.get('complement'), str) and data.get('complement').strip() == "":
+        data['complement'] = None
+    success, changed = address_service.update_address(address_id, data)  
+    if success:
+        if changed:
+            return jsonify({"msg": "Endereço atualizado com sucesso"}), 200  
+        else:
+            return jsonify({"msg": "Nenhuma alteração aplicada"}), 200  
     return jsonify({"error": "Falha ao atualizar endereço"}), 500  
 
-@customer_bp.route('/addresses/<int:address_id>', methods=['DELETE'])  
+@customer_bp.route('/<int:user_id>/addresses/<int:address_id>', methods=['DELETE'])  
 @jwt_required()  
-def delete_address_route(address_id):  
+def delete_address_route(user_id, address_id):  
     claims = get_jwt()  
+    if int(claims.get('sub')) != user_id:  
+        return jsonify({"msg": "Acesso não autorizado"}), 403  
     address = address_service.get_address_by_id(address_id)  
-    if not address or address.get('user_id') != int(claims.get('sub')):  
+    if not address or address.get('user_id') != user_id or not address.get('is_active', True):  
         return jsonify({"msg": "Endereço não encontrado ou acesso não autorizado"}), 404  
     if address_service.delete_address(address_id):  
         return jsonify({"msg": "Endereço deletado com sucesso"}), 200  
