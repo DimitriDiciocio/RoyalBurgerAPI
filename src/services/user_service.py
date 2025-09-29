@@ -338,13 +338,24 @@ def initiate_password_reset(email):
 
             reset_link = f"http://localhost:5173/reset-password?token={token}"
 
-            email_service.send_email(
-                to=email,
-                subject="Recuperação de Senha - Royal Burger",
-                template='password_reset',
-                user={"full_name": full_name},
-                reset_link=reset_link
-            )
+            # Busca telefone do usuário para enviar SMS
+            sql_phone = "SELECT PHONE FROM USERS WHERE EMAIL = ?"
+            cur.execute(sql_phone, (email,))
+            phone_result = cur.fetchone()
+            
+            if phone_result and phone_result[0]:
+                phone = phone_result[0]
+                # Valida e formata o telefone
+                from .sms_service import validate_phone_number, send_password_reset_sms
+                is_valid, formatted_phone = validate_phone_number(phone)
+                if is_valid:
+                    success, error_code, message = send_password_reset_sms(formatted_phone, token, full_name)
+                    if not success:
+                        print(f"Erro ao enviar SMS de recuperação: {message}")
+                else:
+                    print(f"Telefone inválido para SMS: {phone}")
+            else:
+                print(f"Usuário {email} não possui telefone cadastrado para SMS")
 
         return True
 

@@ -29,7 +29,7 @@ def authenticate(email, password):
             if not success:
                 return (None, error_code, message)
             
-            return ({"requires_2fa": True, "user_id": user_id}, None, "Código de verificação enviado para seu email")
+            return ({"requires_2fa": True, "user_id": user_id}, None, "Código de verificação enviado por SMS")
         
         # Login normal sem 2FA
         identity = str(user_id)  

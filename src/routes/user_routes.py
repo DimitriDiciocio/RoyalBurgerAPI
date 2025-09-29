@@ -51,7 +51,7 @@ def request_password_reset_route():
     if not email:
         return jsonify({"error": "O campo 'email' é obrigatório"}), 400
     user_service.initiate_password_reset(email)
-    return jsonify({"msg": "Se um usuário com este e-mail existir, um link de recuperação foi enviado."}), 200
+        return jsonify({"msg": "Se um usuário com este e-mail existir, um código de recuperação foi enviado por SMS."}), 200
 
 
 @user_bp.route('/reset-password', methods=['POST'])
@@ -180,12 +180,18 @@ def request_email_verification_route():
     success, error_code, message = email_verification_service.create_email_verification(email)
 
     if success:
-        return jsonify({"msg": "Código de verificação enviado com sucesso"}), 200
+        return jsonify({"msg": "Código de verificação enviado por SMS"}), 200
     else:
         if error_code == "USER_NOT_FOUND":
             return jsonify({"error": "Usuário não encontrado"}), 404
         elif error_code == "EMAIL_ALREADY_VERIFIED":
             return jsonify({"error": "Este email já foi verificado"}), 400
+        elif error_code == "SMS_ERROR":
+            return jsonify({"error": "Erro ao enviar SMS"}), 500
+        elif error_code == "INVALID_PHONE":
+            return jsonify({"error": "Número de telefone inválido"}), 400
+        elif error_code == "NO_PHONE":
+            return jsonify({"error": "Usuário não possui telefone cadastrado"}), 400
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": "Erro interno do servidor"}), 500
         else:
@@ -232,12 +238,18 @@ def resend_verification_code_route():
     success, error_code, message = email_verification_service.resend_verification_code(email)
 
     if success:
-        return jsonify({"msg": "Novo código de verificação enviado com sucesso"}), 200
+        return jsonify({"msg": "Novo código de verificação enviado por SMS"}), 200
     else:
         if error_code == "USER_NOT_FOUND":
             return jsonify({"error": "Usuário não encontrado"}), 404
         elif error_code == "EMAIL_ALREADY_VERIFIED":
             return jsonify({"error": "Este email já foi verificado"}), 400
+        elif error_code == "SMS_ERROR":
+            return jsonify({"error": "Erro ao enviar SMS"}), 500
+        elif error_code == "INVALID_PHONE":
+            return jsonify({"error": "Número de telefone inválido"}), 400
+        elif error_code == "NO_PHONE":
+            return jsonify({"error": "Usuário não possui telefone cadastrado"}), 400
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": "Erro interno do servidor"}), 500
         else:
@@ -314,6 +326,12 @@ def verify_2fa_route():
                 return jsonify({"error": "Código de verificação expirado"}), 400
             elif error_code == "INVALID_CODE":
                 return jsonify({"error": "Código de verificação inválido"}), 400
+            elif error_code == "SMS_ERROR":
+                return jsonify({"error": "Erro ao enviar SMS"}), 500
+            elif error_code == "INVALID_PHONE":
+                return jsonify({"error": "Número de telefone inválido"}), 400
+            elif error_code == "NO_PHONE":
+                return jsonify({"error": "Usuário não possui telefone cadastrado"}), 400
             elif error_code == "DATABASE_ERROR":
                 return jsonify({"error": "Erro interno do servidor"}), 500
             else:

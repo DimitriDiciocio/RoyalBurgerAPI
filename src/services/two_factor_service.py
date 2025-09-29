@@ -3,14 +3,14 @@ import random
 import string
 from datetime import datetime, timedelta
 from ..database import get_db_connection
-from . import email_service
+from . import sms_service
 
 def generate_2fa_code():
     """Gera código de 6 dígitos para 2FA"""
     return ''.join(random.choices(string.digits, k=6))
 
 def create_2fa_verification(user_id, email):
-    """Cria código de verificação 2FA e envia por email"""
+    """Cria código de verificação 2FA e envia por SMS"""
     verification_code = generate_2fa_code()
     expires_at = datetime.now() + timedelta(minutes=10)  # 10 minutos para 2FA
     
@@ -32,21 +32,28 @@ def create_2fa_verification(user_id, email):
         cur.execute(sql_insert, (user_id, verification_code, expires_at, created_at))
         conn.commit()
         
-        # Busca dados do usuário para o email
-        sql_user = "SELECT FULL_NAME FROM USERS WHERE ID = ?"
+        # Busca dados do usuário para o SMS
+        sql_user = "SELECT FULL_NAME, PHONE FROM USERS WHERE ID = ?"
         cur.execute(sql_user, (user_id,))
         user_data = cur.fetchone()
         
         if user_data:
-            email_service.send_email(
-                to=email,
-                subject="Código de Verificação - Royal Burger",
-                template='two_factor_verification',
-                user={'full_name': user_data[0]},
-                verification_code=verification_code
-            )
+            full_name, phone = user_data
+            if phone:
+                # Valida e formata o telefone
+                is_valid, formatted_phone = sms_service.validate_phone_number(phone)
+                if is_valid:
+                    success, error_code, message = sms_service.send_2fa_sms(formatted_phone, verification_code, full_name)
+                    if success:
+                        return (True, None, "Código de verificação enviado por SMS")
+                    else:
+                        return (False, "SMS_ERROR", "Erro ao enviar SMS")
+                else:
+                    return (False, "INVALID_PHONE", "Número de telefone inválido")
+            else:
+                return (False, "NO_PHONE", "Usuário não possui telefone cadastrado")
         
-        return (True, None, "Código de verificação enviado")
+        return (False, "USER_NOT_FOUND", "Usuário não encontrado")
         
     except fdb.Error as e:
         print(f"Erro ao criar verificação 2FA: {e}")

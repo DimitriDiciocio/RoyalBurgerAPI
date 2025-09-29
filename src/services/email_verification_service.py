@@ -3,7 +3,7 @@ import random
 import string
 from datetime import datetime, timedelta
 from ..database import get_db_connection
-from . import email_service
+from . import sms_service
 
 def generate_verification_code():
     return ''.join(random.choices(string.digits, k=6))
@@ -35,15 +35,25 @@ def create_email_verification(email):
         cur.execute(sql_insert, (email, verification_code, expires_at, created_at))
         conn.commit()
         
-        email_service.send_email(
-            to=email,
-            subject="Código de Verificação - Royal Burger",
-            template='email_verification',
-            user={'full_name': user['full_name']},
-            verification_code=verification_code
-        )
+        # Busca telefone do usuário para enviar SMS
+        sql_phone = "SELECT PHONE FROM USERS WHERE EMAIL = ?"
+        cur.execute(sql_phone, (email,))
+        phone_result = cur.fetchone()
         
-        return (True, None, "Código de verificação enviado com sucesso")
+        if phone_result and phone_result[0]:
+            phone = phone_result[0]
+            # Valida e formata o telefone
+            is_valid, formatted_phone = sms_service.validate_phone_number(phone)
+            if is_valid:
+                success, error_code, message = sms_service.send_email_verification_sms(formatted_phone, verification_code, user['full_name'])
+                if success:
+                    return (True, None, "Código de verificação enviado por SMS")
+                else:
+                    return (False, "SMS_ERROR", "Erro ao enviar SMS")
+            else:
+                return (False, "INVALID_PHONE", "Número de telefone inválido")
+        else:
+            return (False, "NO_PHONE", "Usuário não possui telefone cadastrado")
         
     except fdb.Error as e:
         print(f"Erro ao criar verificação de email: {e}")
