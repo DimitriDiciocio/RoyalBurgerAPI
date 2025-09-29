@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ..services import user_service, auth_service, email_verification_service
+from ..services import user_service, auth_service, email_verification_service, two_factor_service
 from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone
@@ -14,11 +14,24 @@ def login_route():
     password = data.get('password')
     if not email or not password:
         return jsonify({"error": "E-mail e senha são obrigatórios"}), 400
-    token, error_code, error_message = auth_service.authenticate(email, password)
-    if token:
+    
+    result, error_code, error_message = auth_service.authenticate(email, password)
+    
+    # Se retornou um dicionário com requires_2fa, significa que 2FA está habilitado
+    if isinstance(result, dict) and result.get('requires_2fa'):
+        return jsonify({
+            "requires_2fa": True, 
+            "user_id": result['user_id'], 
+            "message": error_message
+        }), 200
+    
+    # Login normal (sem 2FA ou 2FA desabilitado)
+    if result and isinstance(result, str):  # result é o token
         user = user_service.get_user_by_email(email)
         full_name = user.get('full_name', 'Usuário') if user else 'Usuário'
-        return jsonify({"access_token": token, "message": f"Bem-vindo, {full_name}", "user": user}), 200
+        return jsonify({"access_token": result, "message": f"Bem-vindo, {full_name}", "user": user}), 200
+    
+    # Tratamento de erros
     if error_code == "USER_NOT_FOUND":
         return jsonify({"error": "E-mail ou senha incorretos"}), 404
     elif error_code == "ACCOUNT_INACTIVE":
@@ -278,3 +291,78 @@ def change_password_route():
             return jsonify({"error": message}), 500
         else:
             return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/verify-2fa', methods=['POST'])
+def verify_2fa_route():
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        code = data.get('code')
+        
+        if not user_id or not code:
+            return jsonify({"error": "user_id e code são obrigatórios"}), 400
+        
+        token, error_code, message = auth_service.verify_2fa_and_login(user_id, code)
+        
+        if error_code:
+            if error_code == "NO_VERIFICATION_FOUND":
+                return jsonify({"error": "Nenhum código de verificação encontrado"}), 404
+            elif error_code == "CODE_ALREADY_USED":
+                return jsonify({"error": "Código já foi utilizado"}), 400
+            elif error_code == "CODE_EXPIRED":
+                return jsonify({"error": "Código de verificação expirado"}), 400
+            elif error_code == "INVALID_CODE":
+                return jsonify({"error": "Código de verificação inválido"}), 400
+            elif error_code == "DATABASE_ERROR":
+                return jsonify({"error": "Erro interno do servidor"}), 500
+            else:
+                return jsonify({"error": message}), 400
+        
+        # Busca dados do usuário para retornar na resposta
+        user = user_service.get_user_by_id(user_id)
+        full_name = user.get('full_name', 'Usuário') if user else 'Usuário'
+        
+        return jsonify({
+            "access_token": token, 
+            "message": f"Bem-vindo, {full_name}",
+            "user": user
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro na verificação 2FA: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/toggle-2fa', methods=['POST'])
+@jwt_required()
+def toggle_2fa_route():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
+        enable = data.get('enable', False)
+        
+        success, error_code, message = two_factor_service.toggle_2fa(user_id, enable)
+        
+        if error_code:
+            return jsonify({"error": message}), 400
+        
+        return jsonify({"message": message}), 200
+        
+    except Exception as e:
+        print(f"Erro ao alterar 2FA: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/2fa-status', methods=['GET'])
+@jwt_required()
+def get_2fa_status_route():
+    try:
+        user_id = get_jwt_identity()
+        is_enabled = two_factor_service.is_2fa_enabled(user_id)
+        
+        return jsonify({"two_factor_enabled": is_enabled}), 200
+        
+    except Exception as e:
+        print(f"Erro ao verificar status 2FA: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500

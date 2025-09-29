@@ -1,0 +1,20 @@
+ROYAL BURGER - Código de Verificação de Dois Fatores
+
+Olá, {{ user.full_name }}!
+
+Você solicitou o login em sua conta. Para sua segurança, precisamos verificar sua identidade.
+
+Seu código de verificação é: {{ verification_code }}
+
+IMPORTANTE:
+- Este código expira em 10 minutos
+- Não compartilhe este código com ninguém
+- Se você não solicitou este código, ignore este email
+
+Digite este código na tela de login para completar sua autenticação.
+
+Obrigado por usar o Royal Burger!
+
+---
+Este é um email automático, não responda a esta mensagem.
+© 2024 Royal Burger - Todos os direitos reservados
