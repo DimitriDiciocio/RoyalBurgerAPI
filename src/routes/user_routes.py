@@ -37,6 +37,8 @@ def login_route():
         return jsonify({"error": "E-mail ou senha incorretos"}), 404
     elif error_code == "ACCOUNT_INACTIVE":
         return jsonify({"error": error_message}), 403
+    elif error_code == "EMAIL_NOT_VERIFIED":
+        return jsonify({"requires_email_verification": True, "error": error_message}), 403
     elif error_code == "INVALID_PASSWORD":
         return jsonify({"error": "E-mail ou senha incorretos"}), 401
     elif error_code == "DATABASE_ERROR":

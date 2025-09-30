@@ -11,16 +11,22 @@ def authenticate(email, password):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql_check_user = "SELECT ID, PASSWORD_HASH, ROLE, FULL_NAME, IS_ACTIVE, TWO_FACTOR_ENABLED FROM USERS WHERE EMAIL = ?;"  
+        sql_check_user = (
+            "SELECT ID, PASSWORD_HASH, ROLE, FULL_NAME, IS_ACTIVE, TWO_FACTOR_ENABLED, IS_EMAIL_VERIFIED "
+            "FROM USERS WHERE EMAIL = ?;"
+        )  
         cur.execute(sql_check_user, (email,))  
         user_record = cur.fetchone()  
         if not user_record:  
             return (None, "USER_NOT_FOUND", "Usuário não encontrado")  
-        user_id, hashed_password, role, full_name, is_active, two_factor_enabled = user_record  
+        user_id, hashed_password, role, full_name, is_active, two_factor_enabled, is_email_verified = user_record  
         if not is_active:  
             return (None, "ACCOUNT_INACTIVE", "Sua conta está inativa. Entre em contato com o suporte para reativá-la.")  
         if not bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8')):  
             return (None, "INVALID_PASSWORD", "Senha incorreta")  
+        # Bloqueia login se e-mail não verificado
+        if not is_email_verified:
+            return (None, "EMAIL_NOT_VERIFIED", "E-mail não verificado. Verifique seu e-mail para continuar.")
         
         # Se 2FA está habilitado, retorna status especial
         if two_factor_enabled:
