@@ -113,8 +113,8 @@ def add_address_route(user_id):
     if int(claims.get('sub')) != user_id:  
         return jsonify({"msg": "Acesso não autorizado"}), 403  
     data = request.get_json()  
-    # Validação de campos obrigatórios (zip_code e complement são opcionais)
-    required_fields = ['street', 'number', 'neighborhood', 'city', 'state']
+    # Validação de campos obrigatórios (number e complement são opcionais)
+    required_fields = ['street', 'neighborhood', 'city', 'state', 'zip_code']
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
     missing = [f for f in required_fields if not data.get(f)]
@@ -124,12 +124,16 @@ def add_address_route(user_id):
     state = (data.get('state') or '').strip()
     if len(state) != 2:
         return jsonify({"error": "O campo state deve possuir 2 caracteres (UF)."}), 400
-    zip_code = data.get('zip_code')
-    if zip_code is not None and isinstance(zip_code, str) and zip_code.strip() == "":
-        data['zip_code'] = None
+    # zip_code obrigatório: não aceitar vazio
+    zip_code = (data.get('zip_code') or '').strip()
+    if not zip_code:
+        return jsonify({"error": "O campo zip_code é obrigatório."}), 400
     complement = data.get('complement')
     if complement is not None and isinstance(complement, str) and complement.strip() == "":
         data['complement'] = None
+    # number é opcional: vazio vira null
+    if 'number' in data and isinstance(data.get('number'), str) and data.get('number').strip() == "":
+        data['number'] = None
     new_address = address_service.create_address(user_id, data)  
     if new_address:  
         return jsonify(new_address), 201  
@@ -157,7 +161,8 @@ def update_address_route(user_id, address_id):
     if not data:  
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400  
     # Se qualquer campo essencial for enviado, exija todos (PUT semântico de substituição)
-    core_fields = ['street', 'number', 'neighborhood', 'city', 'state']
+    # Campos essenciais: street, neighborhood, city, state, zip_code (number e complement são opcionais)
+    core_fields = ['street', 'neighborhood', 'city', 'state', 'zip_code']
     any_core_present = any(k in data for k in core_fields)
     if any_core_present:
         missing = [f for f in core_fields if not data.get(f)]
@@ -167,10 +172,10 @@ def update_address_route(user_id, address_id):
         if len(state) != 2:
             return jsonify({"error": "O campo state deve possuir 2 caracteres (UF)."}), 400
     # Normaliza opcionais vazios para null
-    if 'zip_code' in data and isinstance(data.get('zip_code'), str) and data.get('zip_code').strip() == "":
-        data['zip_code'] = None
     if 'complement' in data and isinstance(data.get('complement'), str) and data.get('complement').strip() == "":
         data['complement'] = None
+    if 'number' in data and isinstance(data.get('number'), str) and data.get('number').strip() == "":
+        data['number'] = None
     success, changed = address_service.update_address(address_id, data)  
     if success:
         if changed:
