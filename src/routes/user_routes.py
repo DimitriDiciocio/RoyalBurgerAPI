@@ -51,7 +51,7 @@ def request_password_reset_route():
     if not email:
         return jsonify({"error": "O campo 'email' é obrigatório"}), 400
     user_service.initiate_password_reset(email)
-        return jsonify({"msg": "Se um usuário com este e-mail existir, um código de recuperação foi enviado por SMS."}), 200
+    return jsonify({"msg": "Se um usuário com este e-mail existir, um código de recuperação foi enviado por SMS."}), 200
 
 
 @user_bp.route('/reset-password', methods=['POST'])

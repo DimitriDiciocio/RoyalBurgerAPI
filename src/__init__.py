@@ -1,7 +1,9 @@
 from flask import Flask  
+from dotenv import load_dotenv  
 from flask_jwt_extended import JWTManager  
 from flask_socketio import SocketIO  
 from flask_mail import Mail  
+load_dotenv()  
 from .config import Config  
 import src.services.auth_service as auth_service  
 from flask_cors import CORS  
