@@ -22,10 +22,14 @@ def create_address(user_id, address_data):
         """  
         cur.execute(sql, tuple(values))  
         new_address_id = cur.fetchone()[0]  
+        # Define o novo endereço como padrão e desmarca os demais do usuário
+        cur.execute("UPDATE ADDRESSES SET IS_DEFAULT = FALSE WHERE USER_ID = ? AND ID <> ?;", (user_id, new_address_id))
+        cur.execute("UPDATE ADDRESSES SET IS_DEFAULT = TRUE WHERE ID = ?;", (new_address_id,))
         conn.commit()  
         address_data['id'] = new_address_id  
         address_data['user_id'] = user_id  
         address_data['is_active'] = True  
+        address_data['is_default'] = True  
         return address_data  
     except fdb.Error as e:  
         print(f"Erro ao criar endereço: {e}")  
@@ -39,7 +43,7 @@ def get_addresses_by_user_id(user_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = 'SELECT ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE FROM ADDRESSES WHERE USER_ID = ? AND IS_ACTIVE = TRUE;'  
+        sql = 'SELECT ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE, IS_ACTIVE, IS_DEFAULT FROM ADDRESSES WHERE USER_ID = ? AND IS_ACTIVE = TRUE;'  
         cur.execute(sql, (user_id,))  
         addresses = []  
         for row in cur.fetchall():  
@@ -51,7 +55,9 @@ def get_addresses_by_user_id(user_id):
                 "neighborhood": row[4],
                 "city": row[5],
                 "state": row[6],
-                "zip_code": row[7]
+                "zip_code": row[7],
+                "is_active": bool(row[8]) if row[8] is not None else True,
+                "is_default": bool(row[9]) if row[9] is not None else False,
             })
         return addresses  
     except fdb.Error as e:  
@@ -65,7 +71,7 @@ def get_address_by_id(address_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = 'SELECT ID, USER_ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE, IS_ACTIVE FROM ADDRESSES WHERE ID = ?;'  
+        sql = 'SELECT ID, USER_ID, STREET, "NUMBER", COMPLEMENT, NEIGHBORHOOD, CITY, STATE, ZIP_CODE, IS_ACTIVE, IS_DEFAULT FROM ADDRESSES WHERE ID = ?;'  
         cur.execute(sql, (address_id,))  
         row = cur.fetchone()  
         if row:  
@@ -79,7 +85,8 @@ def get_address_by_id(address_id):
                 "city": row[6],
                 "state": row[7],
                 "zip_code": row[8],
-                "is_active": bool(row[9]) if row[9] is not None else True
+                "is_active": bool(row[9]) if row[9] is not None else True,
+                "is_default": bool(row[10]) if row[10] is not None else False,
             }
         return None  
     except fdb.Error as e:  
