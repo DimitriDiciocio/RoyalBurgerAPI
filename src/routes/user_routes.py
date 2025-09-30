@@ -12,6 +12,7 @@ def login_route():
     data = request.get_json()
     email = data.get('email')
     password = data.get('password')
+    # SMS removido: sempre e-mail
     if not email or not password:
         return jsonify({"error": "E-mail e senha são obrigatórios"}), 400
     
@@ -48,10 +49,11 @@ def login_route():
 def request_password_reset_route():
     data = request.get_json()
     email = data.get('email')
+    # SMS removido: sempre e-mail
     if not email:
         return jsonify({"error": "O campo 'email' é obrigatório"}), 400
     user_service.initiate_password_reset(email)
-    return jsonify({"msg": "Se um usuário com este e-mail existir, um código de recuperação foi enviado por SMS."}), 200
+    return jsonify({"msg": "Se um usuário com este e-mail existir, um e-mail de recuperação foi enviado."}), 200
 
 
 @user_bp.route('/reset-password', methods=['POST'])
@@ -180,18 +182,13 @@ def request_email_verification_route():
     success, error_code, message = email_verification_service.create_email_verification(email)
 
     if success:
-        return jsonify({"msg": "Código de verificação enviado por SMS"}), 200
+        return jsonify({"msg": "Código de verificação enviado por e-mail"}), 200
     else:
         if error_code == "USER_NOT_FOUND":
             return jsonify({"error": "Usuário não encontrado"}), 404
         elif error_code == "EMAIL_ALREADY_VERIFIED":
             return jsonify({"error": "Este email já foi verificado"}), 400
-        elif error_code == "SMS_ERROR":
-            return jsonify({"error": "Erro ao enviar SMS"}), 500
-        elif error_code == "INVALID_PHONE":
-            return jsonify({"error": "Número de telefone inválido"}), 400
-        elif error_code == "NO_PHONE":
-            return jsonify({"error": "Usuário não possui telefone cadastrado"}), 400
+        
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": "Erro interno do servidor"}), 500
         else:
@@ -238,18 +235,13 @@ def resend_verification_code_route():
     success, error_code, message = email_verification_service.resend_verification_code(email)
 
     if success:
-        return jsonify({"msg": "Novo código de verificação enviado por SMS"}), 200
+        return jsonify({"msg": "Novo código de verificação enviado por e-mail"}), 200
     else:
         if error_code == "USER_NOT_FOUND":
             return jsonify({"error": "Usuário não encontrado"}), 404
         elif error_code == "EMAIL_ALREADY_VERIFIED":
             return jsonify({"error": "Este email já foi verificado"}), 400
-        elif error_code == "SMS_ERROR":
-            return jsonify({"error": "Erro ao enviar SMS"}), 500
-        elif error_code == "INVALID_PHONE":
-            return jsonify({"error": "Número de telefone inválido"}), 400
-        elif error_code == "NO_PHONE":
-            return jsonify({"error": "Usuário não possui telefone cadastrado"}), 400
+        
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": "Erro interno do servidor"}), 500
         else:
@@ -326,12 +318,7 @@ def verify_2fa_route():
                 return jsonify({"error": "Código de verificação expirado"}), 400
             elif error_code == "INVALID_CODE":
                 return jsonify({"error": "Código de verificação inválido"}), 400
-            elif error_code == "SMS_ERROR":
-                return jsonify({"error": "Erro ao enviar SMS"}), 500
-            elif error_code == "INVALID_PHONE":
-                return jsonify({"error": "Número de telefone inválido"}), 400
-            elif error_code == "NO_PHONE":
-                return jsonify({"error": "Usuário não possui telefone cadastrado"}), 400
+            
             elif error_code == "DATABASE_ERROR":
                 return jsonify({"error": "Erro interno do servidor"}), 500
             else:
@@ -356,19 +343,42 @@ def verify_2fa_route():
 @jwt_required()
 def toggle_2fa_route():
     try:
-        user_id = get_jwt_identity()
+        user_id = int(get_jwt_identity())
         data = request.get_json()
         enable = data.get('enable', False)
-        
-        success, error_code, message = two_factor_service.toggle_2fa(user_id, enable)
-        
-        if error_code:
-            return jsonify({"error": message}), 400
-        
-        return jsonify({"message": message}), 200
-        
+        # SMS removido
+
+        if enable:
+            # Passo 1: enviar código pelo canal escolhido
+            success, error_code, message = two_factor_service.create_2fa_verification(user_id, None)
+            if not success:
+                return jsonify({"error": message}), 400
+            return jsonify({"message": message, "requires_confirmation": True}), 200
+        else:
+            # Desabilitar diretamente
+            success, error_code, message = two_factor_service.toggle_2fa(user_id, False)
+            if not success:
+                return jsonify({"error": message}), 400
+            return jsonify({"message": message}), 200
     except Exception as e:
         print(f"Erro ao alterar 2FA: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@user_bp.route('/enable-2fa-confirm', methods=['POST'])
+@jwt_required()
+def enable_2fa_confirm_route():
+    try:
+        user_id = int(get_jwt_identity())
+        data = request.get_json() or {}
+        code = data.get('code')
+        if not code:
+            return jsonify({"error": "O campo 'code' é obrigatório"}), 400
+        success, error_code, message = two_factor_service.enable_2fa_confirm(user_id, code)
+        if not success:
+            return jsonify({"error": message}), 400
+        return jsonify({"message": message}), 200
+    except Exception as e:
+        print(f"Erro ao confirmar 2FA: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 

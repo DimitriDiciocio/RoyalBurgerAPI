@@ -3,14 +3,14 @@ import random
 import string
 from datetime import datetime, timedelta
 from ..database import get_db_connection
-from . import sms_service
+from . import email_service
 
 def generate_2fa_code():
     """Gera código de 6 dígitos para 2FA"""
     return ''.join(random.choices(string.digits, k=6))
 
 def create_2fa_verification(user_id, email):
-    """Cria código de verificação 2FA e envia por SMS"""
+    """Cria código de verificação 2FA e envia por e-mail"""
     verification_code = generate_2fa_code()
     expires_at = datetime.now() + timedelta(minutes=10)  # 10 minutos para 2FA
     
@@ -32,26 +32,24 @@ def create_2fa_verification(user_id, email):
         cur.execute(sql_insert, (user_id, verification_code, expires_at, created_at))
         conn.commit()
         
-        # Busca dados do usuário para o SMS
-        sql_user = "SELECT FULL_NAME, PHONE FROM USERS WHERE ID = ?"
+        # Busca dados do usuário
+        sql_user = "SELECT FULL_NAME, EMAIL FROM USERS WHERE ID = ?"
         cur.execute(sql_user, (user_id,))
         user_data = cur.fetchone()
         
         if user_data:
-            full_name, phone = user_data
-            if phone:
-                # Valida e formata o telefone
-                is_valid, formatted_phone = sms_service.validate_phone_number(phone)
-                if is_valid:
-                    success, error_code, message = sms_service.send_2fa_sms(formatted_phone, verification_code, full_name)
-                    if success:
-                        return (True, None, "Código de verificação enviado por SMS")
-                    else:
-                        return (False, "SMS_ERROR", "Erro ao enviar SMS")
-                else:
-                    return (False, "INVALID_PHONE", "Número de telefone inválido")
-            else:
-                return (False, "NO_PHONE", "Usuário não possui telefone cadastrado")
+            full_name, user_email = user_data
+            try:
+                email_service.send_email(
+                    to=user_email,
+                    subject="Royal Burger - Código 2FA",
+                    template="two_factor_verification",
+                    user={"full_name": full_name},
+                    verification_code=verification_code,
+                )
+                return (True, None, "Código de verificação enviado por e-mail")
+            except Exception as e:
+                return (False, "EMAIL_ERROR", f"Erro ao enviar e-mail: {e}")
         
         return (False, "USER_NOT_FOUND", "Usuário não encontrado")
         
@@ -127,6 +125,29 @@ def toggle_2fa(user_id, enable):
         
     except fdb.Error as e:
         print(f"Erro ao atualizar 2FA: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+def enable_2fa_confirm(user_id, code):
+    """Confirma habilitação do 2FA verificando o código enviado previamente."""
+    # Verifica o código usando a mesma lógica do login
+    success, error_code, message = verify_2fa_code(user_id, code)
+    if not success:
+        return (False, error_code, message)
+
+    # Se o código é válido, habilita o 2FA
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        sql_update = "UPDATE USERS SET TWO_FACTOR_ENABLED = TRUE WHERE ID = ?"
+        cur.execute(sql_update, (user_id,))
+        conn.commit()
+        return (True, None, "2FA habilitado com sucesso")
+    except fdb.Error as e:
+        print(f"Erro ao habilitar 2FA após confirmação: {e}")
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:

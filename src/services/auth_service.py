@@ -24,12 +24,11 @@ def authenticate(email, password):
         
         # Se 2FA está habilitado, retorna status especial
         if two_factor_enabled:
-            # Cria código 2FA e envia por email
             success, error_code, message = create_2fa_verification(user_id, email)
             if not success:
                 return (None, error_code, message)
             
-            return ({"requires_2fa": True, "user_id": user_id}, None, "Código de verificação enviado por SMS")
+            return ({"requires_2fa": True, "user_id": user_id}, None, message)
         
         # Login normal sem 2FA
         identity = str(user_id)  

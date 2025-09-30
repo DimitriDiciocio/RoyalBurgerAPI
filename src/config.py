@@ -16,6 +16,8 @@ class Config:
     MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')  
     MAIL_PORT = int(os.environ.get('MAIL_PORT', 587))  
     MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() in ['true', '1', 't']  
-    MAIL_USERNAME = os.environ.get('MAIL_USERNAME')  
+    MAIL_USE_SSL = os.environ.get('MAIL_USE_SSL', 'false').lower() in ['true', '1', 't']  
+    _MAIL_ADDRESS = os.environ.get('MAIL') or os.environ.get('MAIL_USERNAME')  
+    MAIL_USERNAME = _MAIL_ADDRESS  
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')  
-    MAIL_DEFAULT_SENDER = ('Royal Burger', MAIL_USERNAME)  
+    MAIL_DEFAULT_SENDER = (os.environ.get('MAIL_DISPLAY_NAME', 'Royal Burger'), _MAIL_ADDRESS)  

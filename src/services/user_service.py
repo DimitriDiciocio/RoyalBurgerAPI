@@ -178,11 +178,27 @@ def get_user_by_id(user_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        sql = "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE FROM USERS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+        sql = (
+            "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE, DATE_OF_BIRTH, IS_ACTIVE, CREATED_AT, "
+            "IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED "
+            "FROM USERS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+        )
         cur.execute(sql, (user_id,))
         row = cur.fetchone()
         if row:
-            return {"id": row[0], "full_name": row[1], "email": row[2], "phone": row[3], "cpf": row[4], "role": row[5]}
+            return {
+                "id": row[0],
+                "full_name": row[1],
+                "email": row[2],
+                "phone": row[3],
+                "cpf": row[4],
+                "role": row[5],
+                "date_of_birth": row[6].strftime('%Y-%m-%d') if row[6] else None,
+                "is_active": bool(row[7]) if row[7] is not None else True,
+                "created_at": row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,
+                "is_email_verified": bool(row[9]) if row[9] is not None else False,
+                "two_factor_enabled": bool(row[10]) if row[10] is not None else False,
+            }
         return None
     except fdb.Error as e:
         print(f"Erro ao buscar usuário por ID: {e}")
@@ -338,24 +354,17 @@ def initiate_password_reset(email):
 
             reset_link = f"http://localhost:5173/reset-password?token={token}"
 
-            # Busca telefone do usuário para enviar SMS
-            sql_phone = "SELECT PHONE FROM USERS WHERE EMAIL = ?"
-            cur.execute(sql_phone, (email,))
-            phone_result = cur.fetchone()
-            
-            if phone_result and phone_result[0]:
-                phone = phone_result[0]
-                # Valida e formata o telefone
-                from .sms_service import validate_phone_number, send_password_reset_sms
-                is_valid, formatted_phone = validate_phone_number(phone)
-                if is_valid:
-                    success, error_code, message = send_password_reset_sms(formatted_phone, token, full_name)
-                    if not success:
-                        print(f"Erro ao enviar SMS de recuperação: {message}")
-                else:
-                    print(f"Telefone inválido para SMS: {phone}")
-            else:
-                print(f"Usuário {email} não possui telefone cadastrado para SMS")
+            from .email_service import send_email
+            try:
+                send_email(
+                    to=email,
+                    subject="Royal Burger - Recuperação de senha",
+                    template="password_reset",
+                    user={"full_name": full_name},
+                    reset_link=reset_link,
+                )
+            except Exception as e:
+                print(f"Erro ao enviar e-mail de recuperação: {e}")
 
         return True
 
