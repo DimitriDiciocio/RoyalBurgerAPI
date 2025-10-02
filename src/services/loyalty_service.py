@@ -4,18 +4,23 @@ from ..database import get_db_connection
 
 def create_loyalty_account_if_not_exists(user_id, cur):  
     try:  
-        sql = """
-            MERGE INTO LOYALTY_POINTS lp
-            USING (SELECT ? AS USER_ID FROM RDB$DATABASE) AS new_data
-            ON (lp.USER_ID = new_data.USER_ID)
-            WHEN NOT MATCHED THEN
-                INSERT (USER_ID, ACCUMULATED_POINTS, SPENT_POINTS) 
-                VALUES (new_data.USER_ID, 0, 0);
-        """  
-        cur.execute(sql, (user_id,))  
+        # Primeiro verifica se já existe
+        sql_check = "SELECT USER_ID FROM LOYALTY_POINTS WHERE USER_ID = ?;"
+        cur.execute(sql_check, (user_id,))
+        existing = cur.fetchone()
+        
+        # Se não existe, cria a conta
+        if not existing:
+            sql_insert = """
+                INSERT INTO LOYALTY_POINTS (USER_ID, ACCUMULATED_POINTS, SPENT_POINTS) 
+                VALUES (?, 0, 0);
+            """
+            cur.execute(sql_insert, (user_id,))
+            print(f"Conta de fidelidade criada para o usuário {user_id}")
+        
         return True  
     except fdb.Error as e:  
-        print(f"Erro ao criar conta de fidelidade (MERGE): {e}")  
+        print(f"Erro ao criar conta de fidelidade: {e}")  
         raise e  
 
 def earn_points_for_order(user_id, order_id, total_amount, cur):  
@@ -34,8 +39,35 @@ def earn_points_for_order(user_id, order_id, total_amount, cur):
     cur.execute(sql_add_history, (user_id, order_id, points_to_earn, reason))  
     print(f"{points_to_earn} pontos ganhos e validade renovada para o usuário {user_id}.")  
 
+def add_welcome_points(user_id, cur):
+    """Adiciona 100 pontos de boas-vindas para novos clientes"""
+    try:
+        create_loyalty_account_if_not_exists(user_id, cur)
+        
+        # Adiciona 100 pontos de boas-vindas
+        welcome_points = 100
+        sql_update_account = """
+            UPDATE LOYALTY_POINTS
+            SET 
+                ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
+                POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
+            WHERE USER_ID = ?;
+        """
+        cur.execute(sql_update_account, (welcome_points, user_id))
+        
+        # Adiciona histórico dos pontos de boas-vindas
+        sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, POINTS, REASON) VALUES (?, ?, ?);"
+        reason = "Pontos de boas-vindas"
+        cur.execute(sql_add_history, (user_id, welcome_points, reason))
+        
+        print(f"Adicionados {welcome_points} pontos de boas-vindas para o usuário {user_id}.")
+        return True
+    except fdb.Error as e:
+        print(f"Erro ao adicionar pontos de boas-vindas: {e}")
+        raise e
+
 def get_loyalty_balance(user_id):  
-    conn = None  
+    conn = None
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
@@ -45,6 +77,7 @@ def get_loyalty_balance(user_id):
         cur.execute(sql_get, (user_id,))  
         account = cur.fetchone()  
         accumulated, spent, expiration_date = account or (0, 0, None)  
+        print(f"Saldo de pontos: {accumulated}, {spent}, {expiration_date}")
         current_balance = accumulated - spent  
         if expiration_date and expiration_date < date.today() and current_balance > 0:  
             points_to_expire = current_balance  
@@ -60,7 +93,7 @@ def get_loyalty_balance(user_id):
         if conn: conn.rollback()  
         return None  
     finally:  
-        if conn: conn.close()  
+        if conn: conn.close()
 
 def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):  
     balance_data = get_loyalty_balance(user_id)  

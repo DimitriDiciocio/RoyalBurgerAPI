@@ -198,13 +198,13 @@ def delete_address_route(user_id, address_id):
     return jsonify({"error": "Falha ao deletar endereço"}), 500  
 
 @customer_bp.route('/<int:user_id>/loyalty/balance', methods=['GET'])  
-@require_role('customer')  
+@require_role('customer')
 def get_loyalty_balance_route(user_id):  
     claims = get_jwt()  
     if int(claims.get('sub')) != user_id:  
         return jsonify({"msg": "Acesso não autorizado"}), 403  
     balance = loyalty_service.get_loyalty_balance(user_id)  
-    if balance is not None:  
+    if balance is not None:
         return jsonify(balance), 200  
     return jsonify({"error": "Não foi possível buscar o saldo"}), 500  
 

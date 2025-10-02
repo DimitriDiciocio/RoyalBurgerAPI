@@ -1,7 +1,8 @@
 import fdb  
 import bcrypt  
 from datetime import datetime, timedelta  
-from . import email_service  
+from . import email_service
+from . import loyalty_service
 from ..database import get_db_connection  
 from ..utils import token_helper  
 from ..utils import validators  
@@ -98,6 +99,16 @@ def create_user(user_data):
         """
         cur.execute(sql, (full_name, email, hashed_password.decode('utf-8'), role, date_of_birth, phone, cpf))
         new_user_id = cur.fetchone()[0]
+        
+        # Se for customer, adiciona pontos de boas-vindas ANTES do commit
+        if role == 'customer':
+            try:
+                loyalty_service.add_welcome_points(new_user_id, cur)
+                print(f"Pontos de boas-vindas adicionados para o cliente {new_user_id}")
+            except Exception as e:
+                print(f"AVISO: Falha ao adicionar pontos de boas-vindas para o cliente {new_user_id}. Erro: {e}")
+        
+        # Commit de tudo junto (usuário + pontos)
         conn.commit()
 
         new_user = {
@@ -110,6 +121,7 @@ def create_user(user_data):
             "cpf": cpf
         }
 
+        # Envia e-mail de boas-vindas após o commit (fora da transação)
         if role == 'customer':
             try:
                 email_service.send_email(
