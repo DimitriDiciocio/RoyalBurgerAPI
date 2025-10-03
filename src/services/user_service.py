@@ -356,24 +356,29 @@ def initiate_password_reset(email):
         if user_record:
             user_id, full_name = user_record
 
-            token = token_helper.generate_secure_token()
+            # Gera código de 6 dígitos
+            import random
+            reset_code = f"{random.randint(100000, 999999)}"
 
-            expires_at = datetime.now() + timedelta(hours=1)
+            expires_at = datetime.now() + timedelta(minutes=15)  # Código expira em 15 minutos
 
-            sql_save_token = "INSERT INTO PASSWORD_RESET_TOKENS (USER_ID, TOKEN, EXPIRES_AT) VALUES (?, ?, ?);"
-            cur.execute(sql_save_token, (user_id, token, expires_at))
+            # Remove códigos antigos do mesmo usuário
+            sql_cleanup = "DELETE FROM PASSWORD_RESET WHERE USER_ID = ?;"
+            cur.execute(sql_cleanup, (user_id,))
+
+            # Salva o novo código
+            sql_save_code = "INSERT INTO PASSWORD_RESET (USER_ID, VERIFICATION_CODE, EXPIRES_AT) VALUES (?, ?, ?);"
+            cur.execute(sql_save_code, (user_id, reset_code, expires_at))
             conn.commit()
-
-            reset_link = f"http://localhost:5173/reset-password?token={token}"
 
             from .email_service import send_email
             try:
                 send_email(
                     to=email,
-                    subject="Royal Burger - Recuperação de senha",
-                    template="password_reset",
+                    subject="Royal Burger - Código de recuperação de senha",
+                    template="password_reset_code",
                     user={"full_name": full_name},
-                    reset_link=reset_link,
+                    reset_code=reset_code,
                 )
             except Exception as e:
                 print(f"Erro ao enviar e-mail de recuperação: {e}")
@@ -388,7 +393,11 @@ def initiate_password_reset(email):
     finally:
         if conn: conn.close()
 
-def finalize_password_reset(token, new_password):
+def finalize_password_reset(email, reset_code, new_password):
+    """
+    Finaliza a recuperação de senha usando email e código de 6 dígitos.
+    Retorna uma tupla: (sucesso, mensagem).
+    """
     is_strong, message = validators.is_strong_password(new_password)
     if not is_strong:
         return (False, message)
@@ -398,31 +407,44 @@ def finalize_password_reset(token, new_password):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        sql_find_token = """
-            SELECT USER_ID, EXPIRES_AT, USED_AT
-            FROM PASSWORD_RESET_TOKENS
-            WHERE TOKEN = ?;
+        # Busca o usuário pelo email
+        sql_find_user = "SELECT ID FROM USERS WHERE EMAIL = ? AND IS_ACTIVE = TRUE;"
+        cur.execute(sql_find_user, (email,))
+        user_record = cur.fetchone()
+
+        if not user_record:
+            return (False, "Usuário não encontrado.")
+
+        user_id = user_record[0]
+
+        # Busca o código de reset
+        sql_find_code = """
+            SELECT EXPIRES_AT, USED_AT
+            FROM PASSWORD_RESET
+            WHERE USER_ID = ? AND VERIFICATION_CODE = ?;
         """
-        cur.execute(sql_find_token, (token,))
-        token_record = cur.fetchone()
+        cur.execute(sql_find_code, (user_id, reset_code))
+        code_record = cur.fetchone()
 
-        if not token_record:
-            return (False, "Token inválido ou não encontrado.")
+        if not code_record:
+            return (False, "Código de recuperação inválido.")
 
-        user_id, expires_at, used_at = token_record
+        expires_at, used_at = code_record
 
         if used_at is not None:
-            return (False, "Este token de recuperação já foi utilizado.")
+            return (False, "Este código de recuperação já foi utilizado.")
 
         if datetime.now() > expires_at:
-            return (False, "Este token de recuperação expirou.")
+            return (False, "Este código de recuperação expirou.")
 
+        # Atualiza a senha
         hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
         sql_update_password = "UPDATE USERS SET PASSWORD_HASH = ? WHERE ID = ?;"
         cur.execute(sql_update_password, (hashed_password.decode('utf-8'), user_id))
 
-        sql_invalidate_token = "UPDATE PASSWORD_RESET_TOKENS SET USED_AT = CURRENT_TIMESTAMP WHERE TOKEN = ?;"
-        cur.execute(sql_invalidate_token, (token,))
+        # Invalida o código
+        sql_invalidate_code = "UPDATE PASSWORD_RESET SET USED_AT = CURRENT_TIMESTAMP WHERE USER_ID = ? AND VERIFICATION_CODE = ?;"
+        cur.execute(sql_invalidate_code, (user_id, reset_code))
 
         conn.commit()
 

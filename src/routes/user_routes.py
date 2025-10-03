@@ -61,11 +61,18 @@ def request_password_reset_route():
 @user_bp.route('/reset-password', methods=['POST'])
 def reset_password_route():
     data = request.get_json()
-    token = data.get('token')
+    email = data.get('email')
+    reset_code = data.get('reset_code')
     new_password = data.get('new_password')
-    if not token or not new_password:
-        return jsonify({"error": "Token e nova senha são obrigatórios"}), 400
-    success, message = user_service.finalize_password_reset(token, new_password)
+    
+    if not email or not reset_code or not new_password:
+        return jsonify({"error": "Email, código de recuperação e nova senha são obrigatórios"}), 400
+    
+    # Valida formato do código (6 dígitos)
+    if not reset_code.isdigit() or len(reset_code) != 6:
+        return jsonify({"error": "Código deve ter exatamente 6 dígitos"}), 400
+    
+    success, message = user_service.finalize_password_reset(email, reset_code, new_password)
     if success:
         return jsonify({"msg": message}), 200
     else:
