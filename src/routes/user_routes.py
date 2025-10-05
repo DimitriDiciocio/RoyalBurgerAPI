@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ..services import user_service, auth_service, email_verification_service, two_factor_service
+from ..services import user_service, auth_service, email_verification_service, two_factor_service, pending_email_service
 from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone
@@ -103,8 +103,31 @@ def get_my_profile_route():
 @user_bp.route('/', methods=['GET'])
 @require_role('admin')
 def get_all_users_route():
-    users = user_service.get_users_by_role(['admin', 'manager', 'attendant'])
-    return jsonify(users), 200
+    # Parâmetros de paginação
+    page = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 20))
+    
+    # Filtros
+    filters = {}
+    if request.args.get('name'):
+        filters['name'] = request.args.get('name')
+    if request.args.get('email'):
+        filters['email'] = request.args.get('email')
+    if request.args.get('role'):
+        role = request.args.get('role')
+        if role == 'all_staff':
+            filters['role'] = ['admin', 'manager', 'attendant']
+        else:
+            filters['role'] = role
+    if request.args.get('status') is not None:
+        filters['status'] = request.args.get('status').lower() == 'true'
+    
+    # Ordenação
+    sort_by = request.args.get('sort_by', 'full_name')
+    sort_order = request.args.get('sort_order', 'asc')
+    
+    result = user_service.get_users_paginated(page, per_page, filters, sort_by, sort_order)
+    return jsonify(result), 200
 
 
 @user_bp.route('/', methods=['POST'])
@@ -148,14 +171,25 @@ def update_user_route(user_id):
     data = request.get_json()
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
-    success, error_code, message = user_service.update_user(user_id, data)
+    
+    # Verifica se está tentando desativar o último admin ativo
+    if data.get('is_active') is False:
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
+    
+    # Verifica se está tentando alterar o role do último admin ativo
+    if data.get('role') and data.get('role') != 'admin':
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível alterar o cargo do último administrador ativo do sistema"}), 409
+    
+    success, error_code, message = user_service.update_user(user_id, data, is_admin_request=True)
     if success:
         return jsonify({"msg": "Dados atualizados com sucesso"}), 200
     if error_code == "USER_NOT_FOUND":
         return jsonify({"error": message}), 404
     elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:
         return jsonify({"error": message}), 409
-    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS"]:
+    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS", "EMAIL_CHANGE_REQUIRES_VERIFICATION"]:
         return jsonify({"error": message}), 400
     elif error_code == "DATABASE_ERROR":
         return jsonify({"error": message}), 500
@@ -166,9 +200,78 @@ def update_user_route(user_id):
 @user_bp.route('/<int:user_id>', methods=['DELETE'])
 @require_role('admin')
 def delete_user_route(user_id):
+    # Verifica se está tentando desativar o último admin ativo
+    if user_service.is_last_active_admin(user_id):
+        return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
+    
     if user_service.deactivate_user(user_id):
         return jsonify({"msg": "Funcionário inativado com sucesso"}), 200
     return jsonify({"error": "Falha ao inativar ou funcionário não encontrado"}), 404
+
+
+# Rotas específicas para administradores
+@user_bp.route('/admins', methods=['POST'])
+@require_role('admin')
+def create_admin_route():
+    data = request.get_json()
+    if not all(k in data for k in ['full_name', 'email', 'password']):
+        return jsonify({"error": "full_name, email e password são obrigatórios"}), 400
+    
+    # Força o role como admin
+    data['role'] = 'admin'
+    
+    new_user, error_code, error_message = user_service.create_user(data)
+    if new_user:
+        return jsonify({**new_user, "message": "Administrador registrado com sucesso"}), 201
+    else:
+        if error_code == "EMAIL_ALREADY_EXISTS":
+            return jsonify({"error": "E-mail já cadastrado"}), 409
+        elif error_code == "PHONE_ALREADY_EXISTS":
+            return jsonify({"error": "Telefone já cadastrado"}), 409
+        elif error_code == "CPF_ALREADY_EXISTS":
+            return jsonify({"error": "CPF já cadastrado"}), 409
+        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD"]:
+            return jsonify({"error": error_message}), 400
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": error_message}), 500
+        else:
+            return jsonify({"error": "Não foi possível criar o administrador."}), 500
+
+
+@user_bp.route('/admins/<int:user_id>', methods=['PUT'])
+@require_role('admin')
+def update_admin_route(user_id):
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    # Verifica se o usuário é realmente um admin
+    user = user_service.get_user_by_id(user_id)
+    if not user or user['role'] != 'admin':
+        return jsonify({"error": "Administrador não encontrado"}), 404
+    
+    # Verifica se está tentando desativar o último admin ativo
+    if data.get('is_active') is False:
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
+    
+    # Impede alteração do role de admin
+    if data.get('role') and data.get('role') != 'admin':
+        return jsonify({"error": "Não é possível alterar o cargo de um administrador"}), 400
+    
+    success, error_code, message = user_service.update_user(user_id, data, is_admin_request=True)
+    if success:
+        return jsonify({"msg": "Dados do administrador atualizados com sucesso"}), 200
+    if error_code == "USER_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:
+        return jsonify({"error": message}), 409
+    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS", "EMAIL_CHANGE_REQUIRES_VERIFICATION"]:
+        return jsonify({"error": message}), 400
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    else:
+        return jsonify({"error": "Falha ao atualizar administrador"}), 500
 
 
 @user_bp.route('/<int:user_id>/metrics', methods=['GET'])
@@ -402,4 +505,137 @@ def get_2fa_status_route():
         
     except Exception as e:
         print(f"Erro ao verificar status 2FA: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+# ===== ROTAS PARA MUDANÇA DE EMAIL COM VERIFICAÇÃO =====
+
+@user_bp.route('/request-email-change', methods=['POST'])
+@jwt_required()
+def request_email_change_route():
+    """
+    Solicita mudança de email. Envia código de verificação para o novo email.
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        data = request.get_json()
+        new_email = data.get('new_email')
+        
+        if not new_email:
+            return jsonify({"error": "O campo 'new_email' é obrigatório"}), 400
+        
+        success, error_code, message = pending_email_service.create_pending_email_change(user_id, new_email)
+        
+        if success:
+            return jsonify({"msg": message}), 200
+        else:
+            if error_code == "USER_NOT_FOUND":
+                return jsonify({"error": "Usuário não encontrado"}), 404
+            elif error_code == "SAME_EMAIL":
+                return jsonify({"error": "O novo email deve ser diferente do email atual"}), 400
+            elif error_code == "EMAIL_ALREADY_EXISTS":
+                return jsonify({"error": "Este email já está em uso por outra conta"}), 409
+            elif error_code == "PENDING_CHANGE_EXISTS":
+                return jsonify({"error": "Já existe uma solicitação de mudança de email pendente"}), 409
+            elif error_code == "EMAIL_ERROR":
+                return jsonify({"error": message}), 500
+            elif error_code == "DATABASE_ERROR":
+                return jsonify({"error": "Erro interno do servidor"}), 500
+            else:
+                return jsonify({"error": message}), 400
+                
+    except Exception as e:
+        print(f"Erro ao solicitar mudança de email: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/verify-email-change', methods=['POST'])
+@jwt_required()
+def verify_email_change_route():
+    """
+    Verifica o código e efetua a mudança de email.
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        data = request.get_json()
+        code = data.get('code')
+        
+        if not code:
+            return jsonify({"error": "O campo 'code' é obrigatório"}), 400
+        
+        if len(code) != 6 or not code.isdigit():
+            return jsonify({"error": "Código deve ter exatamente 6 dígitos"}), 400
+        
+        success, error_code, message = pending_email_service.verify_pending_email_change(user_id, code)
+        
+        if success:
+            return jsonify({"msg": message}), 200
+        else:
+            if error_code == "NO_PENDING_CHANGE":
+                return jsonify({"error": "Nenhuma solicitação de mudança de email pendente"}), 404
+            elif error_code == "CODE_EXPIRED":
+                return jsonify({"error": "Código de verificação expirado"}), 400
+            elif error_code == "INVALID_CODE":
+                return jsonify({"error": "Código de verificação inválido"}), 400
+            elif error_code == "EMAIL_ALREADY_EXISTS":
+                return jsonify({"error": "Este email já está em uso por outra conta"}), 409
+            elif error_code == "DATABASE_ERROR":
+                return jsonify({"error": "Erro interno do servidor"}), 500
+            else:
+                return jsonify({"error": message}), 400
+                
+    except Exception as e:
+        print(f"Erro ao verificar mudança de email: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/cancel-email-change', methods=['POST'])
+@jwt_required()
+def cancel_email_change_route():
+    """
+    Cancela uma solicitação de mudança de email pendente.
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        
+        success, error_code, message = pending_email_service.cancel_pending_email_change(user_id)
+        
+        if success:
+            return jsonify({"msg": message}), 200
+        else:
+            if error_code == "NO_PENDING_CHANGE":
+                return jsonify({"error": "Nenhuma solicitação de mudança de email pendente"}), 404
+            elif error_code == "DATABASE_ERROR":
+                return jsonify({"error": "Erro interno do servidor"}), 500
+            else:
+                return jsonify({"error": message}), 400
+                
+    except Exception as e:
+        print(f"Erro ao cancelar mudança de email: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/pending-email-change', methods=['GET'])
+@jwt_required()
+def get_pending_email_change_route():
+    """
+    Retorna informações sobre uma mudança de email pendente.
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        
+        data, error_code, message = pending_email_service.get_pending_email_change(user_id)
+        
+        if data:
+            return jsonify(data), 200
+        else:
+            if error_code == "NO_PENDING_CHANGE":
+                return jsonify({"error": "Nenhuma solicitação de mudança de email pendente"}), 404
+            elif error_code == "DATABASE_ERROR":
+                return jsonify({"error": "Erro interno do servidor"}), 500
+            else:
+                return jsonify({"error": message}), 400
+                
+    except Exception as e:
+        print(f"Erro ao buscar mudança de email pendente: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500

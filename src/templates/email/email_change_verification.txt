@@ -1,0 +1,28 @@
+🍔 ROYAL BURGER - Confirmação de Mudança de Email
+
+Olá, {{ user.full_name }}!
+
+Você solicitou a alteração do email da sua conta no Royal Burger.
+
+DETALHES DA SOLICITAÇÃO:
+- Email atual: {{ user.current_email }}
+- Novo email: {{ new_email }}
+
+Para confirmar esta mudança, use o código abaixo:
+
+CÓDIGO DE VERIFICAÇÃO: {{ verification_code }}
+
+IMPORTANTE:
+- Este código expira em 15 minutos
+- Não compartilhe este código com ninguém
+- Se você não solicitou esta mudança, ignore este email
+- Após a confirmação, você precisará usar o novo email para fazer login
+
+Se você não conseguir usar este código, a solicitação será cancelada automaticamente.
+
+Atenciosamente,
+Equipe Royal Burger
+
+---
+Este é um email automático, não responda a esta mensagem.
+Royal Burger - Sua lanchonete premium

@@ -235,9 +235,10 @@ def get_user_by_email(email):
     finally:
         if conn: conn.close()
 
-def update_user(user_id, update_data):
+def update_user(user_id, update_data, is_admin_request=False):
     """
     Atualiza dados de um usuário com validações específicas para cada campo.
+    Se is_admin_request=True, permite alteração direta de email (bypass da verificação).
     Retorna uma tupla: (sucesso, error_code, mensagem).
     """
     conn = None
@@ -250,9 +251,13 @@ def update_user(user_id, update_data):
         if not cur.fetchone():
             return (False, "USER_NOT_FOUND", "Usuário não encontrado.")
 
+        # Email só pode ser alterado diretamente por administradores
         if 'email' in update_data:
-            new_email = update_data['email']
+            if not is_admin_request:
+                return (False, "EMAIL_CHANGE_REQUIRES_VERIFICATION", "Para alterar o email, use o endpoint específico que requer verificação.")
             
+            # Validação de email para administradores
+            new_email = update_data['email']
             is_valid, message = validators.is_valid_email(new_email)
             if not is_valid:
                 return (False, "INVALID_EMAIL", message)
@@ -279,7 +284,9 @@ def update_user(user_id, update_data):
             if new_cpf and not validators.is_valid_cpf(new_cpf):
                 return (False, "INVALID_CPF", "O CPF fornecido é inválido.")
 
-        allowed_fields = ['full_name', 'date_of_birth', 'phone', 'cpf', 'email']
+        allowed_fields = ['full_name', 'date_of_birth', 'phone', 'cpf']
+        if is_admin_request:
+            allowed_fields.append('email')
         fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}
 
         if not fields_to_update:
@@ -582,5 +589,219 @@ def get_user_metrics(user_id):
     except fdb.Error as e:
         print(f"Erro ao buscar métricas do usuário: {e}")
         return None
+    finally:
+        if conn: conn.close()
+
+def is_last_active_admin(user_id):
+    """Verifica se o usuário é o último administrador ativo no sistema."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se o usuário é admin
+        cur.execute("SELECT ROLE FROM USERS WHERE ID = ? AND IS_ACTIVE = TRUE", (user_id,))
+        user_row = cur.fetchone()
+        if not user_row or user_row[0] != 'admin':
+            return False
+        
+        # Conta quantos admins ativos existem
+        cur.execute("SELECT COUNT(*) FROM USERS WHERE ROLE = 'admin' AND IS_ACTIVE = TRUE")
+        admin_count = cur.fetchone()[0]
+        
+        return admin_count == 1
+        
+    except fdb.Error as e:
+        print(f"Erro ao verificar último admin: {e}")
+        return False
+    finally:
+        if conn: conn.close()
+
+def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', sort_order='asc'):
+    """Busca usuários com paginação, filtros e ordenação."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Query base
+        base_sql = """
+            SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE, IS_ACTIVE, 
+                   CREATED_AT, IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED
+            FROM USERS 
+            WHERE 1=1
+        """
+        
+        # Filtros
+        conditions = []
+        params = []
+        
+        if filters:
+            if filters.get('name'):
+                conditions.append("UPPER(FULL_NAME) LIKE UPPER(?)")
+                params.append(f"%{filters['name']}%")
+            
+            if filters.get('email'):
+                conditions.append("UPPER(EMAIL) LIKE UPPER(?)")
+                params.append(f"%{filters['email']}%")
+            
+            if filters.get('role'):
+                if isinstance(filters['role'], list):
+                    placeholders = ', '.join(['?' for _ in filters['role']])
+                    conditions.append(f"ROLE IN ({placeholders})")
+                    params.extend(filters['role'])
+                else:
+                    conditions.append("ROLE = ?")
+                    params.append(filters['role'])
+            
+            if filters.get('status') is not None:
+                conditions.append("IS_ACTIVE = ?")
+                params.append(bool(filters['status']))
+        
+        if conditions:
+            base_sql += " AND " + " AND ".join(conditions)
+        
+        # Ordenação
+        valid_sort_fields = ['full_name', 'email', 'role', 'created_at', 'is_active']
+        if sort_by not in valid_sort_fields:
+            sort_by = 'full_name'
+        
+        sort_order = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
+        base_sql += f" ORDER BY {sort_by} {sort_order}"
+        
+        # Contagem total
+        count_sql = base_sql.replace(
+            "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE, IS_ACTIVE, CREATED_AT, IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED",
+            "SELECT COUNT(*)"
+        )
+        cur.execute(count_sql, params)
+        total = cur.fetchone()[0]
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        base_sql += f" ROWS {offset + 1} TO {offset + per_page}"
+        
+        cur.execute(base_sql, params)
+        users = []
+        
+        for row in cur.fetchall():
+            users.append({
+                "id": row[0],
+                "full_name": row[1],
+                "email": row[2],
+                "phone": row[3],
+                "cpf": row[4],
+                "role": row[5],
+                "is_active": bool(row[6]) if row[6] is not None else True,
+                "created_at": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,
+                "is_email_verified": bool(row[8]) if row[8] is not None else False,
+                "two_factor_enabled": bool(row[9]) if row[9] is not None else False,
+            })
+        
+        return {
+            "users": users,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": (total + per_page - 1) // per_page
+            }
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar usuários paginados: {e}")
+        return {"users": [], "pagination": {"page": page, "per_page": per_page, "total": 0, "pages": 0}}
+    finally:
+        if conn: conn.close()
+
+def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_name', sort_order='asc'):
+    """Busca clientes com paginação, filtros e ordenação."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Query base
+        base_sql = """
+            SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, DATE_OF_BIRTH, IS_ACTIVE, 
+                   CREATED_AT, IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED
+            FROM USERS 
+            WHERE ROLE = 'customer'
+        """
+        
+        # Filtros
+        conditions = []
+        params = []
+        
+        if filters:
+            if filters.get('name'):
+                conditions.append("UPPER(FULL_NAME) LIKE UPPER(?)")
+                params.append(f"%{filters['name']}%")
+            
+            if filters.get('email'):
+                conditions.append("UPPER(EMAIL) LIKE UPPER(?)")
+                params.append(f"%{filters['email']}%")
+            
+            if filters.get('cpf'):
+                conditions.append("CPF LIKE ?")
+                params.append(f"%{filters['cpf']}%")
+            
+            if filters.get('status') is not None:
+                conditions.append("IS_ACTIVE = ?")
+                params.append(bool(filters['status']))
+        
+        if conditions:
+            base_sql += " AND " + " AND ".join(conditions)
+        
+        # Ordenação
+        valid_sort_fields = ['full_name', 'email', 'cpf', 'created_at', 'is_active']
+        if sort_by not in valid_sort_fields:
+            sort_by = 'full_name'
+        
+        sort_order = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
+        base_sql += f" ORDER BY {sort_by} {sort_order}"
+        
+        # Contagem total
+        count_sql = base_sql.replace(
+            "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, DATE_OF_BIRTH, IS_ACTIVE, CREATED_AT, IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED",
+            "SELECT COUNT(*)"
+        )
+        cur.execute(count_sql, params)
+        total = cur.fetchone()[0]
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        base_sql += f" ROWS {offset + 1} TO {offset + per_page}"
+        
+        cur.execute(base_sql, params)
+        customers = []
+        
+        for row in cur.fetchall():
+            customers.append({
+                "id": row[0],
+                "full_name": row[1],
+                "email": row[2],
+                "phone": row[3],
+                "cpf": row[4],
+                "date_of_birth": row[5].strftime('%Y-%m-%d') if row[5] else None,
+                "is_active": bool(row[6]) if row[6] is not None else True,
+                "created_at": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,
+                "is_email_verified": bool(row[8]) if row[8] is not None else False,
+                "two_factor_enabled": bool(row[9]) if row[9] is not None else False,
+            })
+        
+        return {
+            "customers": customers,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": (total + per_page - 1) // per_page
+            }
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar clientes paginados: {e}")
+        return {"customers": [], "pagination": {"page": page, "per_page": per_page, "total": 0, "pages": 0}}
     finally:
         if conn: conn.close()

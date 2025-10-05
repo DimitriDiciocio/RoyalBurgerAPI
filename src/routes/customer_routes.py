@@ -19,10 +19,13 @@ def create_customer_route():
     if password != password_confirmation:  
         return jsonify({"error": "As senhas não conferem."}), 400  
 
+    # Força o role como customer
+    data['role'] = 'customer'
+
     new_user, error_code, error_message = user_service.create_user(data)  
 
     if new_user:  
-        return jsonify({**new_user, "message": "Usuário registrado com sucesso"}), 201  
+        return jsonify({**new_user, "message": "Cliente registrado com sucesso"}), 201  
     else:  
         if error_code == "EMAIL_ALREADY_EXISTS":  
             return jsonify({"error": "E-mail já cadastrado"}), 409  
@@ -35,13 +38,32 @@ def create_customer_route():
         elif error_code == "DATABASE_ERROR":  
             return jsonify({"error": error_message}), 500  
         else:  
-            return jsonify({"error": "Não foi possível criar o usuário."}), 500  
+            return jsonify({"error": "Não foi possível criar o cliente."}), 500  
 
 @customer_bp.route('/', methods=['GET'])  
 @require_role('admin', 'manager')  
 def get_all_customers_route():  
-    customers = user_service.get_users_by_role('customer')  
-    return jsonify(customers), 200  
+    # Parâmetros de paginação
+    page = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 20))
+    
+    # Filtros
+    filters = {}
+    if request.args.get('name'):
+        filters['name'] = request.args.get('name')
+    if request.args.get('email'):
+        filters['email'] = request.args.get('email')
+    if request.args.get('cpf'):
+        filters['cpf'] = request.args.get('cpf')
+    if request.args.get('status') is not None:
+        filters['status'] = request.args.get('status').lower() == 'true'
+    
+    # Ordenação
+    sort_by = request.args.get('sort_by', 'full_name')
+    sort_order = request.args.get('sort_order', 'asc')
+    
+    result = user_service.get_customers_paginated(page, per_page, filters, sort_by, sort_order)
+    return jsonify(result), 200  
 
 @customer_bp.route('/<int:user_id>', methods=['GET'])  
 @jwt_required()  
@@ -66,10 +88,19 @@ def update_customer_route(user_id):
     if not data:  
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400  
 
+    # Verifica se o usuário é realmente um customer
+    user = user_service.get_user_by_id(user_id)
+    if not user or user['role'] != 'customer':
+        return jsonify({"error": "Cliente não encontrado"}), 404
+
+    # Impede alteração do role de customer
+    if data.get('role') and data.get('role') != 'customer':
+        return jsonify({"error": "Não é possível alterar o cargo de um cliente"}), 400
+
     success, error_code, message = user_service.update_user(user_id, data)  
 
     if success:  
-        return jsonify({"msg": "Dados atualizados com sucesso"}), 200  
+        return jsonify({"msg": "Dados do cliente atualizados com sucesso"}), 200  
     else:  
         if error_code == "USER_NOT_FOUND":  
             return jsonify({"error": message}), 404  
@@ -80,7 +111,7 @@ def update_customer_route(user_id):
         elif error_code == "DATABASE_ERROR":  
             return jsonify({"error": message}), 500  
         else:  
-            return jsonify({"error": "Falha ao atualizar dados"}), 500  
+            return jsonify({"error": "Falha ao atualizar dados do cliente"}), 500  
 
 @customer_bp.route('/<int:user_id>', methods=['DELETE'])  
 @jwt_required()  
