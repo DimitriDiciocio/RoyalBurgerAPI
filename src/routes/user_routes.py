@@ -38,7 +38,31 @@ def login_route():
     elif error_code == "ACCOUNT_INACTIVE":
         return jsonify({"error": error_message}), 403
     elif error_code == "EMAIL_NOT_VERIFIED":
-        return jsonify({"requires_email_verification": True, "error": error_message}), 403
+        # Automaticamente cria e envia código de verificação
+        success, verify_error_code, verify_message = email_verification_service.create_email_verification(email)
+        if success:
+            if verify_error_code == "EMAIL_WARNING":
+                # Código foi criado mas email falhou
+                return jsonify({
+                    "requires_email_verification": True, 
+                    "error": error_message,
+                    "warning": verify_message,
+                    "message": "Código de verificação criado. Use a opção 'Reenviar código' se necessário."
+                }), 403
+            else:
+                # Sucesso completo
+                return jsonify({
+                    "requires_email_verification": True, 
+                    "error": error_message,
+                    "message": "Código de verificação enviado automaticamente para seu e-mail"
+                }), 403
+        else:
+            # Se falhou completamente, retorna erro mas ainda indica que precisa verificar
+            return jsonify({
+                "requires_email_verification": True, 
+                "error": error_message,
+                "warning": "Não foi possível criar o código automaticamente. Use a opção 'Reenviar código'."
+            }), 403
     elif error_code == "INVALID_PASSWORD":
         return jsonify({"error": "E-mail ou senha incorretos"}), 401
     elif error_code == "DATABASE_ERROR":
@@ -347,13 +371,18 @@ def resend_verification_code_route():
     success, error_code, message = email_verification_service.resend_verification_code(email)
 
     if success:
-        return jsonify({"msg": "Novo código de verificação enviado por e-mail"}), 200
+        if error_code == "EMAIL_WARNING":
+            return jsonify({
+                "msg": "Novo código de verificação criado", 
+                "warning": message
+            }), 200
+        else:
+            return jsonify({"msg": "Novo código de verificação enviado por e-mail"}), 200
     else:
         if error_code == "USER_NOT_FOUND":
             return jsonify({"error": "Usuário não encontrado"}), 404
         elif error_code == "EMAIL_ALREADY_VERIFIED":
             return jsonify({"error": "Este email já foi verificado"}), 400
-        
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": "Erro interno do servidor"}), 500
         else:

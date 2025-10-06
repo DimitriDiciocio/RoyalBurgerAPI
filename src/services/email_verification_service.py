@@ -46,7 +46,9 @@ def create_email_verification(email):
             )
             return (True, None, "Código de verificação enviado por e-mail")
         except Exception as e:
-            return (False, "EMAIL_ERROR", f"Erro ao enviar e-mail: {e}")
+            # Mesmo se o email falhar, o código foi salvo no banco
+            print(f"Erro ao enviar email de verificação: {e}")
+            return (True, "EMAIL_WARNING", f"Código criado, mas erro ao enviar e-mail: {e}")
         
     except fdb.Error as e:
         print(f"Erro ao criar verificação de email: {e}")
