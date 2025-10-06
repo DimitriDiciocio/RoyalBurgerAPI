@@ -716,32 +716,20 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
         for row in cur.fetchall():
             users.append({
                 "id": row[0],
-                "nome": row[1],  # Compatibilidade com frontend
-                "full_name": row[1],  # Mantém compatibilidade com backend
+                "full_name": row[1],
                 "email": row[2],
-                "telefone": row[3],  # Compatibilidade com frontend
-                "phone": row[3],  # Mantém compatibilidade com backend
+                "phone": row[3],
                 "cpf": row[4],
-                "cargo": row[5],  # Compatibilidade com frontend
-                "role": row[5],  # Mantém compatibilidade com backend
-                "ativo": bool(row[6]) if row[6] is not None else True,  # Compatibilidade com frontend
-                "is_active": bool(row[6]) if row[6] is not None else True,  # Mantém compatibilidade com backend
-                "dataCriacao": row[7].strftime('%Y-%m-%dT%H:%M:%SZ') if row[7] else None,  # Compatibilidade com frontend
-                "created_at": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,  # Mantém compatibilidade com backend
+                "role": row[5],
+                "is_active": bool(row[6]) if row[6] is not None else True,
+                "created_at": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,
                 "is_email_verified": bool(row[8]) if row[8] is not None else False,
                 "two_factor_enabled": bool(row[9]) if row[9] is not None else False,
             })
         
         return {
-            "usuarios": users,  # Compatibilidade com frontend
-            "users": users,  # Mantém compatibilidade com backend
-            "paginacao": {  # Compatibilidade com frontend
-                "pagina": page,
-                "limite": per_page,
-                "total": total,
-                "totalPaginas": (total + per_page - 1) // per_page
-            },
-            "pagination": {  # Mantém compatibilidade com backend
+            "users": users,
+            "pagination": {
                 "page": page,
                 "per_page": per_page,
                 "total": total,
