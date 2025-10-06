@@ -176,4 +176,35 @@ def delete_address(address_id):
         if conn: conn.rollback()  
         return False  
     finally:  
+        if conn: conn.close()
+
+def set_default_address(user_id, address_id):
+    """
+    Define um endereço como padrão para o usuário.
+    Desmarca todos os outros endereços do usuário como não padrão.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se o endereço pertence ao usuário e está ativo
+        cur.execute('SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;', (address_id, user_id))
+        if not cur.fetchone():
+            return False, "Endereço não encontrado ou não pertence ao usuário"
+        
+        # Desmarca todos os endereços do usuário como não padrão
+        cur.execute("UPDATE ADDRESSES SET IS_DEFAULT = FALSE WHERE USER_ID = ?;", (user_id,))
+        
+        # Define o endereço especificado como padrão
+        cur.execute("UPDATE ADDRESSES SET IS_DEFAULT = TRUE WHERE ID = ? AND USER_ID = ?;", (address_id, user_id))
+        
+        conn.commit()
+        return True, "Endereço definido como padrão com sucesso"
+        
+    except fdb.Error as e:
+        print(f"Erro ao definir endereço padrão: {e}")
+        if conn: conn.rollback()
+        return False, "Erro interno do servidor"
+    finally:
         if conn: conn.close()  

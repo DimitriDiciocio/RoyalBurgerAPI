@@ -243,7 +243,27 @@ def delete_address_route(user_id, address_id):
         return jsonify({"msg": "Endereço não encontrado ou acesso não autorizado"}), 404  
     if address_service.delete_address(address_id):  
         return jsonify({"msg": "Endereço deletado com sucesso"}), 200  
-    return jsonify({"error": "Falha ao deletar endereço"}), 500  
+    return jsonify({"error": "Falha ao deletar endereço"}), 500
+
+@customer_bp.route('/<int:user_id>/addresses/<int:address_id>/set-default', methods=['PUT'])  
+@jwt_required()  
+def set_default_address_route(user_id, address_id):  
+    """
+    Define um endereço como padrão para o usuário.
+    """
+    claims = get_jwt()  
+    if int(claims.get('sub')) != user_id:  
+        return jsonify({"msg": "Acesso não autorizado"}), 403  
+    
+    success, message = address_service.set_default_address(user_id, address_id)
+    
+    if success:
+        return jsonify({"msg": message}), 200  
+    else:
+        if "não encontrado" in message:
+            return jsonify({"error": message}), 404
+        else:
+            return jsonify({"error": message}), 500  
 
 @customer_bp.route('/<int:user_id>/loyalty/balance', methods=['GET'])  
 @require_role('customer')
