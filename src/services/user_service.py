@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from . import email_service
 from . import loyalty_service
 from ..database import get_db_connection  
+from . import auth_service
 from ..utils import token_helper  
 from ..utils import validators  
 
@@ -525,7 +526,12 @@ def change_user_password(user_id, current_password, new_password):
             return (False, "USER_NOT_FOUND", "Usuário não encontrado")
         
         conn.commit()
-        return (True, None, "Senha alterada com sucesso")
+        # Revoga todos os tokens do usuário (logout global)
+        try:
+            auth_service.revoke_all_tokens_for_user(user_id)
+        except Exception as e:
+            print(f"Aviso: falha ao revogar tokens do usuário {user_id}: {e}")
+        return (True, None, "Senha alterada com sucesso. Você será desconectado em todos os dispositivos.")
         
     except fdb.Error as e:
         print(f"Erro ao alterar senha: {e}")

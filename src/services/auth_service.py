@@ -109,15 +109,57 @@ def verify_2fa_and_login(user_id, code):
 
 def is_token_revoked(jwt_payload):  
     jti = jwt_payload['jti']  
+    user_sub = jwt_payload.get('sub')  
+    token_iat = jwt_payload.get('iat')  
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = "SELECT JTI FROM TOKEN_BLACKLIST WHERE JTI = ?;"  
+        # 1) Blacklist por JTI
+        sql = "SELECT 1 FROM TOKEN_BLACKLIST WHERE JTI = ?;"  
         cur.execute(sql, (jti,))  
-        return cur.fetchone() is not None  
+        if cur.fetchone() is not None:
+            return True
+        # 2) Revogação global por usuário (se existir tabela USER_TOKEN_BLACKLIST)
+        try:
+            cur.execute("SELECT REVOKED_AFTER FROM USER_TOKEN_BLACKLIST WHERE USER_ID = ?;", (int(user_sub),))
+            row = cur.fetchone()
+            if row and row[0] is not None and token_iat is not None:
+                # token_iat é epoch seconds; compara com REVOKED_AFTER
+                from datetime import datetime, timezone
+                revoked_after = row[0]
+                token_time = datetime.fromtimestamp(int(token_iat), tz=timezone.utc)
+                # Se token é anterior ao momento de revogação, considerar revogado
+                if token_time <= revoked_after.replace(tzinfo=timezone.utc):
+                    return True
+        except fdb.Error:
+            # Se a tabela não existir, ignora verificação de usuário
+            pass
+        return False  
     except fdb.Error as e:  
         print(f"Erro ao verificar a blacklist de tokens: {e}")  
         return False  
     finally:  
         if conn: conn.close()  
+
+
+def revoke_all_tokens_for_user(user_id):
+    """Marca todos os tokens do usuário como revogados a partir de agora.
+    Requer tabela USER_TOKEN_BLACKLIST (USER_ID INTEGER PRIMARY KEY, REVOKED_AFTER TIMESTAMP).
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Upsert (em Firebird: tenta update, se 0 linhas, faz insert)
+        cur.execute("UPDATE USER_TOKEN_BLACKLIST SET REVOKED_AFTER = CURRENT_TIMESTAMP WHERE USER_ID = ?;", (user_id,))
+        if cur.rowcount == 0:
+            cur.execute("INSERT INTO USER_TOKEN_BLACKLIST (USER_ID, REVOKED_AFTER) VALUES (?, CURRENT_TIMESTAMP);", (user_id,))
+        conn.commit()
+        return True
+    except fdb.Error as e:
+        print(f"Erro ao revogar tokens do usuário {user_id}: {e}")
+        if conn: conn.rollback()
+        return False
+    finally:
+        if conn: conn.close()
