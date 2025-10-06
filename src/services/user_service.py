@@ -9,16 +9,21 @@ from ..utils import validators
 
 def convert_date_format(date_string):
     """
-    Converte data do formato DD-MM-YYYY (frontend) para YYYY-MM-DD (Firebird).
+    Converte data do formato DD-MM-YYYY ou DD-MM-YY (frontend) para YYYY-MM-DD (Firebird).
     Retorna a data convertida ou None se inválida.
     """
     if not date_string:
         return None
     
     try:
-        if len(date_string) == 10 and date_string.count('-') == 2:
+        if date_string.count('-') == 2:
             day, month, year = date_string.split('-')
-            if len(day) == 2 and len(month) == 2 and len(year) == 4:
+            if len(day) == 2 and len(month) == 2 and len(year) in (2, 4):
+                if len(year) == 2:
+                    # Converte YY -> YYYY usando pivô 50 (00-50 => 2000-2050; 51-99 => 1951-1999)
+                    yy = int(year)
+                    full_year = 2000 + yy if yy <= 50 else 1900 + yy
+                    year = str(full_year)
                 return f"{year}-{month}-{day}"
     except:
         pass

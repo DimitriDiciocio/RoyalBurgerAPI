@@ -97,6 +97,10 @@ def update_customer_route(user_id):
     if data.get('role') and data.get('role') != 'customer':
         return jsonify({"error": "Não é possível alterar o cargo de um cliente"}), 400
 
+    # Normaliza date_of_birth aceitando DD-MM-YY ou DD-MM-YYYY via service
+    if 'date_of_birth' in data and isinstance(data['date_of_birth'], str):
+        data['date_of_birth'] = user_service.convert_date_format(data['date_of_birth'])
+
     success, error_code, message = user_service.update_user(user_id, data)  
 
     if success:  
