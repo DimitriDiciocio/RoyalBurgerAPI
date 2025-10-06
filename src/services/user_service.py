@@ -303,9 +303,15 @@ def update_user(user_id, update_data, is_admin_request=False):
             if new_cpf and not validators.is_valid_cpf(new_cpf):
                 return (False, "INVALID_CPF", "O CPF fornecido é inválido.")
 
+        if 'role' in update_data:
+            new_role = update_data['role']
+            valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+            if new_role not in valid_roles:
+                return (False, "INVALID_ROLE", "Cargo inválido. Cargos válidos: admin, manager, attendant, delivery, customer")
+
         allowed_fields = ['full_name', 'date_of_birth', 'phone', 'cpf']
         if is_admin_request:
-            allowed_fields.append('email')
+            allowed_fields.extend(['email', 'role'])
         fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}
 
         if not fields_to_update:

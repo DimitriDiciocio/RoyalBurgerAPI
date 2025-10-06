@@ -257,7 +257,7 @@ def update_user_route(user_id):
         return jsonify({"error": message}), 404
     elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:
         return jsonify({"error": message}), 409
-    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS", "EMAIL_CHANGE_REQUIRES_VERIFICATION"]:
+    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "INVALID_ROLE", "NO_VALID_FIELDS", "EMAIL_CHANGE_REQUIRES_VERIFICATION"]:
         return jsonify({"error": message}), 400
     elif error_code == "DATABASE_ERROR":
         return jsonify({"error": message}), 500
@@ -350,7 +350,7 @@ def update_admin_route(user_id):
         return jsonify({"error": message}), 404
     elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:
         return jsonify({"error": message}), 409
-    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS", "EMAIL_CHANGE_REQUIRES_VERIFICATION"]:
+    elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "INVALID_ROLE", "NO_VALID_FIELDS", "EMAIL_CHANGE_REQUIRES_VERIFICATION"]:
         return jsonify({"error": message}), 400
     elif error_code == "DATABASE_ERROR":
         return jsonify({"error": message}), 500
