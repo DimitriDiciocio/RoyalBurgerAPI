@@ -1,5 +1,6 @@
 import fdb  
-from ..database import get_db_connection  
+from ..database import get_db_connection
+from ..utils.image_handler import get_product_image_url  
 
 def create_product(product_data):  
     name = product_data.get('name')  
@@ -69,15 +70,23 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10):
             f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
-        items = [{  
-            "id": row[0],  
-            "name": row[1],  
-            "description": row[2],  
-            "price": str(row[3]),  
-            "cost_price": str(row[4]) if row[4] else "0.00",  
-            "preparation_time_minutes": row[5] if row[5] else 0,  
-            "category_id": row[6]  
-        } for row in cur.fetchall()]  
+        items = []  
+        for row in cur.fetchall():
+            product_id = row[0]
+            item = {  
+                "id": product_id,  
+                "name": row[1],  
+                "description": row[2],  
+                "price": str(row[3]),  
+                "cost_price": str(row[4]) if row[4] else "0.00",  
+                "preparation_time_minutes": row[5] if row[5] else 0,  
+                "category_id": row[6]  
+            }
+            # Adiciona URL da imagem se existir
+            image_url = get_product_image_url(product_id)
+            if image_url:
+                item["image_url"] = image_url
+            items.append(item)  
         total_pages = (total + page_size - 1) // page_size  
         return {  
             "items": items,  
@@ -112,7 +121,13 @@ def get_product_by_id(product_id):
         cur.execute(sql, (product_id,))  
         row = cur.fetchone()  
         if row:  
-            return {"id": row[0], "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0, "category_id": row[6]}  
+            product_id = row[0]
+            product = {"id": product_id, "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0, "category_id": row[6]}
+            # Adiciona URL da imagem se existir
+            image_url = get_product_image_url(product_id)
+            if image_url:
+                product["image_url"] = image_url
+            return product
         return None  
     except fdb.Error as e:  
         print(f"Erro ao buscar produto por ID: {e}")  

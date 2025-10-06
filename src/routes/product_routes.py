@@ -1,6 +1,8 @@
-from flask import Blueprint, request, jsonify  
+from flask import Blueprint, request, jsonify, send_from_directory
+import os
 from ..services import product_service  
-from ..services.auth_service import require_role  
+from ..services.auth_service import require_role
+from ..utils.image_handler import save_product_image, delete_product_image  
 
 product_bp = Blueprint('products', __name__)  
 
@@ -23,48 +25,86 @@ def get_product_by_id_route(product_id):
 @product_bp.route('/', methods=['POST'])  
 @require_role('admin', 'manager')  
 def create_product_route():  
-    data = request.get_json()  
-    if not data:  
-        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400  
+    # Verifica se há dados JSON
+    data = request.get_json() if request.get_json() else {}
+    
+    # Verifica se há arquivo de imagem
+    image_file = request.files.get('image')
+    
+    if not data and not image_file:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    # Cria o produto primeiro
     new_product, error_code, error_message = product_service.create_product(data)  
-    if new_product:  
-        return jsonify(new_product), 201  
-    if error_code in ["INVALID_NAME", "INVALID_PRICE", "INVALID_COST_PRICE", "INVALID_PREP_TIME", "INVALID_CATEGORY"]:  
-        return jsonify({"error": error_message}), 400  
-    if error_code == "CATEGORY_NOT_FOUND":  
-        return jsonify({"error": error_message}), 404  
-    if error_code == "PRODUCT_NAME_EXISTS":  
-        return jsonify({"error": error_message}), 409  
-    if error_code == "DATABASE_ERROR":  
-        return jsonify({"error": error_message}), 500  
-    return jsonify({"error": "Não foi possível criar o produto"}), 500  
+    if not new_product:
+        if error_code in ["INVALID_NAME", "INVALID_PRICE", "INVALID_COST_PRICE", "INVALID_PREP_TIME", "INVALID_CATEGORY"]:  
+            return jsonify({"error": error_message}), 400  
+        if error_code == "CATEGORY_NOT_FOUND":  
+            return jsonify({"error": error_message}), 404  
+        if error_code == "PRODUCT_NAME_EXISTS":  
+            return jsonify({"error": error_message}), 409  
+        if error_code == "DATABASE_ERROR":  
+            return jsonify({"error": error_message}), 500  
+        return jsonify({"error": "Não foi possível criar o produto"}), 500
+    
+    # Se o produto foi criado com sucesso e há uma imagem, salva a imagem
+    if image_file:
+        product_id = new_product.get('id')
+        success, file_path, error_msg = save_product_image(image_file, product_id)
+        
+        if not success:
+            # Se falhou ao salvar a imagem, remove o produto criado
+            product_service.deactivate_product(product_id)
+            return jsonify({"error": f"Produto criado mas falha ao salvar imagem: {error_msg}"}), 500
+        
+        # Adiciona a URL da imagem ao produto retornado
+        new_product['image_url'] = f"/uploads/products/{product_id}.jpeg"
+    
+    return jsonify(new_product), 201  
 
 @product_bp.route('/<int:product_id>', methods=['PUT'])  
 @require_role('admin', 'manager')  
 def update_product_route(product_id):  
-    data = request.get_json()  
-    if not data:  
-        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400  
+    # Verifica se há dados JSON
+    data = request.get_json() if request.get_json() else {}
+    
+    # Verifica se há arquivo de imagem
+    image_file = request.files.get('image')
+    
+    if not data and not image_file:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    # Atualiza o produto primeiro
     success, error_code, message = product_service.update_product(product_id, data)  
-    if success:  
-        return jsonify({"msg": message}), 200  
-    if error_code == "PRODUCT_NOT_FOUND":  
-        return jsonify({"error": message}), 404  
-    if error_code == "PRODUCT_NAME_EXISTS":  
-        return jsonify({"error": message}), 409  
-    if error_code in ["INVALID_NAME", "INVALID_PRICE", "INVALID_COST_PRICE", "INVALID_PREP_TIME", "NO_VALID_FIELDS", "INVALID_CATEGORY"]:  
-        return jsonify({"error": message}), 400  
-    if error_code == "CATEGORY_NOT_FOUND":  
-        return jsonify({"error": message}), 404  
-    elif error_code == "DATABASE_ERROR":  
-        return jsonify({"error": message}), 500  
-    else:  
-        return jsonify({"error": "Falha ao atualizar produto"}), 500  
+    if not success:
+        if error_code == "PRODUCT_NOT_FOUND":  
+            return jsonify({"error": message}), 404  
+        if error_code == "PRODUCT_NAME_EXISTS":  
+            return jsonify({"error": message}), 409  
+        if error_code in ["INVALID_NAME", "INVALID_PRICE", "INVALID_COST_PRICE", "INVALID_PREP_TIME", "NO_VALID_FIELDS", "INVALID_CATEGORY"]:  
+            return jsonify({"error": message}), 400  
+        if error_code == "CATEGORY_NOT_FOUND":  
+            return jsonify({"error": message}), 404  
+        elif error_code == "DATABASE_ERROR":  
+            return jsonify({"error": message}), 500  
+        else:  
+            return jsonify({"error": "Falha ao atualizar produto"}), 500
+    
+    # Se o produto foi atualizado com sucesso e há uma nova imagem, salva a imagem
+    if image_file:
+        success, file_path, error_msg = save_product_image(image_file, product_id)
+        
+        if not success:
+            return jsonify({"error": f"Produto atualizado mas falha ao salvar imagem: {error_msg}"}), 500
+    
+    return jsonify({"msg": message}), 200  
 
 @product_bp.route('/<int:product_id>', methods=['DELETE'])  
 @require_role('admin', 'manager')  
 def delete_product_route(product_id):  
     if product_service.deactivate_product(product_id):  
+        # Remove a imagem do produto se existir
+        delete_product_image(product_id)
         return jsonify({"msg": "Produto inativado com sucesso"}), 200  
     return jsonify({"error": "Falha ao inativar produto ou produto não encontrado"}), 404  
 
@@ -124,4 +164,25 @@ def search_products_route():
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
     result = product_service.search_products(name=name, category_id=category_id, page=page, page_size=page_size)  
-    return jsonify(result), 200  
+    return jsonify(result), 200
+
+@product_bp.route('/image/<int:product_id>', methods=['GET'])
+def get_product_image_route(product_id):
+    """
+    Serve a imagem do produto
+    """
+    try:
+        # Caminho para a pasta de uploads
+        upload_dir = os.path.join(os.getcwd(), 'uploads', 'products')
+        filename = f"{product_id}.jpeg"
+        
+        # Verifica se o arquivo existe
+        file_path = os.path.join(upload_dir, filename)
+        if not os.path.exists(file_path):
+            return jsonify({"error": "Imagem não encontrada"}), 404
+        
+        # Serve o arquivo
+        return send_from_directory(upload_dir, filename, mimetype='image/jpeg')
+        
+    except Exception as e:
+        return jsonify({"error": "Erro ao carregar imagem"}), 500  

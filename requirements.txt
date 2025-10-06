@@ -11,3 +11,4 @@ flask-swagger-ui
 PyYAML
 requests
 python-dateutil
+Pillow
