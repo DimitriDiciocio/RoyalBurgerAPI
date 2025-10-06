@@ -120,18 +120,13 @@ def create_user(user_data):
 
         new_user = {
             "id": new_user_id,
-            "nome": full_name,  # Compatibilidade com frontend
-            "full_name": full_name,  # Mantém compatibilidade com backend
+            "full_name": full_name,
             "email": email,
-            "cargo": role,  # Compatibilidade com frontend
-            "role": role,  # Mantém compatibilidade com backend
-            "nascimento": date_of_birth,  # Compatibilidade com frontend
-            "date_of_birth": date_of_birth,  # Mantém compatibilidade com backend
-            "telefone": phone,  # Compatibilidade com frontend
-            "phone": phone,  # Mantém compatibilidade com backend
+            "role": role,
+            "date_of_birth": date_of_birth,
+            "phone": phone,
             "cpf": cpf,
-            "ativo": True,  # Compatibilidade com frontend
-            "is_active": True,  # Mantém compatibilidade com backend
+            "is_active": True,
         }
 
         # Envia e-mail de boas-vindas após o commit (fora da transação)
@@ -213,20 +208,14 @@ def get_user_by_id(user_id):
         if row:
             return {
                 "id": row[0],
-                "nome": row[1],  # Compatibilidade com frontend
-                "full_name": row[1],  # Mantém compatibilidade com backend
+                "full_name": row[1],
                 "email": row[2],
-                "telefone": row[3],  # Compatibilidade com frontend
-                "phone": row[3],  # Mantém compatibilidade com backend
+                "phone": row[3],
                 "cpf": row[4],
-                "cargo": row[5],  # Compatibilidade com frontend
-                "role": row[5],  # Mantém compatibilidade com backend
-                "nascimento": row[6].strftime('%Y-%m-%d') if row[6] else None,  # Compatibilidade com frontend
-                "date_of_birth": row[6].strftime('%Y-%m-%d') if row[6] else None,  # Mantém compatibilidade com backend
-                "ativo": bool(row[7]) if row[7] is not None else True,  # Compatibilidade com frontend
-                "is_active": bool(row[7]) if row[7] is not None else True,  # Mantém compatibilidade com backend
-                "dataCriacao": row[8].strftime('%Y-%m-%dT%H:%M:%SZ') if row[8] else None,  # Compatibilidade com frontend
-                "created_at": row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,  # Mantém compatibilidade com backend
+                "role": row[5],
+                "date_of_birth": row[6].strftime('%Y-%m-%d') if row[6] else None,
+                "is_active": bool(row[7]) if row[7] is not None else True,
+                "created_at": row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,
                 "is_email_verified": bool(row[9]) if row[9] is not None else False,
                 "two_factor_enabled": bool(row[10]) if row[10] is not None else False,
             }
