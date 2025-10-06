@@ -4,7 +4,7 @@ import fdb
 import random
 import string
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service
 from ..database import get_db_connection
 from ..utils import validators
 
@@ -382,5 +382,112 @@ def cancel_order_by_customer(order_id, user_id):
         print(f"Erro ao cancelar pedido: {e}")
         if conn: conn.rollback()
         return (False, "Ocorreu um erro interno ao tentar cancelar o pedido.")
+    finally:
+        if conn: conn.close()
+
+
+def create_order_from_cart(user_id, address_id, payment_method, change_for_amount=None, notes="", cpf_on_invoice=None, points_to_redeem=0):
+    """
+    Fluxo 4: Finalização (Converter Carrinho em Pedido)
+    Cria um pedido a partir do carrinho do usuário
+    """
+    conn = None
+    try:
+        # Inicia transação
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se a loja está aberta
+        is_open, message = store_service.is_store_open()
+        if not is_open:
+            return (None, "STORE_CLOSED", message)
+        
+        # Busca o carrinho do usuário
+        cart_data = cart_service.get_cart_for_order(user_id)
+        if not cart_data:
+            return (None, "EMPTY_CART", "Carrinho está vazio")
+        
+        # Validações básicas
+        if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
+            return (None, "INVALID_CPF", f"O CPF informado '{cpf_on_invoice}' é inválido.")
+        
+        # Verifica se o endereço pertence ao usuário
+        cur.execute("SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;", (address_id, user_id))
+        if not cur.fetchone():
+            return (None, "INVALID_ADDRESS", "Endereço não encontrado ou não pertence ao usuário.")
+        
+        # Gera código de confirmação
+        confirmation_code = _generate_confirmation_code()
+        
+        # Calcula total do carrinho
+        total_amount = cart_data["total_amount"]
+        
+        # Aplica desconto de pontos se fornecido
+        if points_to_redeem > 0:
+            points_value = loyalty_service.calculate_points_value(points_to_redeem)
+            total_amount = max(0, total_amount - points_value)
+        
+        # Cria o pedido
+        sql_order = """
+            INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, 
+                              NOTES, CONFIRMATION_CODE, CHANGE_FOR_AMOUNT, CPF_ON_INVOICE, POINTS_TO_REDEEM)
+            VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING ID;
+        """
+        cur.execute(sql_order, (user_id, address_id, total_amount, payment_method, notes, 
+                               confirmation_code, change_for_amount, cpf_on_invoice, points_to_redeem))
+        order_id = cur.fetchone()[0]
+        
+        # Copia itens do carrinho para o pedido
+        for item in cart_data["items"]:
+            # Insere item principal
+            sql_item = """
+                INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY)
+                VALUES (?, ?, ?) RETURNING ID;
+            """
+            cur.execute(sql_item, (order_id, item["product_id"], item["quantity"]))
+            order_item_id = cur.fetchone()[0]
+            
+            # Insere extras do item
+            for extra in item["extras"]:
+                sql_extra = """
+                    INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY)
+                    VALUES (?, ?, ?);
+                """
+                cur.execute(sql_extra, (order_item_id, extra["ingredient_id"], extra["quantity"]))
+        
+        # Limpa o carrinho do usuário
+        cart_id = cart_data["cart_id"]
+        cur.execute("DELETE FROM CART_ITEMS WHERE CART_ID = ?;", (cart_id,))
+        
+        # Aplica pontos de fidelidade se houver
+        if total_amount > 0:
+            loyalty_service.add_loyalty_points(user_id, total_amount)
+        
+        # Consome pontos se houver
+        if points_to_redeem > 0:
+            loyalty_service.consume_loyalty_points(user_id, points_to_redeem)
+        
+        # Confirma transação
+        conn.commit()
+        
+        # Busca dados completos do pedido criado
+        order_data = get_order_details(order_id, user_id, ['customer'])
+        
+        # Envia notificação
+        try:
+            notification_service.send_order_confirmation(user_id, order_data)
+        except Exception as e:
+            print(f"Erro ao enviar notificação: {e}")
+        
+        return (order_data, None, "Pedido criado com sucesso a partir do carrinho")
+        
+    except fdb.Error as e:
+        print(f"Erro ao criar pedido do carrinho: {e}")
+        if conn: conn.rollback()
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
+    except Exception as e:
+        print(f"Erro inesperado ao criar pedido do carrinho: {e}")
+        if conn: conn.rollback()
+        return (None, "UNKNOWN_ERROR", "Erro inesperado")
     finally:
         if conn: conn.close()

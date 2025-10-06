@@ -15,8 +15,11 @@ mail = Mail()
 
 def create_app():  
     app = Flask(__name__)  
-    app.config.from_object(Config)  
-    CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500"]}}, supports_credentials=True, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])  
+    app.config.from_object(Config)
+    
+    # Configuração para permitir multipart/form-data
+    app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB  
+    CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500", "http://127.0.0.1:5000"]}}, supports_credentials=True, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization', 'Content-Disposition'])  
     jwt = JWTManager(app)  
     app.config["JWT_BLOCKLIST_ENABLED"] = True  
     app.config["JWT_BLOCKLIST_TOKEN_CHECKS"] = ["access", "refresh"]  
@@ -82,6 +85,8 @@ def create_app():
     app.register_blueprint(settings_bp, url_prefix='/api/settings')  
     from .routes.category_routes import category_bp  
     app.register_blueprint(category_bp, url_prefix='/api/categories')  
+    from .routes.cart_routes import cart_bp  
+    app.register_blueprint(cart_bp, url_prefix='/api/cart')  
     app.register_blueprint(swagger_bp, url_prefix='/api/docs')  
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')  
     from .sockets import chat_events  
@@ -94,19 +99,76 @@ def create_app():
             response = make_response()
             # Verifica a origem da requisição
             origin = request.headers.get('Origin')
-            allowed_origins = ["http://127.0.0.1:5500", "http://localhost:5500"]
+            allowed_origins = ["http://127.0.0.1:5500", "http://localhost:5500", "http://127.0.0.1:5000"]
             
             if origin in allowed_origins:
                 response.headers.add("Access-Control-Allow-Origin", origin)
             else:
                 response.headers.add("Access-Control-Allow-Origin", "http://127.0.0.1:5500")
             
-            response.headers.add('Access-Control-Allow-Headers', "Content-Type, Authorization")
+            response.headers.add('Access-Control-Allow-Headers', "Content-Type, Authorization, Content-Disposition")
             response.headers.add('Access-Control-Allow-Methods', "GET, POST, PUT, DELETE, PATCH, OPTIONS")
             response.headers.add('Access-Control-Allow-Credentials', "true")
             return response
     
+    # Handler para permitir diferentes tipos de conteúdo
+    @app.before_request
+    def handle_content_type():
+        from flask import request
+        # Permite multipart/form-data para uploads
+        if request.method in ['POST', 'PUT'] and request.content_type and 'multipart/form-data' in request.content_type:
+            # Não faz nada, deixa o Flask processar normalmente
+            pass
+    
     @app.route('/api/health')  
     def health_check():  
-        return "API is running!"  
+        return "API is running!"
+    
+    # Rota segura para servir uploads
+    @app.route('/api/uploads/<path:filename>')
+    def serve_upload(filename):
+        """
+        Serve arquivos de upload de forma segura
+        """
+        from flask import send_from_directory, abort
+        import os
+        
+        try:
+            # Valida o nome do arquivo para segurança
+            if '..' in filename or filename.startswith('/'):
+                abort(400)
+            
+            # Determina o diretório baseado no tipo de arquivo
+            if filename.startswith('products/'):
+                upload_dir = os.path.join(os.getcwd(), 'uploads', 'products')
+                filename = filename.replace('products/', '')
+            else:
+                abort(404)
+            
+            # Verifica se o arquivo existe
+            file_path = os.path.join(upload_dir, filename)
+            if not os.path.exists(file_path):
+                abort(404)
+            
+            # Determina o MIME type
+            if filename.endswith('.jpeg') or filename.endswith('.jpg'):
+                mimetype = 'image/jpeg'
+            elif filename.endswith('.png'):
+                mimetype = 'image/png'
+            elif filename.endswith('.gif'):
+                mimetype = 'image/gif'
+            else:
+                abort(400)
+            
+            # Serve o arquivo com headers de segurança
+            response = send_from_directory(upload_dir, filename, mimetype=mimetype)
+            response.headers['Cache-Control'] = 'public, max-age=3600'  # Cache por 1 hora
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['X-Frame-Options'] = 'DENY'
+            return response
+            
+        except Exception as e:
+            print(f"Erro ao servir upload: {e}")
+            abort(500)
+    
     return app  

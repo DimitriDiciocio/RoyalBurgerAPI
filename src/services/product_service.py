@@ -31,8 +31,8 @@ def create_product(product_data):
         cur.execute(sql_check, (name,))  
         if cur.fetchone():  
             return (None, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")  
-        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID) VALUES (?, ?, ?, ?, ?, ?) RETURNING ID;"  
-        cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes, category_id))  
+        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ID;"  
+        cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes, category_id, None))  
         new_product_id = cur.fetchone()[0]  
         conn.commit()  
         return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id}, None, None)  
@@ -66,7 +66,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10):
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID "  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL "  
             f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
@@ -82,10 +82,9 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10):
                 "preparation_time_minutes": row[5] if row[5] else 0,  
                 "category_id": row[6]  
             }
-            # Adiciona URL da imagem se existir
-            image_url = get_product_image_url(product_id)
-            if image_url:
-                item["image_url"] = image_url
+            # Adiciona URL da imagem do banco se existir
+            if row[7]:  # IMAGE_URL
+                item["image_url"] = row[7]
             items.append(item)  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -117,16 +116,15 @@ def get_product_by_id(product_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"  
+        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"  
         cur.execute(sql, (product_id,))  
         row = cur.fetchone()  
         if row:  
             product_id = row[0]
             product = {"id": product_id, "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0, "category_id": row[6]}
-            # Adiciona URL da imagem se existir
-            image_url = get_product_image_url(product_id)
-            if image_url:
-                product["image_url"] = image_url
+            # Adiciona URL da imagem do banco se existir
+            if row[7]:  # IMAGE_URL
+                product["image_url"] = row[7]
             return product
         return None  
     except fdb.Error as e:  
@@ -198,16 +196,75 @@ def deactivate_product(product_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
+        
+        # Primeiro verifica se o produto existe
+        sql_check = "SELECT ID FROM PRODUCTS WHERE ID = ?;"
+        cur.execute(sql_check, (product_id,))
+        if not cur.fetchone():
+            return False  # Produto não existe
+        
+        # Atualiza o produto para inativo
         sql = "UPDATE PRODUCTS SET IS_ACTIVE = FALSE WHERE ID = ?;"  
         cur.execute(sql, (product_id,))  
         conn.commit()  
-        return cur.rowcount > 0  
+        return True  # Sempre retorna True se o produto existe
     except fdb.Error as e:  
         print(f"Erro ao inativar produto: {e}")  
         if conn: conn.rollback()  
         return False  
     finally:  
         if conn: conn.close()  
+
+
+def update_product_image_url(product_id, image_url):
+    """Atualiza a URL da imagem do produto no banco de dados"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se o produto existe
+        sql_check = "SELECT ID FROM PRODUCTS WHERE ID = ?;"
+        cur.execute(sql_check, (product_id,))
+        if not cur.fetchone():
+            return False  # Produto não existe
+        
+        # Atualiza a URL da imagem
+        sql = "UPDATE PRODUCTS SET IMAGE_URL = ? WHERE ID = ?;"
+        cur.execute(sql, (image_url, product_id))
+        conn.commit()
+        return True
+    except fdb.Error as e:
+        print(f"Erro ao atualizar URL da imagem: {e}")
+        if conn: conn.rollback()
+        return False
+    finally:
+        if conn: conn.close()
+
+
+def reactivate_product(product_id):  
+    conn = None  
+    try:  
+        conn = get_db_connection()  
+        cur = conn.cursor()  
+        
+        # Primeiro verifica se o produto existe
+        sql_check = "SELECT ID FROM PRODUCTS WHERE ID = ?;"
+        cur.execute(sql_check, (product_id,))
+        if not cur.fetchone():
+            return False  # Produto não existe
+        
+        # Atualiza o produto para ativo
+        sql = "UPDATE PRODUCTS SET IS_ACTIVE = TRUE WHERE ID = ?;"  
+        cur.execute(sql, (product_id,))  
+        conn.commit()  
+        return True  # Sempre retorna True se o produto existe
+    except fdb.Error as e:  
+        print(f"Erro ao reativar produto: {e}")  
+        if conn: conn.rollback()  
+        return False  
+    finally:  
+        if conn: conn.close()
 
 
 def search_products(name=None, category_id=None, page=1, page_size=10):  

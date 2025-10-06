@@ -8,6 +8,7 @@ info:
     - Sistema de autenticação JWT
     - Gestão de clientes e funcionários
     - Catálogo de produtos e ingredientes
+    - Sistema de carrinho de compras persistente
     - Sistema de pedidos com rastreamento
     - Chat em tempo real
     - Sistema de notificações
@@ -51,6 +52,8 @@ x-error-codes:
   # Produtos
   INVALID_NAME: "Nome inválido ou obrigatório"
   INVALID_PRICE: "Preço inválido"
+  INVALID_COST_PRICE: "Preço de custo inválido"
+  INVALID_PREP_TIME: "Tempo de preparo inválido"
   PRODUCT_NAME_EXISTS: "Nome do produto já existe"
   PRODUCT_NOT_FOUND: "Produto não encontrado"
   INVALID_CATEGORY: "Categoria inválida ou ausente"
@@ -60,6 +63,7 @@ x-error-codes:
   INVALID_UNIT: "Unidade do insumo inválida ou ausente"
   INVALID_COST: "Custo inválido"
   INGREDIENT_IN_USE: "Ingrediente vinculado a produtos"
+  LINK_NOT_FOUND: "Vínculo entre produto e ingrediente não encontrado"
 
   # Sistema
   DATABASE_ERROR: "Erro interno do servidor"
@@ -85,6 +89,74 @@ components:
       properties:
         msg:
           type: string
+    CartResponse:
+      type: object
+      properties:
+        cart:
+          type: object
+          properties:
+            id:
+              type: integer
+            user_id:
+              type: integer
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              product_id:
+                type: integer
+              quantity:
+                type: integer
+              product:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  name:
+                    type: string
+                  price:
+                    type: number
+                  description:
+                    type: string
+                  image_url:
+                    type: string
+              extras:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    ingredient_id:
+                      type: integer
+                    quantity:
+                      type: integer
+                    ingredient_name:
+                      type: string
+                    ingredient_price:
+                      type: number
+              extras_total:
+                type: number
+              item_subtotal:
+                type: number
+        summary:
+          type: object
+          properties:
+            total_items:
+              type: integer
+            subtotal:
+              type: number
+            is_empty:
+              type: boolean
           example: "Operação realizada com sucesso."
 
     ErrorResponse:
@@ -544,12 +616,18 @@ components:
 
     NewOrder:
       type: object
-      required: [address_id, items, payment_method]
+      required: [address_id, payment_method]
       properties:
         address_id:
           type: integer
           example: 1
+        use_cart:
+          type: boolean
+          default: false
+          description: "Se true, cria pedido a partir do carrinho. Se false, usa items fornecidos."
+          example: false
         items:
+          description: "Obrigatório apenas quando use_cart é false"
           type: array
           items:
             type: object
@@ -1069,7 +1147,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/VerifyPassword'
+              $ref: "#/components/schemas/VerifyPassword"
       responses:
         "200":
           description: Senha verificada com sucesso.
@@ -1262,7 +1340,7 @@ paths:
     post:
       tags: [Produtos]
       summary: Criar novo produto
-      description: Cria um novo produto (admin/manager)
+      description: Cria um novo produto (admin/manager). Suporta upload de imagem via multipart/form-data
       security:
         - bearerAuth: []
       requestBody:
@@ -1271,6 +1349,34 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/NewProduct"
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "Hambúrguer Especial"
+                description:
+                  type: string
+                  example: "Hambúrguer com ingredientes especiais"
+                price:
+                  type: number
+                  format: float
+                  example: 35.90
+                cost_price:
+                  type: number
+                  format: float
+                  example: 20.50
+                preparation_time_minutes:
+                  type: integer
+                  example: 15
+                category_id:
+                  type: integer
+                  example: 2
+                image:
+                  type: string
+                  format: binary
+                  description: Arquivo de imagem do produto (JPEG/PNG)
       responses:
         "201":
           description: Produto criado com sucesso
@@ -1279,7 +1385,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Product"
         "400":
-          description: Dados inválidos (nome vazio, preço inválido)
+          description: Dados inválidos (nome vazio, preço inválido, preço de custo inválido, tempo de preparo inválido, categoria inválida)
           content:
             application/json:
               schema:
@@ -1333,7 +1439,7 @@ paths:
     put:
       tags: [Produtos]
       summary: Atualizar produto
-      description: Atualiza um produto (admin/manager)
+      description: Atualiza um produto (admin/manager). Suporta upload de nova imagem via multipart/form-data
       security:
         - bearerAuth: []
       parameters:
@@ -1348,6 +1454,34 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/NewProduct"
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "Hambúrguer Especial"
+                description:
+                  type: string
+                  example: "Hambúrguer com ingredientes especiais"
+                price:
+                  type: number
+                  format: float
+                  example: 35.90
+                cost_price:
+                  type: number
+                  format: float
+                  example: 20.50
+                preparation_time_minutes:
+                  type: integer
+                  example: 15
+                category_id:
+                  type: integer
+                  example: 2
+                image:
+                  type: string
+                  format: binary
+                  description: Nova imagem do produto (JPEG/PNG)
       responses:
         "200":
           description: Produto atualizado com sucesso
@@ -1356,7 +1490,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
         "400":
-          description: Dados inválidos (nome vazio, preço inválido, categoria inválida, nenhum campo válido)
+          description: Dados inválidos (nome vazio, preço inválido, preço de custo inválido, tempo de preparo inválido, categoria inválida, nenhum campo válido)
           content:
             application/json:
               schema:
@@ -1394,8 +1528,62 @@ paths:
       responses:
         "200":
           description: Produto inativado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
         "404":
           description: Produto não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /products/{product_id}/reactivate:
+    post:
+      tags: [Produtos]
+      summary: Reativar produto
+      description: Reativa um produto que foi inativado (admin/manager)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: ID do produto a ser reativado
+      responses:
+        "200":
+          description: Produto reativado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Produto não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   # Endpoints de Ingredientes
   /ingredients:
@@ -1625,41 +1813,12 @@ paths:
                 $ref: "#/components/schemas/MessageResponse"
         "400":
           description: Dados inválidos
-    put:
-      tags: [Produtos]
-      summary: Atualizar vínculo de insumo (quantidade/unidade)
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                ingredient_id:
-                  type: integer
-                quantity:
-                  type: number
-                  format: float
-                unit:
-                  type: string
-      responses:
-        "200":
-          description: Vínculo atualizado com sucesso
-        "400":
-          description: Nenhum campo válido
 
   /products/{product_id}/ingredients/{ingredient_id}:
     put:
       tags: [Produtos]
       summary: Atualizar vínculo de insumo (quantidade/unidade)
+      description: Atualiza a quantidade e/ou unidade de um ingrediente vinculado ao produto
       security:
         - bearerAuth: []
       parameters:
@@ -1683,16 +1842,39 @@ paths:
                 quantity:
                   type: number
                   format: float
+                  example: 2.5
                 unit:
                   type: string
+                  example: "kg"
       responses:
         "200":
           description: Vínculo atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Nenhum campo válido para atualização
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Vínculo não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     delete:
       tags: [Produtos]
       summary: Remover vínculo de insumo do produto
+      description: Remove a associação entre um produto e um ingrediente
       security:
         - bearerAuth: []
       parameters:
@@ -1709,8 +1891,121 @@ paths:
       responses:
         "200":
           description: Vínculo removido com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
         "404":
           description: Vínculo não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /products/image/{product_id}:
+    get:
+      tags: [Produtos]
+      summary: Obter imagem do produto
+      description: Retorna a imagem do produto de forma segura, validando se o produto existe e possui imagem
+      security: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: ID do produto
+      responses:
+        "200":
+          description: Imagem do produto
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Cache-Control:
+              description: Cache por 1 hora
+              schema:
+                type: string
+                example: "public, max-age=3600"
+        "400":
+          description: Formato de imagem inválido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Produto não encontrado, produto sem imagem ou arquivo não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno ao carregar imagem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /uploads/{filename}:
+    get:
+      tags: [Uploads]
+      summary: Servir arquivo de upload
+      description: Serve arquivos de upload de forma segura com validação de segurança
+      security: []
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Caminho do arquivo (ex: products/1.jpeg)
+          example: "products/1.jpeg"
+      responses:
+        "200":
+          description: Arquivo servido com sucesso
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Cache-Control:
+              description: Cache por 1 hora
+              schema:
+                type: string
+                example: "public, max-age=3600"
+            X-Content-Type-Options:
+              description: Proteção contra MIME sniffing
+              schema:
+                type: string
+                example: "nosniff"
+            X-Frame-Options:
+              description: Proteção contra clickjacking
+              schema:
+                type: string
+                example: "DENY"
+        "400":
+          description: Nome de arquivo inválido ou formato não suportado
+        "404":
+          description: Arquivo não encontrado
+        "500":
+          description: Erro interno do servidor
 
   /categories:
     get:
@@ -1851,6 +2146,353 @@ paths:
           description: Dados inválidos
         "404":
           description: Ingrediente não encontrado
+
+  # Endpoints de Carrinho
+  /cart/me:
+    get:
+      tags: [Carrinho]
+      summary: Visualizar carrinho
+      description: Retorna o estado completo do carrinho do usuário autenticado
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Carrinho obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cart:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      user_id:
+                        type: integer
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        product_id:
+                          type: integer
+                        quantity:
+                          type: integer
+                        product:
+                          type: object
+                          properties:
+                            id:
+                              type: integer
+                            name:
+                              type: string
+                            price:
+                              type: number
+                            description:
+                              type: string
+                            image_url:
+                              type: string
+                        extras:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id:
+                                type: integer
+                              ingredient_id:
+                                type: integer
+                              quantity:
+                                type: integer
+                              ingredient_name:
+                                type: string
+                              ingredient_price:
+                                type: number
+                        extras_total:
+                          type: number
+                        item_subtotal:
+                          type: number
+                  summary:
+                    type: object
+                    properties:
+                      total_items:
+                        type: integer
+                      subtotal:
+                        type: number
+                      is_empty:
+                        type: boolean
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cart/me/items:
+    post:
+      tags: [Carrinho]
+      summary: Adicionar item ao carrinho
+      description: Adiciona um produto ao carrinho com opcionais extras
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id]
+              properties:
+                product_id:
+                  type: integer
+                  example: 1
+                quantity:
+                  type: integer
+                  default: 1
+                  example: 2
+                extras:
+                  type: array
+                  items:
+                    type: object
+                    required: [ingredient_id]
+                    properties:
+                      ingredient_id:
+                        type: integer
+                        example: 5
+                      quantity:
+                        type: integer
+                        default: 1
+                        example: 2
+      responses:
+        "201":
+          description: Item adicionado ao carrinho com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  cart:
+                    $ref: "#/components/schemas/CartResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Produto não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cart/me/items/{cart_item_id}:
+    put:
+      tags: [Carrinho]
+      summary: Atualizar item do carrinho
+      description: Atualiza quantidade ou extras de um item específico
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: cart_item_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                quantity:
+                  type: integer
+                  example: 3
+                extras:
+                  type: array
+                  items:
+                    type: object
+                    required: [ingredient_id]
+                    properties:
+                      ingredient_id:
+                        type: integer
+                        example: 5
+                      quantity:
+                        type: integer
+                        default: 1
+                        example: 2
+      responses:
+        "200":
+          description: Item atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  cart:
+                    $ref: "#/components/schemas/CartResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Item não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Carrinho]
+      summary: Remover item do carrinho
+      description: Remove um item específico do carrinho
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: cart_item_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Item removido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  cart:
+                    $ref: "#/components/schemas/CartResponse"
+        "404":
+          description: Item não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cart/me/clear:
+    delete:
+      tags: [Carrinho]
+      summary: Limpar carrinho
+      description: Remove todos os itens do carrinho do usuário
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Carrinho limpo com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cart/me/summary:
+    get:
+      tags: [Carrinho]
+      summary: Resumo do carrinho
+      description: Retorna apenas o resumo do carrinho (sem detalhes dos itens)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Resumo obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary:
+                    type: object
+                    properties:
+                      total_items:
+                        type: integer
+                      subtotal:
+                        type: number
+                      is_empty:
+                        type: boolean
+                  cart_id:
+                    type: integer
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   # Endpoints de Pedidos
   /orders:

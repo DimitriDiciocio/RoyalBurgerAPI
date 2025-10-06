@@ -25,8 +25,44 @@ def get_product_by_id_route(product_id):
 @product_bp.route('/', methods=['POST'])  
 @require_role('admin', 'manager')  
 def create_product_route():  
-    # Verifica se há dados JSON
-    data = request.get_json() if request.get_json() else {}
+    # Verifica se há dados JSON ou form data
+    data = {}
+    if request.is_json:
+        data = request.get_json() or {}
+    else:
+        # Para multipart/form-data, pega os dados do form
+        data = {}
+        
+        # Campos de texto
+        if request.form.get('name'):
+            data['name'] = request.form.get('name')
+        if request.form.get('description'):
+            data['description'] = request.form.get('description')
+            
+        # Campos numéricos - converte string para float/int
+        if request.form.get('price'):
+            try:
+                data['price'] = float(request.form.get('price'))
+            except (ValueError, TypeError):
+                pass
+                
+        if request.form.get('cost_price'):
+            try:
+                data['cost_price'] = float(request.form.get('cost_price'))
+            except (ValueError, TypeError):
+                pass
+                
+        if request.form.get('preparation_time_minutes'):
+            try:
+                data['preparation_time_minutes'] = int(request.form.get('preparation_time_minutes'))
+            except (ValueError, TypeError):
+                pass
+                
+        if request.form.get('category_id'):
+            try:
+                data['category_id'] = int(request.form.get('category_id'))
+            except (ValueError, TypeError):
+                pass
     
     # Verifica se há arquivo de imagem
     image_file = request.files.get('image')
@@ -57,16 +93,56 @@ def create_product_route():
             product_service.deactivate_product(product_id)
             return jsonify({"error": f"Produto criado mas falha ao salvar imagem: {error_msg}"}), 500
         
+        # Salva a URL da imagem no banco de dados
+        image_url = f"/api/uploads/products/{product_id}.jpeg"
+        product_service.update_product_image_url(product_id, image_url)
+        
         # Adiciona a URL da imagem ao produto retornado
-        new_product['image_url'] = f"/uploads/products/{product_id}.jpeg"
+        new_product['image_url'] = image_url
     
     return jsonify(new_product), 201  
 
 @product_bp.route('/<int:product_id>', methods=['PUT'])  
 @require_role('admin', 'manager')  
 def update_product_route(product_id):  
-    # Verifica se há dados JSON
-    data = request.get_json() if request.get_json() else {}
+    # Verifica se há dados JSON ou form data
+    data = {}
+    if request.is_json:
+        data = request.get_json() or {}
+    else:
+        # Para multipart/form-data, pega os dados do form
+        data = {}
+        
+        # Campos de texto
+        if request.form.get('name'):
+            data['name'] = request.form.get('name')
+        if request.form.get('description'):
+            data['description'] = request.form.get('description')
+            
+        # Campos numéricos - converte string para float/int
+        if request.form.get('price'):
+            try:
+                data['price'] = float(request.form.get('price'))
+            except (ValueError, TypeError):
+                pass
+                
+        if request.form.get('cost_price'):
+            try:
+                data['cost_price'] = float(request.form.get('cost_price'))
+            except (ValueError, TypeError):
+                pass
+                
+        if request.form.get('preparation_time_minutes'):
+            try:
+                data['preparation_time_minutes'] = int(request.form.get('preparation_time_minutes'))
+            except (ValueError, TypeError):
+                pass
+                
+        if request.form.get('category_id'):
+            try:
+                data['category_id'] = int(request.form.get('category_id'))
+            except (ValueError, TypeError):
+                pass
     
     # Verifica se há arquivo de imagem
     image_file = request.files.get('image')
@@ -96,6 +172,10 @@ def update_product_route(product_id):
         
         if not success:
             return jsonify({"error": f"Produto atualizado mas falha ao salvar imagem: {error_msg}"}), 500
+        
+        # Salva a URL da imagem no banco de dados
+        image_url = f"/api/uploads/products/{product_id}.jpeg"
+        product_service.update_product_image_url(product_id, image_url)
     
     return jsonify({"msg": message}), 200  
 
@@ -107,6 +187,13 @@ def delete_product_route(product_id):
         delete_product_image(product_id)
         return jsonify({"msg": "Produto inativado com sucesso"}), 200  
     return jsonify({"error": "Falha ao inativar produto ou produto não encontrado"}), 404  
+
+@product_bp.route('/<int:product_id>/reactivate', methods=['POST'])  
+@require_role('admin', 'manager')  
+def reactivate_product_route(product_id):  
+    if product_service.reactivate_product(product_id):  
+        return jsonify({"msg": "Produto reativado com sucesso"}), 200  
+    return jsonify({"error": "Falha ao reativar produto ou produto não encontrado"}), 404  
 
 @product_bp.route('/<int:product_id>/ingredients', methods=['GET'])  
 def get_product_ingredients_route(product_id):  
@@ -169,20 +256,38 @@ def search_products_route():
 @product_bp.route('/image/<int:product_id>', methods=['GET'])
 def get_product_image_route(product_id):
     """
-    Serve a imagem do produto
+    Serve a imagem do produto de forma segura
     """
     try:
-        # Caminho para a pasta de uploads
+        # Primeiro verifica se o produto existe e tem imagem no banco
+        product = product_service.get_product_by_id(product_id)
+        if not product:
+            return jsonify({"error": "Produto não encontrado"}), 404
+        
+        # Verifica se o produto tem imagem_url no banco
+        image_url = product.get('image_url')
+        if not image_url:
+            return jsonify({"error": "Produto não possui imagem"}), 404
+        
+        # Extrai o nome do arquivo da URL
+        filename = os.path.basename(image_url)
+        if not filename.endswith('.jpeg'):
+            return jsonify({"error": "Formato de imagem inválido"}), 400
+        
+        # Caminho seguro para a pasta de uploads
         upload_dir = os.path.join(os.getcwd(), 'uploads', 'products')
-        filename = f"{product_id}.jpeg"
-        
-        # Verifica se o arquivo existe
         file_path = os.path.join(upload_dir, filename)
-        if not os.path.exists(file_path):
-            return jsonify({"error": "Imagem não encontrada"}), 404
         
-        # Serve o arquivo
-        return send_from_directory(upload_dir, filename, mimetype='image/jpeg')
+        # Verifica se o arquivo existe fisicamente
+        if not os.path.exists(file_path):
+            return jsonify({"error": "Arquivo de imagem não encontrado"}), 404
+        
+        # Serve o arquivo com headers de segurança
+        response = send_from_directory(upload_dir, filename, mimetype='image/jpeg')
+        response.headers['Cache-Control'] = 'public, max-age=3600'  # Cache por 1 hora
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
         
     except Exception as e:
-        return jsonify({"error": "Erro ao carregar imagem"}), 500  
+        print(f"Erro ao servir imagem: {e}")
+        return jsonify({"error": "Erro interno ao carregar imagem"}), 500  

@@ -20,27 +20,51 @@ def create_order_route():
     notes = data.get('notes', '')  
     change_for_amount = data.get('change_for_amount')  
     cpf_on_invoice = data.get('cpf_on_invoice')  
-    points_to_redeem = data.get('points_to_redeem', 0)  
-    if not all([address_id, items, payment_method]):  
-        return jsonify({"error": "address_id, items e payment_method são obrigatórios"}), 400  
+    points_to_redeem = data.get('points_to_redeem', 0)
+    use_cart = data.get('use_cart', False)  # Nova opção para usar carrinho
+    
+    # Validações básicas
+    if not all([address_id, payment_method]):  
+        return jsonify({"error": "address_id e payment_method são obrigatórios"}), 400
+    
+    # Se não usar carrinho, items é obrigatório
+    if not use_cart and not items:
+        return jsonify({"error": "items é obrigatório quando use_cart é false"}), 400
+    
+    # Verifica endereço
     address = address_service.get_address_by_id(address_id)  
     if not address or address.get('user_id') != user_id:  
-        return jsonify({"error": "Endereço inválido ou não pertence a este usuário"}), 403  
-    new_order, error_code, error_message = order_service.create_order(  
-        user_id,
-        address_id,
-        items,
-        payment_method,
-        change_for_amount,
-        notes,
-        cpf_on_invoice,
-        points_to_redeem
-    )
+        return jsonify({"error": "Endereço inválido ou não pertence a este usuário"}), 403
+    
+    # Escolhe o método de criação baseado na opção
+    if use_cart:
+        # Cria pedido a partir do carrinho
+        new_order, error_code, error_message = order_service.create_order_from_cart(
+            user_id,
+            address_id,
+            payment_method,
+            change_for_amount,
+            notes,
+            cpf_on_invoice,
+            points_to_redeem
+        )
+    else:
+        # Cria pedido tradicional
+        new_order, error_code, error_message = order_service.create_order(  
+            user_id,
+            address_id,
+            items,
+            payment_method,
+            change_for_amount,
+            notes,
+            cpf_on_invoice,
+            points_to_redeem
+        )
     if new_order:  
         return jsonify(new_order), 201  
     if error_code == "STORE_CLOSED":  
         return jsonify({"error": error_message}), 409  
-    elif error_code in ["INVALID_CPF", "EMPTY_ORDER", "MISSING_PAYMENT_METHOD", "INVALID_DISCOUNT"]:  
+    elif error_code in ["INVALID_CPF", "EMPTY_ORDER", "MISSING_PAYMENT_METHOD", "INVALID_DISCOUNT", "EMPTY_CART"]:  
         return jsonify({"error": error_message}), 400  
     elif error_code == "INGREDIENT_UNAVAILABLE":  
         return jsonify({"error": error_message}), 422  
