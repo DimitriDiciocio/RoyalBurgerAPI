@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 
 user_bp = Blueprint('users', __name__)
 
-
 @user_bp.route('/login', methods=['POST'])
 def login_route():
     data = request.get_json()
@@ -125,11 +124,12 @@ def get_my_profile_route():
 
 
 @user_bp.route('/', methods=['GET'])
-@require_role('admin')
+@require_role('admin', 'manager')
 def get_all_users_route():
     # Parâmetros de paginação
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 20))
+    limit = int(request.args.get('limit', per_page))  # Compatibilidade com frontend
     
     # Filtros
     filters = {}
@@ -137,10 +137,14 @@ def get_all_users_route():
         filters['name'] = request.args.get('name')
     if request.args.get('email'):
         filters['email'] = request.args.get('email')
+    if request.args.get('search'):  # Busca geral
+        filters['search'] = request.args.get('search')
     if request.args.get('role'):
         role = request.args.get('role')
         if role == 'all_staff':
-            filters['role'] = ['admin', 'manager', 'attendant']
+            filters['role'] = ['admin', 'manager', 'attendant', 'delivery']
+        elif role == 'all_employees':
+            filters['role'] = ['admin', 'manager', 'attendant', 'delivery']
         else:
             filters['role'] = role
     if request.args.get('status') is not None:
@@ -150,18 +154,33 @@ def get_all_users_route():
     sort_by = request.args.get('sort_by', 'full_name')
     sort_order = request.args.get('sort_order', 'asc')
     
-    result = user_service.get_users_paginated(page, per_page, filters, sort_by, sort_order)
+    result = user_service.get_users_paginated(page, limit, filters, sort_by, sort_order)
     return jsonify(result), 200
 
 
 @user_bp.route('/', methods=['POST'])
-@require_role('admin')
+@require_role('admin', 'manager')
 def create_user_route():
     data = request.get_json()
-    if not all(k in data for k in ['full_name', 'email', 'password', 'role']):
-        return jsonify({"error": "full_name, email, password e role são obrigatórios"}), 400
-    if data['role'] not in ['admin', 'manager', 'attendant', 'deliverer']:
-        return jsonify({"error": "Cargo inválido."}), 400
+    
+    # Campos obrigatórios
+    required_fields = ['full_name', 'email', 'password', 'role']
+    if not all(k in data for k in required_fields):
+        return jsonify({"error": "Campos obrigatórios: nome, email, senha e cargo"}), 400
+    
+    # Validação de cargo
+    valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+    if data['role'] not in valid_roles:
+        return jsonify({"error": "Cargo inválido. Cargos válidos: admin, manager, attendant, delivery, customer"}), 400
+    
+    # Campos opcionais com valores padrão
+    if 'date_of_birth' not in data:
+        data['date_of_birth'] = None
+    if 'phone' not in data:
+        data['phone'] = None
+    if 'cpf' not in data:
+        data['cpf'] = None
+    
     new_user, error_code, error_message = user_service.create_user(data)
     if new_user:
         return jsonify({**new_user, "message": "Usuário registrado com sucesso"}), 201
@@ -172,7 +191,7 @@ def create_user_route():
             return jsonify({"error": "Telefone já cadastrado"}), 409
         elif error_code == "CPF_ALREADY_EXISTS":
             return jsonify({"error": "CPF já cadastrado"}), 409
-        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD"]:
+        elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD", "INVALID_DATE"]:
             return jsonify({"error": error_message}), 400
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": error_message}), 500
@@ -181,20 +200,26 @@ def create_user_route():
 
 
 @user_bp.route('/<int:user_id>', methods=['GET'])
-@require_role('admin')
+@require_role('admin', 'manager')
 def get_user_by_id_route(user_id):
     user = user_service.get_user_by_id(user_id)
-    if user and user['role'] != 'customer':
+    if user:
         return jsonify(user), 200
-    return jsonify({"error": "Funcionário não encontrado"}), 404
+    return jsonify({"error": "Usuário não encontrado"}), 404
 
 
 @user_bp.route('/<int:user_id>', methods=['PUT'])
-@require_role('admin')
+@require_role('admin', 'manager')
 def update_user_route(user_id):
     data = request.get_json()
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    # Validação de cargo se fornecido
+    if 'role' in data:
+        valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+        if data['role'] not in valid_roles:
+            return jsonify({"error": "Cargo inválido"}), 400
     
     # Verifica se está tentando desativar o último admin ativo
     if data.get('is_active') is False:
@@ -218,19 +243,19 @@ def update_user_route(user_id):
     elif error_code == "DATABASE_ERROR":
         return jsonify({"error": message}), 500
     else:
-        return jsonify({"error": "Falha ao atualizar funcionário"}), 500
+        return jsonify({"error": "Falha ao atualizar usuário"}), 500
 
 
 @user_bp.route('/<int:user_id>', methods=['DELETE'])
-@require_role('admin')
+@require_role('admin', 'manager')
 def delete_user_route(user_id):
     # Verifica se está tentando desativar o último admin ativo
     if user_service.is_last_active_admin(user_id):
         return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
     
     if user_service.deactivate_user(user_id):
-        return jsonify({"msg": "Funcionário inativado com sucesso"}), 200
-    return jsonify({"error": "Falha ao inativar ou funcionário não encontrado"}), 404
+        return jsonify({"msg": "Usuário desativado com sucesso"}), 200
+    return jsonify({"error": "Falha ao desativar ou usuário não encontrado"}), 404
 
 
 # Rotas específicas para administradores
@@ -305,6 +330,98 @@ def get_user_metrics_route(user_id):
     if metrics is None:
         return jsonify({"error": "Usuário não encontrado ou não é um funcionário"}), 404
     return jsonify(metrics), 200
+
+
+# Endpoints para gerenciamento completo de usuários
+@user_bp.route('/metrics', methods=['GET'])
+@require_role('admin', 'manager')
+def get_users_metrics_route():
+    """Retorna métricas gerais de usuários"""
+    metrics = user_service.get_users_general_metrics()
+    return jsonify(metrics), 200
+
+
+@user_bp.route('/roles', methods=['GET'])
+@require_role('admin', 'manager')
+def get_available_roles_route():
+    """Retorna os cargos/roles disponíveis"""
+    roles = [
+        {"value": "admin", "label": "Administrador"},
+        {"value": "manager", "label": "Gerente"},
+        {"value": "attendant", "label": "Atendente"},
+        {"value": "delivery", "label": "Entregador"},
+        {"value": "customer", "label": "Cliente"}
+    ]
+    return jsonify({"roles": roles}), 200
+
+
+@user_bp.route('/check-email', methods=['GET'])
+@require_role('admin', 'manager')
+def check_email_availability_route():
+    """Verifica se um email está disponível"""
+    email = request.args.get('email')
+    if not email:
+        return jsonify({"error": "Parâmetro 'email' é obrigatório"}), 400
+    
+    is_available = user_service.check_email_availability(email)
+    return jsonify({"available": is_available}), 200
+
+
+@user_bp.route('/<int:user_id>/status', methods=['PATCH'])
+@require_role('admin', 'manager')
+def update_user_status_route(user_id):
+    """Ativa/desativa um usuário"""
+    data = request.get_json()
+    if not data or 'is_active' not in data:
+        return jsonify({"error": "Campo 'is_active' é obrigatório"}), 400
+    
+    # Verifica se está tentando desativar o último admin ativo
+    if data['is_active'] is False:
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
+    
+    success, error_code, message = user_service.update_user_status(user_id, data['is_active'])
+    if success:
+        status_text = "ativado" if data['is_active'] else "desativado"
+        return jsonify({"msg": f"Usuário {status_text} com sucesso"}), 200
+    else:
+        if error_code == "USER_NOT_FOUND":
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": "Erro interno do servidor"}), 500
+        else:
+            return jsonify({"error": message}), 400
+
+
+@user_bp.route('/<int:user_id>/role', methods=['PATCH'])
+@require_role('admin', 'manager')
+def update_user_role_route(user_id):
+    """Atualiza o cargo/role de um usuário"""
+    data = request.get_json()
+    if not data or 'role' not in data:
+        return jsonify({"error": "Campo 'role' é obrigatório"}), 400
+    
+    valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+    if data['role'] not in valid_roles:
+        return jsonify({"error": "Cargo inválido"}), 400
+    
+    # Verifica se está tentando alterar o role do último admin ativo
+    if data['role'] != 'admin':
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível alterar o cargo do último administrador ativo do sistema"}), 409
+    
+    success, error_code, message = user_service.update_user_role(user_id, data['role'])
+    if success:
+        return jsonify({"msg": "Cargo atualizado com sucesso"}), 200
+    else:
+        if error_code == "USER_NOT_FOUND":
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": "Erro interno do servidor"}), 500
+        else:
+            return jsonify({"error": message}), 400
+
+
 
 
 @user_bp.route('/request-email-verification', methods=['POST'])

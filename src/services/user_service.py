@@ -119,12 +119,18 @@ def create_user(user_data):
 
         new_user = {
             "id": new_user_id,
-            "full_name": full_name,
+            "nome": full_name,  # Compatibilidade com frontend
+            "full_name": full_name,  # Mantém compatibilidade com backend
             "email": email,
-            "role": role,
-            "date_of_birth": date_of_birth,
-            "phone": phone,
-            "cpf": cpf
+            "cargo": role,  # Compatibilidade com frontend
+            "role": role,  # Mantém compatibilidade com backend
+            "nascimento": date_of_birth,  # Compatibilidade com frontend
+            "date_of_birth": date_of_birth,  # Mantém compatibilidade com backend
+            "telefone": phone,  # Compatibilidade com frontend
+            "phone": phone,  # Mantém compatibilidade com backend
+            "cpf": cpf,
+            "ativo": True,  # Compatibilidade com frontend
+            "is_active": True,  # Mantém compatibilidade com backend
         }
 
         # Envia e-mail de boas-vindas após o commit (fora da transação)
@@ -206,14 +212,20 @@ def get_user_by_id(user_id):
         if row:
             return {
                 "id": row[0],
-                "full_name": row[1],
+                "nome": row[1],  # Compatibilidade com frontend
+                "full_name": row[1],  # Mantém compatibilidade com backend
                 "email": row[2],
-                "phone": row[3],
+                "telefone": row[3],  # Compatibilidade com frontend
+                "phone": row[3],  # Mantém compatibilidade com backend
                 "cpf": row[4],
-                "role": row[5],
-                "date_of_birth": row[6].strftime('%Y-%m-%d') if row[6] else None,
-                "is_active": bool(row[7]) if row[7] is not None else True,
-                "created_at": row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,
+                "cargo": row[5],  # Compatibilidade com frontend
+                "role": row[5],  # Mantém compatibilidade com backend
+                "nascimento": row[6].strftime('%Y-%m-%d') if row[6] else None,  # Compatibilidade com frontend
+                "date_of_birth": row[6].strftime('%Y-%m-%d') if row[6] else None,  # Mantém compatibilidade com backend
+                "ativo": bool(row[7]) if row[7] is not None else True,  # Compatibilidade com frontend
+                "is_active": bool(row[7]) if row[7] is not None else True,  # Mantém compatibilidade com backend
+                "dataCriacao": row[8].strftime('%Y-%m-%dT%H:%M:%SZ') if row[8] else None,  # Compatibilidade com frontend
+                "created_at": row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,  # Mantém compatibilidade com backend
                 "is_email_verified": bool(row[9]) if row[9] is not None else False,
                 "two_factor_enabled": bool(row[10]) if row[10] is not None else False,
             }
@@ -541,13 +553,7 @@ def change_user_password(user_id, current_password, new_password):
         if conn: conn.close()
 
 def get_user_metrics(user_id):
-    """Retorna métricas por papel:
-    - attendant: pedidos concluídos, faturamento sob atendimento, tempo médio de atendimento, em andamento, avaliação média (placeholder)
-    - manager: produtividade da equipe (total entregues), faturamento total (entregues), avaliação da gestão (placeholder)
-    - deliverer: média de entregas por dia, tempo médio de entrega, avaliação do cliente (placeholder)
-    - customer: total de pedidos, valor total gasto, último pedido (dias desde)
-    Admin não possui métricas específicas.
-    """
+    """Retorna as métricas de performance de um funcionário específico."""
     conn = None
     try:
         conn = get_db_connection()
@@ -559,147 +565,49 @@ def get_user_metrics(user_id):
             return None
         
         user_role = user_row[0]
-        if user_role == 'admin':
+        if user_role not in ['attendant', 'manager', 'admin']:
             return None
-
-        # Métricas para atendente
-        if user_role == 'attendant':
-            cur.execute("""
-                SELECT COUNT(*) as total_orders,
-                       SUM(TOTAL_AMOUNT) as total_revenue
-                FROM ORDERS 
-                WHERE ATTENDANT_ID = ? AND STATUS = 'delivered'
-            """, (user_id,))
-            row = cur.fetchone()
-            total_orders = int(row[0]) if row and row[0] else 0
-            total_revenue = float(row[1]) if row and row[1] else 0.0
-
-            cur.execute("""
-                SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60)
-                FROM ORDERS 
-                WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
-            """, (user_id,))
-            avg_row = cur.fetchone()
-            avg_service_time = round(float(avg_row[0]), 1) if avg_row and avg_row[0] else 0.0
-
-            cur.execute("""
-                SELECT COUNT(*) 
-                FROM ORDERS 
-                WHERE ATTENDANT_ID = ? AND STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
-            """, (user_id,))
-            o_row = cur.fetchone()
-            ongoing_orders = int(o_row[0]) if o_row and o_row[0] else 0
-
-            return {
-                "user_id": user_id,
-                "role": user_role,
-                "total_completed_orders": total_orders,
-                "total_revenue": round(total_revenue, 2),
-                "average_service_time_minutes": avg_service_time,
-                "ongoing_orders": ongoing_orders,
-                "average_rating": 0.0
-            }
-
-        # Métricas para gerente
-        if user_role == 'manager':
-            cur.execute("""
-                SELECT COUNT(*) as total_orders,
-                       SUM(TOTAL_AMOUNT) as total_revenue
-                FROM ORDERS 
-                WHERE STATUS = 'delivered'
-            """)
-            row = cur.fetchone()
-            total_orders = int(row[0]) if row and row[0] else 0
-            total_revenue = float(row[1]) if row and row[1] else 0.0
-            return {
-                "user_id": user_id,
-                "role": user_role,
-                "team_productivity_completed_orders": total_orders,
-                "managed_revenue_total": round(total_revenue, 2),
-                "management_rating": 0.0
-            }
-
-        # Métricas para entregador
-        if user_role == 'deliverer':
-            # Detecta se existe coluna DELIVERER_ID na tabela ORDERS
-            try:
-                cur.execute("SELECT 1 FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME = 'ORDERS' AND RDB$FIELD_NAME = 'DELIVERER_ID'")
-                has_deliverer = cur.fetchone() is not None
-            except Exception:
-                has_deliverer = False
-
-            total_deliveries = 0
-            avg_delivery_time = 0.0
-            deliveries_per_day = 0.0
-            if has_deliverer:
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM ORDERS
-                    WHERE DELIVERER_ID = ? AND STATUS = 'delivered'
-                """, (user_id,))
-                row = cur.fetchone()
-                total_deliveries = int(row[0]) if row and row[0] else 0
-
-                cur.execute("""
-                    SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60)
-                    FROM ORDERS
-                    WHERE DELIVERER_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
-                """, (user_id,))
-                r = cur.fetchone()
-                avg_delivery_time = round(float(r[0]), 1) if r and r[0] else 0.0
-
-                # Média por dia (considerando últimos 30 dias)
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM ORDERS
-                    WHERE DELIVERER_ID = ? AND STATUS = 'delivered' AND DATE(CREATED_AT) >= DATEADD(-30 DAY TO CURRENT_DATE)
-                """, (user_id,))
-                r2 = cur.fetchone()
-                last30 = int(r2[0]) if r2 and r2[0] else 0
-                deliveries_per_day = round(last30 / 30.0, 1)
-
-            return {
-                "user_id": user_id,
-                "role": user_role,
-                "average_deliveries_per_day": deliveries_per_day,
-                "average_delivery_time_minutes": avg_delivery_time,
-                "total_deliveries": total_deliveries,
-                "customer_rating": 0.0
-            }
-
-        # Métricas para cliente
-        if user_role == 'customer':
-            cur.execute("""
-                SELECT COUNT(*), COALESCE(SUM(TOTAL_AMOUNT), 0)
-                FROM ORDERS
-                WHERE USER_ID = ? AND STATUS != 'cancelled'
-            """, (user_id,))
-            row = cur.fetchone()
-            total_orders = int(row[0]) if row and row[0] else 0
-            total_spent = float(row[1]) if row and row[1] else 0.0
-
-            cur.execute("SELECT MAX(CREATED_AT) FROM ORDERS WHERE USER_ID = ?", (user_id,))
-            last_dt_row = cur.fetchone()
-            last_days = None
-            if last_dt_row and last_dt_row[0]:
-                last_dt = last_dt_row[0]
-                try:
-                    from datetime import datetime
-                    delta_days = (datetime.now() - last_dt).days
-                    last_days = delta_days
-                except Exception:
-                    last_days = None
-
-            return {
-                "user_id": user_id,
-                "role": user_role,
-                "total_orders": total_orders,
-                "total_spent": round(total_spent, 2),
-                "days_since_last_order": last_days
-            }
-
-        # Demais cargos não contemplados
-        return None
+        
+        cur.execute("""
+            SELECT COUNT(*) as total_orders,
+                   SUM(TOTAL_AMOUNT) as total_revenue
+            FROM ORDERS 
+            WHERE ATTENDANT_ID = ? AND STATUS = 'delivered'
+        """, (user_id,))
+        
+        order_stats = cur.fetchone()
+        total_orders = order_stats[0] if order_stats and order_stats[0] else 0
+        total_revenue = float(order_stats[1]) if order_stats and order_stats[1] else 0.0
+        
+        cur.execute("""
+            SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60) as avg_service_time
+            FROM ORDERS 
+            WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
+        """, (user_id,))
+        
+        avg_service_time = cur.fetchone()
+        avg_service_time = round(float(avg_service_time[0]), 1) if avg_service_time and avg_service_time[0] else 0.0
+        
+        cur.execute("""
+            SELECT COUNT(*) 
+            FROM ORDERS 
+            WHERE ATTENDANT_ID = ? AND STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
+        """, (user_id,))
+        
+        ongoing_result = cur.fetchone()
+        ongoing_orders = ongoing_result[0] if ongoing_result and ongoing_result[0] else 0
+        
+        average_rating = 0.0
+        
+        return {
+            "user_id": user_id,
+            "role": user_role,
+            "total_completed_orders": total_orders,
+            "total_revenue": total_revenue,
+            "average_service_time_minutes": avg_service_time,
+            "ongoing_orders": ongoing_orders,
+            "average_rating": average_rating
+        }
         
     except fdb.Error as e:
         print(f"Erro ao buscar métricas do usuário: {e}")
@@ -760,6 +668,12 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
                 conditions.append("UPPER(EMAIL) LIKE UPPER(?)")
                 params.append(f"%{filters['email']}%")
             
+            if filters.get('search'):
+                # Busca geral em nome, email e telefone
+                conditions.append("(UPPER(FULL_NAME) LIKE UPPER(?) OR UPPER(EMAIL) LIKE UPPER(?) OR UPPER(PHONE) LIKE UPPER(?))")
+                search_term = f"%{filters['search']}%"
+                params.extend([search_term, search_term, search_term])
+            
             if filters.get('role'):
                 if isinstance(filters['role'], list):
                     placeholders = ', '.join(['?' for _ in filters['role']])
@@ -802,20 +716,32 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
         for row in cur.fetchall():
             users.append({
                 "id": row[0],
-                "full_name": row[1],
+                "nome": row[1],  # Compatibilidade com frontend
+                "full_name": row[1],  # Mantém compatibilidade com backend
                 "email": row[2],
-                "phone": row[3],
+                "telefone": row[3],  # Compatibilidade com frontend
+                "phone": row[3],  # Mantém compatibilidade com backend
                 "cpf": row[4],
-                "role": row[5],
-                "is_active": bool(row[6]) if row[6] is not None else True,
-                "created_at": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,
+                "cargo": row[5],  # Compatibilidade com frontend
+                "role": row[5],  # Mantém compatibilidade com backend
+                "ativo": bool(row[6]) if row[6] is not None else True,  # Compatibilidade com frontend
+                "is_active": bool(row[6]) if row[6] is not None else True,  # Mantém compatibilidade com backend
+                "dataCriacao": row[7].strftime('%Y-%m-%dT%H:%M:%SZ') if row[7] else None,  # Compatibilidade com frontend
+                "created_at": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,  # Mantém compatibilidade com backend
                 "is_email_verified": bool(row[8]) if row[8] is not None else False,
                 "two_factor_enabled": bool(row[9]) if row[9] is not None else False,
             })
         
         return {
-            "users": users,
-            "pagination": {
+            "usuarios": users,  # Compatibilidade com frontend
+            "users": users,  # Mantém compatibilidade com backend
+            "paginacao": {  # Compatibilidade com frontend
+                "pagina": page,
+                "limite": per_page,
+                "total": total,
+                "totalPaginas": (total + per_page - 1) // per_page
+            },
+            "pagination": {  # Mantém compatibilidade com backend
                 "page": page,
                 "per_page": per_page,
                 "total": total,
@@ -918,5 +844,127 @@ def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_nam
     except fdb.Error as e:
         print(f"Erro ao buscar clientes paginados: {e}")
         return {"customers": [], "pagination": {"page": page, "per_page": per_page, "total": 0, "pages": 0}}
+    finally:
+        if conn: conn.close()
+
+def get_users_general_metrics():
+    """Retorna métricas gerais de usuários."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Total de usuários
+        cur.execute("SELECT COUNT(*) FROM USERS")
+        total = cur.fetchone()[0] or 0
+        
+        # Usuários ativos
+        cur.execute("SELECT COUNT(*) FROM USERS WHERE IS_ACTIVE = TRUE")
+        ativos = cur.fetchone()[0] or 0
+        
+        # Usuários inativos
+        inativos = total - ativos
+        
+        # Contagem por cargo
+        cur.execute("""
+            SELECT ROLE, COUNT(*) 
+            FROM USERS 
+            WHERE IS_ACTIVE = TRUE 
+            GROUP BY ROLE
+        """)
+        roles_count = {}
+        for row in cur.fetchall():
+            roles_count[row[0]] = row[1]
+        
+        # Funcionários vs Clientes
+        funcionarios = sum(roles_count.get(role, 0) for role in ['admin', 'manager', 'attendant', 'delivery'])
+        clientes = roles_count.get('customer', 0)
+        
+        return {
+            "total": total,
+            "ativos": ativos,
+            "inativos": inativos,
+            "cargos": roles_count,
+            "funcionarios": funcionarios,
+            "clientes": clientes
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar métricas gerais: {e}")
+        return {
+            "total": 0,
+            "ativos": 0,
+            "inativos": 0,
+            "cargos": {},
+            "funcionarios": 0,
+            "clientes": 0
+        }
+    finally:
+        if conn: conn.close()
+
+def check_email_availability(email):
+    """Verifica se um email está disponível."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM USERS WHERE EMAIL = ?", (email,))
+        count = cur.fetchone()[0]
+        return count == 0
+    except fdb.Error as e:
+        print(f"Erro ao verificar disponibilidade do email: {e}")
+        return False
+    finally:
+        if conn: conn.close()
+
+def update_user_status(user_id, is_active):
+    """Ativa ou desativa um usuário."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se está tentando desativar o último admin ativo
+        if not is_active and is_last_active_admin(user_id):
+            return (False, "CANNOT_DEACTIVATE_LAST_ADMIN", "Não é possível desativar o último administrador ativo do sistema")
+        
+        cur.execute("UPDATE USERS SET IS_ACTIVE = ? WHERE ID = ?", (is_active, user_id))
+        conn.commit()
+        
+        if cur.rowcount > 0:
+            return (True, None, "Status do usuário atualizado com sucesso")
+        else:
+            return (False, "USER_NOT_FOUND", "Usuário não encontrado")
+            
+    except fdb.Error as e:
+        print(f"Erro ao atualizar status do usuário: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+def update_user_role(user_id, new_role):
+    """Atualiza o cargo/role de um usuário."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se está tentando alterar o role do último admin ativo
+        if new_role != 'admin' and is_last_active_admin(user_id):
+            return (False, "CANNOT_CHANGE_LAST_ADMIN_ROLE", "Não é possível alterar o cargo do último administrador ativo do sistema")
+        
+        cur.execute("UPDATE USERS SET ROLE = ? WHERE ID = ?", (new_role, user_id))
+        conn.commit()
+        
+        if cur.rowcount > 0:
+            return (True, None, "Cargo do usuário atualizado com sucesso")
+        else:
+            return (False, "USER_NOT_FOUND", "Usuário não encontrado")
+            
+    except fdb.Error as e:
+        print(f"Erro ao atualizar cargo do usuário: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()

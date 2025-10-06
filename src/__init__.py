@@ -16,7 +16,7 @@ mail = Mail()
 def create_app():  
     app = Flask(__name__)  
     app.config.from_object(Config)  
-    CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)  
+    CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500"]}}, supports_credentials=True, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])  
     jwt = JWTManager(app)  
     app.config["JWT_BLOCKLIST_ENABLED"] = True  
     app.config["JWT_BLOCKLIST_TOKEN_CHECKS"] = ["access", "refresh"]  
@@ -87,6 +87,27 @@ def create_app():
     app.register_blueprint(swagger_bp, url_prefix='/api/docs')  
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')  
     from .sockets import chat_events  
+    
+    # Handler global para requisições OPTIONS (preflight)
+    @app.before_request
+    def handle_preflight():
+        from flask import request, make_response
+        if request.method == "OPTIONS":
+            response = make_response()
+            # Verifica a origem da requisição
+            origin = request.headers.get('Origin')
+            allowed_origins = ["http://127.0.0.1:5500", "http://localhost:5500"]
+            
+            if origin in allowed_origins:
+                response.headers.add("Access-Control-Allow-Origin", origin)
+            else:
+                response.headers.add("Access-Control-Allow-Origin", "http://127.0.0.1:5500")
+            
+            response.headers.add('Access-Control-Allow-Headers', "Content-Type, Authorization")
+            response.headers.add('Access-Control-Allow-Methods', "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+            response.headers.add('Access-Control-Allow-Credentials', "true")
+            return response
+    
     @app.route('/api/health')  
     def health_check():  
         return "API is running!"  
