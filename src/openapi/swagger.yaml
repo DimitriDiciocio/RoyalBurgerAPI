@@ -53,6 +53,13 @@ x-error-codes:
   INVALID_PRICE: "Preço inválido"
   PRODUCT_NAME_EXISTS: "Nome do produto já existe"
   PRODUCT_NOT_FOUND: "Produto não encontrado"
+  INVALID_CATEGORY: "Categoria inválida ou ausente"
+  CATEGORY_NOT_FOUND: "Categoria não encontrada"
+  CATEGORY_NAME_EXISTS: "Nome da categoria já existe"
+  INGREDIENT_NAME_EXISTS: "Nome do ingrediente já existe"
+  INVALID_UNIT: "Unidade do insumo inválida ou ausente"
+  INVALID_COST: "Custo inválido"
+  INGREDIENT_IN_USE: "Ingrediente vinculado a produtos"
 
   # Sistema
   DATABASE_ERROR: "Erro interno do servidor"
@@ -332,10 +339,13 @@ components:
           type: string
           format: date-time
           example: "2024-01-15T10:30:00"
+        category_id:
+          type: integer
+          example: 2
 
     NewProduct:
       type: object
-      required: [name, price]
+      required: [name, price, category_id]
       properties:
         name:
           type: string
@@ -360,6 +370,27 @@ components:
         section_id:
           type: integer
           example: 1
+        category_id:
+          type: integer
+          example: 2
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "Bebidas"
+
+    NewCategory:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: "Sanduíches"
 
     Ingredient:
       type: object
@@ -394,7 +425,7 @@ components:
 
     NewIngredient:
       type: object
-      required: [name]
+      required: [name, stock_unit]
       properties:
         name:
           type: string
@@ -417,6 +448,52 @@ components:
           type: number
           format: float
           example: 5.0
+
+    Pagination:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 120
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 10
+        total_pages:
+          type: integer
+          example: 12
+
+    ProductIngredientsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              ingredient_id:
+                type: integer
+              name:
+                type: string
+              quantity:
+                type: number
+                format: float
+              unit:
+                type: string
+              price:
+                type: number
+                format: float
+              is_available:
+                type: boolean
+              line_cost:
+                type: number
+                format: float
+        estimated_cost:
+          type: number
+          format: float
+          example: 7.80
 
     Order:
       type: object
@@ -1144,18 +1221,44 @@ paths:
   /products:
     get:
       tags: [Produtos]
-      summary: Listar todos os produtos
-      description: Lista todos os produtos disponíveis
+      summary: Listar produtos (com filtros e paginação)
+      description: Lista produtos com filtros por nome e categoria e suporte a paginação
       security: []
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+          description: Filtro por nome (contains, case-insensitive)
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+          description: Filtrar por categoria
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 10
       responses:
         "200":
-          description: Lista de produtos
+          description: Lista paginada de produtos
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Product"
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Product"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
     post:
       tags: [Produtos]
       summary: Criar novo produto
@@ -1253,13 +1356,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
         "400":
-          description: Dados inválidos (nome vazio, preço inválido, nenhum campo válido)
+          description: Dados inválidos (nome vazio, preço inválido, categoria inválida, nenhum campo válido)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
-          description: Produto não encontrado
+          description: Produto ou categoria não encontrados
           content:
             application/json:
               schema:
@@ -1298,26 +1401,46 @@ paths:
   /ingredients:
     get:
       tags: [Ingredientes]
-      summary: Listar todos os ingredientes
-      description: Lista todos os ingredientes com filtros opcionais de status de estoque
+      summary: Listar ingredientes (filtros e paginação)
+      description: Lista ingredientes com filtros de nome e status, com paginação
       security:
         - bearerAuth: []
       parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+          description: Filtro por nome (contains, case-insensitive)
         - name: status
           in: query
           schema:
             type: string
             enum: [low_stock, out_of_stock, in_stock]
           description: Filtro por status de estoque
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 10
       responses:
         "200":
-          description: Lista de ingredientes
+          description: Lista paginada de ingredientes
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Ingredient"
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Ingredient"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
         "401":
           description: Não autenticado
         "403":
@@ -1326,7 +1449,7 @@ paths:
     post:
       tags: [Ingredientes]
       summary: Criar novo ingrediente
-      description: Cria um novo ingrediente com campos de estoque
+      description: Cria um novo ingrediente com validações de nome único, unidade e custo
       security:
         - bearerAuth: []
       requestBody:
@@ -1343,7 +1466,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Ingredient"
         "400":
-          description: Dados inválidos
+          description: Dados inválidos (nome, unidade, custo ou números negativos)
           content:
             application/json:
               schema:
@@ -1385,13 +1508,15 @@ paths:
           description: Dados inválidos
         "404":
           description: Ingrediente não encontrado
+        "409":
+          description: Nome do ingrediente já existe
         "500":
           description: Erro interno do servidor
 
     delete:
       tags: [Ingredientes]
-      summary: Inativar ingrediente
-      description: Inativa um ingrediente (soft delete)
+      summary: Excluir ingrediente
+      description: Exclui um ingrediente, bloqueando quando houver vínculos com produtos
       security:
         - bearerAuth: []
       parameters:
@@ -1402,9 +1527,294 @@ paths:
             type: integer
       responses:
         "200":
-          description: Ingrediente inativado com sucesso
+          description: Ingrediente excluído com sucesso
         "404":
           description: Ingrediente não encontrado
+        "409":
+          description: Ingrediente está vinculado a produtos
+  /products/search:
+    get:
+      tags: [Produtos]
+      summary: Buscar produtos (nome/categoria) com paginação
+      description: Busca produtos por nome e/ou categoria, com paginação
+      security: []
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Lista paginada de produtos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Product"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+
+  /products/{product_id}/ingredients:
+    get:
+      tags: [Produtos]
+      summary: Listar insumos vinculados ao produto e custo estimado
+      security: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Lista de insumos do produto e custo estimado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductIngredientsResponse"
+    post:
+      tags: [Produtos]
+      summary: Adicionar/atualizar vínculo de insumo ao produto
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ingredient_id, quantity]
+              properties:
+                ingredient_id:
+                  type: integer
+                quantity:
+                  type: number
+                  format: float
+                unit:
+                  type: string
+      responses:
+        "201":
+          description: Vínculo criado/atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos
+    put:
+      tags: [Produtos]
+      summary: Atualizar vínculo de insumo (quantidade/unidade)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ingredient_id:
+                  type: integer
+                quantity:
+                  type: number
+                  format: float
+                unit:
+                  type: string
+      responses:
+        "200":
+          description: Vínculo atualizado com sucesso
+        "400":
+          description: Nenhum campo válido
+
+  /products/{product_id}/ingredients/{ingredient_id}:
+    put:
+      tags: [Produtos]
+      summary: Atualizar vínculo de insumo (quantidade/unidade)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: ingredient_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                quantity:
+                  type: number
+                  format: float
+                unit:
+                  type: string
+      responses:
+        "200":
+          description: Vínculo atualizado com sucesso
+        "404":
+          description: Vínculo não encontrado
+    delete:
+      tags: [Produtos]
+      summary: Remover vínculo de insumo do produto
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: product_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: ingredient_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Vínculo removido com sucesso
+        "404":
+          description: Vínculo não encontrado
+
+  /categories:
+    get:
+      tags: [Categorias]
+      summary: Listar categorias (filtro por nome e paginação)
+      security: []
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Lista paginada de categorias
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Category"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+    post:
+      tags: [Categorias]
+      summary: Criar categoria
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewCategory"
+      responses:
+        "201":
+          description: Categoria criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        "400":
+          description: Nome inválido
+        "409":
+          description: Nome já existe
+
+  /categories/{category_id}:
+    put:
+      tags: [Categorias]
+      summary: Atualizar categoria
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: category_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewCategory"
+      responses:
+        "200":
+          description: Categoria atualizada
+        "400":
+          description: Nome inválido
+        "404":
+          description: Categoria não encontrada
+        "409":
+          description: Nome já existe
+    delete:
+      tags: [Categorias]
+      summary: Excluir categoria
+      description: Bloqueia exclusão quando houver produtos vinculados
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: category_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Categoria excluída
+        "404":
+          description: Categoria não encontrada
+        "409":
+          description: Existem produtos vinculados
 
   /ingredients/{ingredient_id}/availability:
     patch:

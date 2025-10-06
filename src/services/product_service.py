@@ -7,6 +7,7 @@ def create_product(product_data):
     price = product_data.get('price')  
     cost_price = product_data.get('cost_price', 0.0)  
     preparation_time_minutes = product_data.get('preparation_time_minutes', 0)  
+    category_id = product_data.get('category_id')  
     if not name or not name.strip():  
         return (None, "INVALID_NAME", "Nome do produto é obrigatório")  
     if price is None or price <= 0:  
@@ -15,19 +16,25 @@ def create_product(product_data):
         return (None, "INVALID_COST_PRICE", "Preço de custo não pode ser negativo")  
     if preparation_time_minutes is not None and preparation_time_minutes < 0:  
         return (None, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")  
+    if category_id is None:  
+        return (None, "INVALID_CATEGORY", "Categoria é obrigatória")  
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
+        # valida categoria existente e ativa  
+        cur.execute("SELECT 1 FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (category_id,))  
+        if not cur.fetchone():  
+            return (None, "CATEGORY_NOT_FOUND", "Categoria informada não existe ou está inativa")  
         sql_check = "SELECT ID FROM PRODUCTS WHERE UPPER(NAME) = UPPER(?) AND IS_ACTIVE = TRUE;"  
         cur.execute(sql_check, (name,))  
         if cur.fetchone():  
             return (None, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")  
-        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES) VALUES (?, ?, ?, ?, ?) RETURNING ID;"  
-        cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes))  
+        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID) VALUES (?, ?, ?, ?, ?, ?) RETURNING ID;"  
+        cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes, category_id))  
         new_product_id = cur.fetchone()[0]  
         conn.commit()  
-        return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes}, None, None)  
+        return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id}, None, None)  
     except fdb.Error as e:  
         print(f"Erro ao criar produto: {e}")  
         if conn: conn.rollback()  
@@ -36,18 +43,62 @@ def create_product(product_data):
         if conn: conn.close()  
 
 
-def get_all_products():  
+def list_products(name_filter=None, category_id=None, page=1, page_size=10):  
+    page = max(int(page or 1), 1)  
+    page_size = max(int(page_size or 10), 1)  
+    offset = (page - 1) * page_size  
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES FROM PRODUCTS WHERE IS_ACTIVE = TRUE ORDER BY NAME;"  
-        cur.execute(sql)  
-        products = [{"id": row[0], "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0} for row in cur.fetchall()]  
-        return products  
+        where_clauses = ["IS_ACTIVE = TRUE"]  
+        params = []  
+        if name_filter:  
+            where_clauses.append("UPPER(NAME) LIKE UPPER(?)")  
+            params.append(f"%{name_filter}%")  
+        if category_id:  
+            where_clauses.append("CATEGORY_ID = ?")  
+            params.append(category_id)  
+        where_sql = " AND ".join(where_clauses)  
+        # total  
+        cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
+        total = cur.fetchone()[0] or 0  
+        # page  
+        cur.execute(  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID "  
+            f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
+            tuple(params)  
+        )  
+        items = [{  
+            "id": row[0],  
+            "name": row[1],  
+            "description": row[2],  
+            "price": str(row[3]),  
+            "cost_price": str(row[4]) if row[4] else "0.00",  
+            "preparation_time_minutes": row[5] if row[5] else 0,  
+            "category_id": row[6]  
+        } for row in cur.fetchall()]  
+        total_pages = (total + page_size - 1) // page_size  
+        return {  
+            "items": items,  
+            "pagination": {  
+                "total": total,  
+                "page": page,  
+                "page_size": page_size,  
+                "total_pages": total_pages  
+            }  
+        }  
     except fdb.Error as e:  
-        print(f"Erro ao buscar produtos: {e}")  
-        return []  
+        print(f"Erro ao listar produtos: {e}")  
+        return {  
+            "items": [],  
+            "pagination": {  
+                "total": 0,  
+                "page": page,  
+                "page_size": page_size,  
+                "total_pages": 0  
+            }  
+        }  
     finally:  
         if conn: conn.close()  
 
@@ -57,11 +108,11 @@ def get_product_by_id(product_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"  
+        sql = "SELECT ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"  
         cur.execute(sql, (product_id,))  
         row = cur.fetchone()  
         if row:  
-            return {"id": row[0], "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0}  
+            return {"id": row[0], "name": row[1], "description": row[2], "price": str(row[3]), "cost_price": str(row[4]) if row[4] else "0.00", "preparation_time_minutes": row[5] if row[5] else 0, "category_id": row[6]}  
         return None  
     except fdb.Error as e:  
         print(f"Erro ao buscar produto por ID: {e}")  
@@ -71,7 +122,7 @@ def get_product_by_id(product_id):
 
 
 def update_product(product_id, update_data):  
-    allowed_fields = ['name', 'description', 'price', 'cost_price', 'preparation_time_minutes', 'is_active']  
+    allowed_fields = ['name', 'description', 'price', 'cost_price', 'preparation_time_minutes', 'is_active', 'category_id']  
     fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}  
     if not fields_to_update:  
         return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
@@ -91,6 +142,10 @@ def update_product(product_id, update_data):
         prep_time = fields_to_update['preparation_time_minutes']  
         if prep_time is not None and prep_time < 0:  
             return (False, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")  
+    if 'category_id' in fields_to_update:  
+        category_id = fields_to_update['category_id']  
+        if category_id is None:  
+            return (False, "INVALID_CATEGORY", "Categoria é obrigatória")  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -104,6 +159,10 @@ def update_product(product_id, update_data):
             cur.execute(sql_check_name, (fields_to_update['name'], product_id))  
             if cur.fetchone():  
                 return (False, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")  
+        if 'category_id' in fields_to_update:  
+            cur.execute("SELECT 1 FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (fields_to_update['category_id'],))  
+            if not cur.fetchone():  
+                return (False, "CATEGORY_NOT_FOUND", "Categoria informada não existe ou está inativa")  
         set_parts = [f"{key} = ?" for key in fields_to_update]  
         values = list(fields_to_update.values())  
         values.append(product_id)  
@@ -134,6 +193,11 @@ def deactivate_product(product_id):
         return False  
     finally:  
         if conn: conn.close()  
+
+
+def search_products(name=None, category_id=None, page=1, page_size=10):  
+    # Alias para list_products com mesmos filtros — mantém rota semanticamente distinta
+    return list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size)
 
 def add_product_to_section(product_id, section_id):  
     conn = None  

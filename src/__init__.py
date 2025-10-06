@@ -82,6 +82,8 @@ def create_app():
     app.register_blueprint(financial_bp, url_prefix='/api/financials')  
     from .routes.settings_routes import settings_bp  
     app.register_blueprint(settings_bp, url_prefix='/api/settings')  
+    from .routes.category_routes import category_bp  
+    app.register_blueprint(category_bp, url_prefix='/api/categories')  
     app.register_blueprint(swagger_bp, url_prefix='/api/docs')  
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')  
     from .sockets import chat_events  

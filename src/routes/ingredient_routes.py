@@ -6,38 +6,61 @@ ingredient_bp = Blueprint('ingredients', __name__)
 
 @ingredient_bp.route('/', methods=['GET'])  
 @require_role('admin', 'manager')  
-def get_all_ingredients_route():  
+def list_ingredients_route():  
     status_filter = request.args.get('status')  
-    ingredients = ingredient_service.get_all_ingredients(status_filter)  
-    return jsonify(ingredients), 200  
+    name = request.args.get('name')  
+    page = request.args.get('page', type=int, default=1)  
+    page_size = request.args.get('page_size', type=int, default=10)  
+    result = ingredient_service.list_ingredients(name_filter=name, status_filter=status_filter, page=page, page_size=page_size)  
+    return jsonify(result), 200  
 
 @ingredient_bp.route('/', methods=['POST'])  
 @require_role('admin', 'manager')  
 def create_ingredient_route():  
-    data = request.get_json()  
-    if not data or not data.get('name'):  
-        return jsonify({"error": "O campo 'name' é obrigatório"}), 400  
-    new_ingredient = ingredient_service.create_ingredient(data)  
-    if new_ingredient:  
-        return jsonify(new_ingredient), 201  
+    data = request.get_json() or {}  
+    ingredient, error_code, message = ingredient_service.create_ingredient(data)  
+    if ingredient:  
+        return jsonify(ingredient), 201  
+    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK"]:  
+        return jsonify({"error": message}), 400  
+    if error_code == "INGREDIENT_NAME_EXISTS":  
+        return jsonify({"error": message}), 409  
+    if error_code == "DATABASE_ERROR":  
+        return jsonify({"error": message}), 500  
     return jsonify({"error": "Não foi possível criar o ingrediente"}), 500  
 
 @ingredient_bp.route('/<int:ingredient_id>', methods=['PUT'])  
 @require_role('admin', 'manager')  
 def update_ingredient_route(ingredient_id):  
-    data = request.get_json()  
-    if not data:  
-        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400  
-    if ingredient_service.update_ingredient(ingredient_id, data):  
-        return jsonify({"msg": "Ingrediente atualizado com sucesso"}), 200  
-    return jsonify({"error": "Falha ao atualizar ingrediente ou ingrediente não encontrado"}), 404  
+    data = request.get_json() or {}  
+    success, error_code, message = ingredient_service.update_ingredient(ingredient_id, data)  
+    if success:  
+        return jsonify({"msg": message}), 200  
+    if error_code == "NO_VALID_FIELDS":  
+        return jsonify({"error": message}), 400  
+    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK"]:  
+        return jsonify({"error": message}), 400  
+    if error_code == "INGREDIENT_NOT_FOUND":  
+        return jsonify({"error": message}), 404  
+    if error_code == "INGREDIENT_NAME_EXISTS":  
+        return jsonify({"error": message}), 409  
+    if error_code == "DATABASE_ERROR":  
+        return jsonify({"error": message}), 500  
+    return jsonify({"error": "Falha ao atualizar ingrediente"}), 500  
 
 @ingredient_bp.route('/<int:ingredient_id>', methods=['DELETE'])  
 @require_role('admin', 'manager')  
 def delete_ingredient_route(ingredient_id):  
-    if ingredient_service.deactivate_ingredient(ingredient_id):  
-        return jsonify({"msg": "Ingrediente marcado como indisponível com sucesso"}), 200  
-    return jsonify({"error": "Falha ao inativar ingrediente ou ingrediente não encontrado"}), 404  
+    success, error_code, message = ingredient_service.delete_ingredient(ingredient_id)  
+    if success:  
+        return jsonify({"msg": message}), 200  
+    if error_code == "INGREDIENT_NOT_FOUND":  
+        return jsonify({"error": message}), 404  
+    if error_code == "INGREDIENT_IN_USE":  
+        return jsonify({"error": message}), 409  
+    if error_code == "DATABASE_ERROR":  
+        return jsonify({"error": message}), 500  
+    return jsonify({"error": "Falha ao excluir ingrediente"}), 500  
 
 @ingredient_bp.route('/<int:ingredient_id>/availability', methods=['PATCH'])  
 @require_role('admin', 'manager')  
