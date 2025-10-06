@@ -1,7 +1,8 @@
 from flask import Blueprint, request, jsonify  
 from ..services import user_service, address_service, loyalty_service  
 from ..services.auth_service import require_role  
-from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity  
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
+from ..utils.validators import validate_birth_date, convert_br_date_to_iso  
 
 customer_bp = Blueprint('customers', __name__)  
 
@@ -18,6 +19,14 @@ def create_customer_route():
 
     if password != password_confirmation:  
         return jsonify({"error": "As senhas não conferem."}), 400  
+
+    # Validação de data de nascimento
+    if 'date_of_birth' in data and data['date_of_birth']:
+        is_valid_birth_date, birth_date_msg = validate_birth_date(data['date_of_birth'])
+        if not is_valid_birth_date:
+            return jsonify({"error": birth_date_msg}), 400
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
 
     # Força o role como customer
     data['role'] = 'customer'
@@ -97,9 +106,13 @@ def update_customer_route(user_id):
     if data.get('role') and data.get('role') != 'customer':
         return jsonify({"error": "Não é possível alterar o cargo de um cliente"}), 400
 
-    # Normaliza date_of_birth aceitando DD-MM-YY ou DD-MM-YYYY via service
-    if 'date_of_birth' in data and isinstance(data['date_of_birth'], str):
-        data['date_of_birth'] = user_service.convert_date_format(data['date_of_birth'])
+    # Validação de data de nascimento se fornecida
+    if 'date_of_birth' in data and data['date_of_birth']:
+        is_valid_birth_date, birth_date_msg = validate_birth_date(data['date_of_birth'])
+        if not is_valid_birth_date:
+            return jsonify({"error": birth_date_msg}), 400
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
 
     success, error_code, message = user_service.update_user(user_id, data)  
 

@@ -10,3 +10,4 @@ validate-docbr
 flask-swagger-ui
 PyYAML
 requests
+python-dateutil

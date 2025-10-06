@@ -3,6 +3,7 @@ from ..services import user_service, auth_service, email_verification_service, t
 from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone
+from ..utils.validators import validate_birth_date, convert_br_date_to_iso
 
 user_bp = Blueprint('users', __name__)
 
@@ -173,6 +174,16 @@ def create_user_route():
     if data['role'] not in valid_roles:
         return jsonify({"error": "Cargo inválido. Cargos válidos: admin, manager, attendant, delivery, customer"}), 400
     
+    # Validação de data de nascimento se fornecida
+    if 'date_of_birth' in data and data['date_of_birth']:
+        is_valid_birth_date, birth_date_msg = validate_birth_date(data['date_of_birth'])
+        if not is_valid_birth_date:
+            return jsonify({"error": birth_date_msg}), 400
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
+    
     # Campos opcionais com valores padrão
     if 'date_of_birth' not in data:
         data['date_of_birth'] = None
@@ -221,6 +232,14 @@ def update_user_route(user_id):
         if data['role'] not in valid_roles:
             return jsonify({"error": "Cargo inválido"}), 400
     
+    # Validação de data de nascimento se fornecida
+    if 'date_of_birth' in data and data['date_of_birth']:
+        is_valid_birth_date, birth_date_msg = validate_birth_date(data['date_of_birth'])
+        if not is_valid_birth_date:
+            return jsonify({"error": birth_date_msg}), 400
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
+    
     # Verifica se está tentando desativar o último admin ativo
     if data.get('is_active') is False:
         if user_service.is_last_active_admin(user_id):
@@ -266,6 +285,14 @@ def create_admin_route():
     if not all(k in data for k in ['full_name', 'email', 'password']):
         return jsonify({"error": "full_name, email e password são obrigatórios"}), 400
     
+    # Validação de data de nascimento se fornecida
+    if 'date_of_birth' in data and data['date_of_birth']:
+        is_valid_birth_date, birth_date_msg = validate_birth_date(data['date_of_birth'])
+        if not is_valid_birth_date:
+            return jsonify({"error": birth_date_msg}), 400
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
+    
     # Força o role como admin
     data['role'] = 'admin'
     
@@ -298,6 +325,14 @@ def update_admin_route(user_id):
     user = user_service.get_user_by_id(user_id)
     if not user or user['role'] != 'admin':
         return jsonify({"error": "Administrador não encontrado"}), 404
+    
+    # Validação de data de nascimento se fornecida
+    if 'date_of_birth' in data and data['date_of_birth']:
+        is_valid_birth_date, birth_date_msg = validate_birth_date(data['date_of_birth'])
+        if not is_valid_birth_date:
+            return jsonify({"error": birth_date_msg}), 400
+        # Converte para formato ISO para o banco de dados
+        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
     
     # Verifica se está tentando desativar o último admin ativo
     if data.get('is_active') is False:
@@ -784,4 +819,30 @@ def get_pending_email_change_route():
                 
     except Exception as e:
         print(f"Erro ao buscar mudança de email pendente: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/cleanup-unverified', methods=['POST'])
+@require_role('admin')
+def cleanup_unverified_accounts_route():
+    """
+    Remove contas não verificadas antigas (apenas para administradores)
+    """
+    try:
+        data = request.get_json() or {}
+        days_old = data.get('days_old', 7)  # Padrão: 7 dias
+        
+        if not isinstance(days_old, int) or days_old < 1:
+            return jsonify({"error": "days_old deve ser um número inteiro maior que 0"}), 400
+        
+        deleted_count = user_service.cleanup_unverified_accounts(days_old)
+        
+        return jsonify({
+            "msg": f"Limpeza concluída. {deleted_count} contas não verificadas removidas.",
+            "deleted_count": deleted_count,
+            "days_old": days_old
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro na limpeza de contas não verificadas: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500

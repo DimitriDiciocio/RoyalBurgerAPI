@@ -33,11 +33,11 @@ def create_pending_email_change(user_id, new_email):
         if new_email.lower() == current_email.lower():
             return (False, "SAME_EMAIL", "O novo email deve ser diferente do email atual")
         
-        # Verifica se o novo email já está em uso
-        sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ?"
+        # Verifica se o novo email já está em uso por uma conta verificada
+        sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ? AND IS_EMAIL_VERIFIED = TRUE"
         cur.execute(sql_check_email, (new_email, user_id))
         if cur.fetchone():
-            return (False, "EMAIL_ALREADY_EXISTS", "Este email já está em uso por outra conta")
+            return (False, "EMAIL_ALREADY_EXISTS", "Este email já está em uso por outra conta verificada")
         
         # Verifica se já existe uma solicitação pendente para este usuário
         sql_check_pending = "SELECT ID FROM PENDING_EMAIL_CHANGES WHERE USER_ID = ? AND STATUS = 'pending'"
@@ -119,15 +119,15 @@ def verify_pending_email_change(user_id, code):
         if stored_code != code:
             return (False, "INVALID_CODE", "Código de verificação inválido")
         
-        # Verifica novamente se o email não está em uso (pode ter mudado desde a criação)
-        sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ?"
+        # Verifica novamente se o email não está em uso por uma conta verificada (pode ter mudado desde a criação)
+        sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ? AND IS_EMAIL_VERIFIED = TRUE"
         cur.execute(sql_check_email, (new_email, user_id))
         if cur.fetchone():
             # Marca como inválido
             sql_invalid = "UPDATE PENDING_EMAIL_CHANGES SET STATUS = 'invalid' WHERE ID = ?"
             cur.execute(sql_invalid, (pending_id,))
             conn.commit()
-            return (False, "EMAIL_ALREADY_EXISTS", "Este email já está em uso por outra conta")
+            return (False, "EMAIL_ALREADY_EXISTS", "Este email já está em uso por outra conta verificada")
         
         # Efetua a mudança de email
         sql_update_user = "UPDATE USERS SET EMAIL = ?, IS_EMAIL_VERIFIED = TRUE WHERE ID = ?"

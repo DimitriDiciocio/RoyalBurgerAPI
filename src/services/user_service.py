@@ -80,10 +80,11 @@ def create_user(user_data):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ?;"
+        # Verifica se o email já está em uso por uma conta com email verificado
+        sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND IS_EMAIL_VERIFIED = TRUE;"
         cur.execute(sql_check_email, (email,))
         if cur.fetchone():
-            return (None, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta.")
+            return (None, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta verificada.")
 
         if phone:
             sql_check_phone = "SELECT ID FROM USERS WHERE PHONE = ?;"
@@ -280,10 +281,10 @@ def update_user(user_id, update_data, is_admin_request=False):
             if not is_valid:
                 return (False, "INVALID_EMAIL", message)
             
-            sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ?;"
+            sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ? AND IS_EMAIL_VERIFIED = TRUE;"
             cur.execute(sql_check_email, (new_email, user_id))
             if cur.fetchone():
-                return (False, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta.")
+                return (False, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta verificada.")
 
         if 'phone' in update_data:
             new_phone = update_data['phone']
@@ -891,17 +892,47 @@ def get_users_general_metrics():
         if conn: conn.close()
 
 def check_email_availability(email):
-    """Verifica se um email está disponível."""
+    """Verifica se um email está disponível (considerando apenas emails verificados)."""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM USERS WHERE EMAIL = ?", (email,))
+        cur.execute("SELECT COUNT(*) FROM USERS WHERE EMAIL = ? AND IS_EMAIL_VERIFIED = TRUE", (email,))
         count = cur.fetchone()[0]
         return count == 0
     except fdb.Error as e:
         print(f"Erro ao verificar disponibilidade do email: {e}")
         return False
+    finally:
+        if conn: conn.close()
+
+def cleanup_unverified_accounts(days_old=7):
+    """
+    Remove contas não verificadas que são mais antigas que o número de dias especificado.
+    Útil para limpeza de contas criadas mas nunca verificadas.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Remove contas não verificadas criadas há mais de X dias
+        sql_cleanup = """
+            DELETE FROM USERS 
+            WHERE IS_EMAIL_VERIFIED = FALSE 
+            AND CREATED_AT < DATEADD(DAY, -?, CURRENT_DATE)
+        """
+        cur.execute(sql_cleanup, (days_old,))
+        deleted_count = cur.rowcount
+        
+        conn.commit()
+        
+        return deleted_count
+        
+    except fdb.Error as e:
+        print(f"Erro ao limpar contas não verificadas: {e}")
+        if conn: conn.rollback()
+        return 0
     finally:
         if conn: conn.close()
 
