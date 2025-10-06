@@ -62,8 +62,6 @@ def create_app():
     app.register_blueprint(product_bp, url_prefix='/api/products')  
     from .routes.order_routes import order_bp  
     app.register_blueprint(order_bp, url_prefix='/api/orders')  
-    from .routes.section_routes import section_bp  
-    app.register_blueprint(section_bp, url_prefix='/api/sections')  
     from .routes.ingredient_routes import ingredient_bp  
     app.register_blueprint(ingredient_bp, url_prefix='/api/ingredients')  
     from .routes.chat_routes import chat_bp  
