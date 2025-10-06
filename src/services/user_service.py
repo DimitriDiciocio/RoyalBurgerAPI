@@ -530,7 +530,13 @@ def change_user_password(user_id, current_password, new_password):
         if conn: conn.close()
 
 def get_user_metrics(user_id):
-    """Retorna as métricas de performance de um funcionário específico."""
+    """Retorna métricas por papel:
+    - attendant: pedidos concluídos, faturamento sob atendimento, tempo médio de atendimento, em andamento, avaliação média (placeholder)
+    - manager: produtividade da equipe (total entregues), faturamento total (entregues), avaliação da gestão (placeholder)
+    - deliverer: média de entregas por dia, tempo médio de entrega, avaliação do cliente (placeholder)
+    - customer: total de pedidos, valor total gasto, último pedido (dias desde)
+    Admin não possui métricas específicas.
+    """
     conn = None
     try:
         conn = get_db_connection()
@@ -542,49 +548,147 @@ def get_user_metrics(user_id):
             return None
         
         user_role = user_row[0]
-        if user_role not in ['attendant', 'manager', 'admin']:
+        if user_role == 'admin':
             return None
-        
-        cur.execute("""
-            SELECT COUNT(*) as total_orders,
-                   SUM(TOTAL_AMOUNT) as total_revenue
-            FROM ORDERS 
-            WHERE ATTENDANT_ID = ? AND STATUS = 'delivered'
-        """, (user_id,))
-        
-        order_stats = cur.fetchone()
-        total_orders = order_stats[0] if order_stats and order_stats[0] else 0
-        total_revenue = float(order_stats[1]) if order_stats and order_stats[1] else 0.0
-        
-        cur.execute("""
-            SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60) as avg_service_time
-            FROM ORDERS 
-            WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
-        """, (user_id,))
-        
-        avg_service_time = cur.fetchone()
-        avg_service_time = round(float(avg_service_time[0]), 1) if avg_service_time and avg_service_time[0] else 0.0
-        
-        cur.execute("""
-            SELECT COUNT(*) 
-            FROM ORDERS 
-            WHERE ATTENDANT_ID = ? AND STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
-        """, (user_id,))
-        
-        ongoing_result = cur.fetchone()
-        ongoing_orders = ongoing_result[0] if ongoing_result and ongoing_result[0] else 0
-        
-        average_rating = 0.0
-        
-        return {
-            "user_id": user_id,
-            "role": user_role,
-            "total_completed_orders": total_orders,
-            "total_revenue": total_revenue,
-            "average_service_time_minutes": avg_service_time,
-            "ongoing_orders": ongoing_orders,
-            "average_rating": average_rating
-        }
+
+        # Métricas para atendente
+        if user_role == 'attendant':
+            cur.execute("""
+                SELECT COUNT(*) as total_orders,
+                       SUM(TOTAL_AMOUNT) as total_revenue
+                FROM ORDERS 
+                WHERE ATTENDANT_ID = ? AND STATUS = 'delivered'
+            """, (user_id,))
+            row = cur.fetchone()
+            total_orders = int(row[0]) if row and row[0] else 0
+            total_revenue = float(row[1]) if row and row[1] else 0.0
+
+            cur.execute("""
+                SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60)
+                FROM ORDERS 
+                WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
+            """, (user_id,))
+            avg_row = cur.fetchone()
+            avg_service_time = round(float(avg_row[0]), 1) if avg_row and avg_row[0] else 0.0
+
+            cur.execute("""
+                SELECT COUNT(*) 
+                FROM ORDERS 
+                WHERE ATTENDANT_ID = ? AND STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')
+            """, (user_id,))
+            o_row = cur.fetchone()
+            ongoing_orders = int(o_row[0]) if o_row and o_row[0] else 0
+
+            return {
+                "user_id": user_id,
+                "role": user_role,
+                "total_completed_orders": total_orders,
+                "total_revenue": round(total_revenue, 2),
+                "average_service_time_minutes": avg_service_time,
+                "ongoing_orders": ongoing_orders,
+                "average_rating": 0.0
+            }
+
+        # Métricas para gerente
+        if user_role == 'manager':
+            cur.execute("""
+                SELECT COUNT(*) as total_orders,
+                       SUM(TOTAL_AMOUNT) as total_revenue
+                FROM ORDERS 
+                WHERE STATUS = 'delivered'
+            """)
+            row = cur.fetchone()
+            total_orders = int(row[0]) if row and row[0] else 0
+            total_revenue = float(row[1]) if row and row[1] else 0.0
+            return {
+                "user_id": user_id,
+                "role": user_role,
+                "team_productivity_completed_orders": total_orders,
+                "managed_revenue_total": round(total_revenue, 2),
+                "management_rating": 0.0
+            }
+
+        # Métricas para entregador
+        if user_role == 'deliverer':
+            # Detecta se existe coluna DELIVERER_ID na tabela ORDERS
+            try:
+                cur.execute("SELECT 1 FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME = 'ORDERS' AND RDB$FIELD_NAME = 'DELIVERER_ID'")
+                has_deliverer = cur.fetchone() is not None
+            except Exception:
+                has_deliverer = False
+
+            total_deliveries = 0
+            avg_delivery_time = 0.0
+            deliveries_per_day = 0.0
+            if has_deliverer:
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM ORDERS
+                    WHERE DELIVERER_ID = ? AND STATUS = 'delivered'
+                """, (user_id,))
+                row = cur.fetchone()
+                total_deliveries = int(row[0]) if row and row[0] else 0
+
+                cur.execute("""
+                    SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60)
+                    FROM ORDERS
+                    WHERE DELIVERER_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
+                """, (user_id,))
+                r = cur.fetchone()
+                avg_delivery_time = round(float(r[0]), 1) if r and r[0] else 0.0
+
+                # Média por dia (considerando últimos 30 dias)
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM ORDERS
+                    WHERE DELIVERER_ID = ? AND STATUS = 'delivered' AND DATE(CREATED_AT) >= DATEADD(-30 DAY TO CURRENT_DATE)
+                """, (user_id,))
+                r2 = cur.fetchone()
+                last30 = int(r2[0]) if r2 and r2[0] else 0
+                deliveries_per_day = round(last30 / 30.0, 1)
+
+            return {
+                "user_id": user_id,
+                "role": user_role,
+                "average_deliveries_per_day": deliveries_per_day,
+                "average_delivery_time_minutes": avg_delivery_time,
+                "total_deliveries": total_deliveries,
+                "customer_rating": 0.0
+            }
+
+        # Métricas para cliente
+        if user_role == 'customer':
+            cur.execute("""
+                SELECT COUNT(*), COALESCE(SUM(TOTAL_AMOUNT), 0)
+                FROM ORDERS
+                WHERE USER_ID = ? AND STATUS != 'cancelled'
+            """, (user_id,))
+            row = cur.fetchone()
+            total_orders = int(row[0]) if row and row[0] else 0
+            total_spent = float(row[1]) if row and row[1] else 0.0
+
+            cur.execute("SELECT MAX(CREATED_AT) FROM ORDERS WHERE USER_ID = ?", (user_id,))
+            last_dt_row = cur.fetchone()
+            last_days = None
+            if last_dt_row and last_dt_row[0]:
+                last_dt = last_dt_row[0]
+                try:
+                    from datetime import datetime
+                    delta_days = (datetime.now() - last_dt).days
+                    last_days = delta_days
+                except Exception:
+                    last_days = None
+
+            return {
+                "user_id": user_id,
+                "role": user_role,
+                "total_orders": total_orders,
+                "total_spent": round(total_spent, 2),
+                "days_since_last_order": last_days
+            }
+
+        # Demais cargos não contemplados
+        return None
         
     except fdb.Error as e:
         print(f"Erro ao buscar métricas do usuário: {e}")

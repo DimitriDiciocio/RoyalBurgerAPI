@@ -160,7 +160,7 @@ def create_user_route():
     data = request.get_json()
     if not all(k in data for k in ['full_name', 'email', 'password', 'role']):
         return jsonify({"error": "full_name, email, password e role são obrigatórios"}), 400
-    if data['role'] not in ['admin', 'manager', 'attendant']:
+    if data['role'] not in ['admin', 'manager', 'attendant', 'deliverer']:
         return jsonify({"error": "Cargo inválido."}), 400
     new_user, error_code, error_message = user_service.create_user(data)
     if new_user:
