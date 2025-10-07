@@ -58,8 +58,8 @@ def delete_category_route(category_id):
         return jsonify({"msg": message}), 200
     if error_code == "CATEGORY_NOT_FOUND":
         return jsonify({"error": message}), 404
-    if error_code == "CATEGORY_IN_USE":
-        return jsonify({"error": message}), 409
+    if error_code == "DELETE_FAILED":
+        return jsonify({"error": message}), 500
     if error_code == "DATABASE_ERROR":
         return jsonify({"error": message}), 500
     return jsonify({"error": "Falha ao excluir categoria"}), 500

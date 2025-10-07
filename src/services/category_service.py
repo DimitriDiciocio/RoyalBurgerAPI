@@ -136,18 +136,35 @@ def delete_category(category_id):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        cur.execute("SELECT 1 FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (category_id,))
-        if not cur.fetchone():
+        # Verifica se a categoria existe
+        cur.execute("SELECT NAME FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (category_id,))
+        category_result = cur.fetchone()
+        if not category_result:
             return (False, "CATEGORY_NOT_FOUND", "Categoria não encontrada")
+        
+        category_name = category_result[0]
 
+        # Conta quantos produtos estão vinculados à categoria
         cur.execute("SELECT COUNT(*) FROM PRODUCTS WHERE CATEGORY_ID = ? AND IS_ACTIVE = TRUE;", (category_id,))
         count_linked = cur.fetchone()[0] or 0
+        
+        # Se há produtos vinculados, desvincula todos eles primeiro
         if count_linked > 0:
-            return (False, "CATEGORY_IN_USE", "Exclusão bloqueada: há produtos vinculados a esta categoria")
+            cur.execute("UPDATE PRODUCTS SET CATEGORY_ID = NULL WHERE CATEGORY_ID = ? AND IS_ACTIVE = TRUE;", (category_id,))
+            print(f"Desvinculados {count_linked} produtos da categoria '{category_name}' (ID: {category_id})")
 
+        # Agora exclui a categoria
         cur.execute("DELETE FROM CATEGORIES WHERE ID = ?;", (category_id,))
-        conn.commit()
-        return (cur.rowcount > 0, None, "Categoria excluída com sucesso")
+        
+        if cur.rowcount > 0:
+            conn.commit()
+            message = f"Categoria '{category_name}' excluída com sucesso"
+            if count_linked > 0:
+                message += f". {count_linked} produtos foram desvinculados da categoria."
+            return (True, None, message)
+        else:
+            return (False, "DELETE_FAILED", "Falha ao excluir a categoria")
+            
     except fdb.Error as e:
         if conn: conn.rollback()
         print(f"Erro ao excluir categoria: {e}")
