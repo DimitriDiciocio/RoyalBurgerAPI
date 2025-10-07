@@ -7,6 +7,9 @@ def create_ingredient(data):
     price = data.get('price', 0.0)  
     current_stock = data.get('current_stock', 0.0)  
     min_stock_threshold = data.get('min_stock_threshold', 0.0)  
+    max_stock = data.get('max_stock', 0.0)  
+    supplier = (data.get('supplier') or '').strip()  
+    category = (data.get('category') or '').strip()  
     if not name:  
         return (None, "INVALID_NAME", "Nome do insumo é obrigatório")  
     if not stock_unit:  
@@ -17,6 +20,8 @@ def create_ingredient(data):
         return (None, "INVALID_STOCK", "Estoque atual não pode ser negativo")  
     if min_stock_threshold is not None and float(min_stock_threshold) < 0:  
         return (None, "INVALID_MIN_STOCK", "Estoque mínimo não pode ser negativo")  
+    if max_stock is not None and float(max_stock) < 0:  
+        return (None, "INVALID_MAX_STOCK", "Estoque máximo não pode ser negativo")  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -25,13 +30,16 @@ def create_ingredient(data):
         cur.execute("SELECT 1 FROM INGREDIENTS WHERE UPPER(NAME) = UPPER(?)", (name,))  
         if cur.fetchone():  
             return (None, "INGREDIENT_NAME_EXISTS", "Já existe um insumo com este nome")  
-        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD) VALUES (?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD;"  
+        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY;"  
         cur.execute(sql, (  
             name,  
             price,  
             current_stock,  
             stock_unit,  
-            min_stock_threshold  
+            min_stock_threshold,  
+            max_stock,  
+            supplier,  
+            category  
         ))  
         row = cur.fetchone()  
         conn.commit()  
@@ -40,7 +48,10 @@ def create_ingredient(data):
             "price": float(row[2]) if row[2] is not None else 0.0, "is_available": row[3],  
             "current_stock": float(row[4]) if row[4] is not None else 0.0,  
             "stock_unit": row[5],  
-            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0  
+            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0,  
+            "max_stock": float(row[7]) if row[7] is not None else 0.0,  
+            "supplier": row[8] if row[8] else "",  
+            "category": row[9] if row[9] else ""  
         }, None, None)
     except fdb.Error as e:  
         print(f"Erro ao criar ingrediente: {e}")  
@@ -68,13 +79,19 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
             where.append("CURRENT_STOCK = 0")  
         elif status_filter == 'in_stock':  
             where.append("CURRENT_STOCK > MIN_STOCK_THRESHOLD")  
+        elif status_filter == 'unavailable':  
+            where.append("IS_AVAILABLE = FALSE")  
+        elif status_filter == 'available':  
+            where.append("IS_AVAILABLE = TRUE")  
+        elif status_filter == 'overstock':  
+            where.append("CURRENT_STOCK > MAX_STOCK AND MAX_STOCK > 0")  
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""  
         # total  
         cur.execute(f"SELECT COUNT(*) FROM INGREDIENTS{where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD "  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY "  
             f"FROM INGREDIENTS{where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
@@ -85,7 +102,10 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
             "is_available": row[3],  
             "current_stock": float(row[4]) if row[4] is not None else 0.0,  
             "stock_unit": row[5],  
-            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0  
+            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0,  
+            "max_stock": float(row[7]) if row[7] is not None else 0.0,  
+            "supplier": row[8] if row[8] else "",  
+            "category": row[9] if row[9] else ""  
         } for row in cur.fetchall()]  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -112,7 +132,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         if conn: conn.close()  
 
 def update_ingredient(ingredient_id, data):  
-    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold']  
+    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category']  
     fields_to_update = {k: v for k, v in data.items() if k in allowed_fields}  
     if not fields_to_update:  
         return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
@@ -130,6 +150,8 @@ def update_ingredient(ingredient_id, data):
         return (False, "INVALID_STOCK", "Estoque atual não pode ser negativo")  
     if 'min_stock_threshold' in fields_to_update and float(fields_to_update['min_stock_threshold']) < 0:  
         return (False, "INVALID_MIN_STOCK", "Estoque mínimo não pode ser negativo")  
+    if 'max_stock' in fields_to_update and float(fields_to_update['max_stock']) < 0:  
+        return (False, "INVALID_MAX_STOCK", "Estoque máximo não pode ser negativo")  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -330,6 +352,36 @@ def adjust_ingredient_stock(ingredient_id, change_amount):
         return (True, None, f"Estoque ajustado de {current_stock} para {new_stock}")  
     except fdb.Error as e:  
         print(f"Erro ao ajustar estoque: {e}")  
+        if conn: conn.rollback()  
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")  
+    finally:  
+        if conn: conn.close()
+
+
+def add_ingredient_quantity(ingredient_id, quantity_to_add):  
+    """Adiciona uma quantidade ao estoque atual do ingrediente"""  
+    conn = None  
+    try:  
+        conn = get_db_connection()  
+        cur = conn.cursor()  
+        
+        # Verifica se o ingrediente existe e busca o estoque atual
+        cur.execute("SELECT CURRENT_STOCK FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
+        row = cur.fetchone()  
+        if not row:  
+            return (False, "INGREDIENT_NOT_FOUND", "Ingrediente não encontrado")  
+        
+        current_stock = float(row[0]) if row[0] is not None else 0.0
+        
+        if quantity_to_add < 0:  
+            return (False, "INVALID_QUANTITY", "Quantidade a adicionar não pode ser negativa")  
+        
+        new_stock = current_stock + quantity_to_add
+        cur.execute("UPDATE INGREDIENTS SET CURRENT_STOCK = ? WHERE ID = ?", (new_stock, ingredient_id))  
+        conn.commit()  
+        return (True, None, f"Estoque atualizado de {current_stock} para {new_stock} (+{quantity_to_add})")  
+    except fdb.Error as e:  
+        print(f"Erro ao adicionar quantidade ao estoque: {e}")  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  

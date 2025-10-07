@@ -157,3 +157,18 @@ def move_category_route(category_id):
     return jsonify({"error": "Falha ao mover categoria"}), 500
 
 
+@category_bp.route('/select', methods=['GET'])
+def get_categories_for_select_route():
+    """
+    Retorna todas as categorias ativas apenas com ID e nome para uso em selects.
+    """
+    categories, error_code, message = category_service.get_categories_for_select()
+    if categories is not None:
+        return jsonify({"categories": categories}), 200
+    
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    
+    return jsonify({"error": "Falha ao buscar categorias"}), 500
+
+

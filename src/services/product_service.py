@@ -256,8 +256,8 @@ def reactivate_product(product_id):
         
         # Atualiza o produto para ativo
         sql = "UPDATE PRODUCTS SET IS_ACTIVE = TRUE WHERE ID = ?;"  
-        cur.execute(sql, (product_id,))  
-        conn.commit()  
+        cur.execute(sql, (product_id,))
+        conn.commit()
         return True  # Sempre retorna True se o produto existe
     except fdb.Error as e:  
         print(f"Erro ao reativar produto: {e}")  

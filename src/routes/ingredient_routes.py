@@ -26,7 +26,7 @@ def create_ingredient_route():
     ingredient, error_code, message = ingredient_service.create_ingredient(data)  
     if ingredient:  
         return jsonify(ingredient), 201  
-    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK"]:  
+    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK", "INVALID_MAX_STOCK"]:  
         return jsonify({"error": message}), 400  
     if error_code == "INGREDIENT_NAME_EXISTS":  
         return jsonify({"error": message}), 409  
@@ -48,7 +48,7 @@ def update_ingredient_route(ingredient_id):
         return jsonify({"msg": message}), 200  
     if error_code == "NO_VALID_FIELDS":  
         return jsonify({"error": message}), 400  
-    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK"]:  
+    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK", "INVALID_MAX_STOCK"]:  
         return jsonify({"error": message}), 400  
     if error_code == "INGREDIENT_NOT_FOUND":  
         return jsonify({"error": message}), 404  
@@ -112,6 +112,33 @@ def adjust_ingredient_stock_route(ingredient_id):
     elif error_code == "INGREDIENT_NOT_FOUND":  
         return jsonify({"error": message}), 404  
     elif error_code == "NEGATIVE_STOCK":  
+        return jsonify({"error": message}), 400  
+    else:  
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@ingredient_bp.route('/<int:ingredient_id>/add-quantity', methods=['POST'])  
+@require_role('admin', 'manager')  
+def add_quantity_route(ingredient_id):  
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
+    quantity_to_add = data.get('quantity')  
+    if quantity_to_add is None:  
+        return jsonify({"error": "O campo 'quantity' é obrigatório"}), 400  
+    try:  
+        quantity_to_add = float(quantity_to_add)  
+    except (ValueError, TypeError):  
+        return jsonify({"error": "O campo 'quantity' deve ser um número válido"}), 400  
+    success, error_code, message = ingredient_service.add_ingredient_quantity(ingredient_id, quantity_to_add)  
+    if success:  
+        return jsonify({"msg": message}), 200  
+    elif error_code == "INGREDIENT_NOT_FOUND":  
+        return jsonify({"error": message}), 404  
+    elif error_code == "INVALID_QUANTITY":  
         return jsonify({"error": message}), 400  
     else:  
         return jsonify({"error": "Erro interno do servidor"}), 500  

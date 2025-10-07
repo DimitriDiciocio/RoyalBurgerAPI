@@ -249,6 +249,33 @@ def get_categories_for_reorder():
         if conn: conn.close()
 
 
+def get_categories_for_select():
+    """
+    Retorna todas as categorias ativas apenas com ID e nome para uso em selects.
+    Retorna (categorias, error_code, mensagem)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            "SELECT ID, NAME FROM CATEGORIES WHERE IS_ACTIVE = TRUE ORDER BY DISPLAY_ORDER, NAME;"
+        )
+        categories = [
+            {"id": row[0], "name": row[1]} 
+            for row in cur.fetchall()
+        ]
+        
+        return (categories, None, None)
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar categorias para select: {e}")
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+
 def move_category_to_position(category_id, new_position):
     """
     Move uma categoria para uma nova posição, ajustando as outras automaticamente.
