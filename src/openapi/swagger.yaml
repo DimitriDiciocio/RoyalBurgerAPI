@@ -41,7 +41,6 @@ x-error-codes:
   INVALID_CPF: "CPF inválido"
   WEAK_PASSWORD: "Senha muito fraca"
   EMAIL_ALREADY_EXISTS: "E-mail já está em uso"
-  PHONE_ALREADY_EXISTS: "Telefone já está em uso"
 
   # Pedidos
   STORE_CLOSED: "Loja fechada"

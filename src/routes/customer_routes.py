@@ -38,8 +38,6 @@ def create_customer_route():
     else:  
         if error_code == "EMAIL_ALREADY_EXISTS":  
             return jsonify({"error": "E-mail já cadastrado"}), 409  
-        elif error_code == "PHONE_ALREADY_EXISTS":  
-            return jsonify({"error": "Telefone já cadastrado"}), 409  
         elif error_code == "CPF_ALREADY_EXISTS":  
             return jsonify({"error": "CPF já cadastrado"}), 409  
         elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "WEAK_PASSWORD", "INVALID_DATE"]:  
@@ -121,7 +119,7 @@ def update_customer_route(user_id):
     else:  
         if error_code == "USER_NOT_FOUND":  
             return jsonify({"error": message}), 404  
-        elif error_code in ["EMAIL_ALREADY_EXISTS", "PHONE_ALREADY_EXISTS"]:  
+        elif error_code == "EMAIL_ALREADY_EXISTS":  
             return jsonify({"error": message}), 409  
         elif error_code in ["INVALID_EMAIL", "INVALID_PHONE", "INVALID_CPF", "NO_VALID_FIELDS"]:  
             return jsonify({"error": message}), 400  

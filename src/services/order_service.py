@@ -4,7 +4,7 @@ import fdb
 import random
 import string
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service
 from ..database import get_db_connection
 from ..utils import validators
 
@@ -217,6 +217,17 @@ def update_order_status(order_id, new_status):
         
         sql_update = "UPDATE ORDERS SET STATUS = ? WHERE ID = ?;"
         cur.execute(sql_update, (new_status, order_id))
+
+        # Deduz estoque quando o pedido é confirmado (status 'preparing')
+        if new_status == 'preparing':
+            success, error_code, message = stock_service.deduct_stock_for_order(order_id)
+            if not success:
+                # Se falhou a dedução, reverte o status
+                cur.execute("UPDATE ORDERS SET STATUS = 'pending' WHERE ID = ?;", (order_id,))
+                conn.commit()
+                print(f"Erro ao deduzir estoque para pedido {order_id}: {message}")
+                return False
+            print(f"Estoque deduzido para pedido {order_id}: {message}")
 
         if new_status == 'completed':
             sql_get_user = "SELECT USER_ID FROM ORDERS WHERE ID = ?;"
