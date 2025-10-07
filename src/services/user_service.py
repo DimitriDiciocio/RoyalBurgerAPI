@@ -40,7 +40,24 @@ def create_user(user_data):
     password = user_data.get('password')
     phone = user_data.get('phone')
     cpf = user_data.get('cpf')
-    date_of_birth = convert_date_format(user_data.get('date_of_birth'))
+    
+    # Processa a data de nascimento
+    date_of_birth_raw = user_data.get('date_of_birth')
+    if date_of_birth_raw and date_of_birth_raw.strip():
+        # Se já está no formato ISO (YYYY-MM-DD), usa diretamente
+        if len(date_of_birth_raw) == 10 and date_of_birth_raw.count('-') == 2:
+            try:
+                # Valida se é uma data válida no formato ISO
+                datetime.strptime(date_of_birth_raw, '%Y-%m-%d')
+                date_of_birth = date_of_birth_raw
+            except ValueError:
+                # Se não é válida, tenta converter do formato brasileiro
+                date_of_birth = convert_date_format(date_of_birth_raw)
+        else:
+            # Se está no formato brasileiro (DD-MM-YYYY), converte
+            date_of_birth = convert_date_format(date_of_birth_raw)
+    else:
+        date_of_birth = None
     
     is_valid, message = validators.is_valid_email(email)
     if not is_valid:
@@ -97,6 +114,25 @@ def create_user(user_data):
             if cur.fetchone():
                 return (None, "CPF_ALREADY_EXISTS", "Este CPF já está em uso por outra conta.")
 
+        # Debug: mostra os valores que serão inseridos
+        print(f"DEBUG - Inserindo usuário:")
+        print(f"  FULL_NAME: {full_name}")
+        print(f"  EMAIL: {email}")
+        print(f"  ROLE: {role}")
+        print(f"  DATE_OF_BIRTH: {date_of_birth} (tipo: {type(date_of_birth)})")
+        print(f"  PHONE: {phone}")
+        print(f"  CPF: {cpf}")
+        
+        # Verifica se a data é válida antes de inserir
+        if date_of_birth:
+            try:
+                # Tenta converter para datetime para validar
+                datetime.strptime(date_of_birth, '%Y-%m-%d')
+                print(f"DEBUG - Data validada com sucesso: {date_of_birth}")
+            except ValueError as ve:
+                print(f"DEBUG - Erro na validação da data: {ve}")
+                return (None, "INVALID_DATE", f"Data de nascimento inválida: {date_of_birth}")
+        
         # query para inserir novo usuário
         sql = """
             INSERT INTO USERS (FULL_NAME, EMAIL, PASSWORD_HASH, ROLE, DATE_OF_BIRTH, PHONE, CPF) 
@@ -143,7 +179,13 @@ def create_user(user_data):
         return (new_user, None, None)
     except fdb.Error as e:
         print(f"Erro ao criar usuário: {e}")
+        print(f"Detalhes do erro: SQLCODE={e.args[1] if len(e.args) > 1 else 'N/A'}")
         if conn: conn.rollback()
+        
+        # Tratamento específico para erro de validação de data
+        if "DATE_OF_BIRTH" in str(e) and "validation error" in str(e):
+            return (None, "INVALID_DATE", "Data de nascimento inválida ou em formato incorreto")
+        
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()

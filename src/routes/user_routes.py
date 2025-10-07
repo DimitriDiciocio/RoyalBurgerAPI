@@ -181,8 +181,6 @@ def create_user_route():
             return jsonify({"error": birth_date_msg}), 400
         # Converte para formato ISO para o banco de dados
         data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
-        # Converte para formato ISO para o banco de dados
-        data['date_of_birth'] = convert_br_date_to_iso(data['date_of_birth'])
     
     # Campos opcionais com valores padrão
     if 'date_of_birth' not in data:
