@@ -2,6 +2,7 @@ import bcrypt
 import fdb  
 from functools import wraps  
 from flask import jsonify  
+from datetime import datetime, timezone
 from ..database import get_db_connection  
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt
 from .two_factor_service import create_2fa_verification, verify_2fa_code, is_2fa_enabled  
@@ -40,6 +41,9 @@ def authenticate(email, password):
             return ({"requires_2fa": True, "user_id": user_id}, None, message)
         
         # Login normal sem 2FA
+        # Remove tokens de revogação antigos quando o usuário faz login
+        clear_user_revoke_tokens(user_id)
+        
         identity = str(user_id)  
         additional_claims = {"roles": [role], "full_name": full_name}  
         access_token = create_access_token(identity=identity, additional_claims=additional_claims)  
@@ -98,6 +102,9 @@ def verify_2fa_and_login(user_id, code):
             return (None, "USER_NOT_FOUND", "Usuário não encontrado")
         
         role, full_name = user_data
+        # Remove tokens de revogação antigos quando o usuário faz login via 2FA
+        clear_user_revoke_tokens(user_id)
+        
         identity = str(user_id)
         additional_claims = {"roles": [role], "full_name": full_name}
         access_token = create_access_token(identity=identity, additional_claims=additional_claims)
@@ -118,26 +125,48 @@ def is_token_revoked(jwt_payload):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        # 1) Blacklist por JTI
+        
+        # 1) Blacklist por JTI (token específico)
         sql = "SELECT 1 FROM TOKEN_BLACKLIST WHERE JTI = ?;"  
         cur.execute(sql, (jti,))  
         if cur.fetchone() is not None:
             return True
-        # 2) Revogação global por usuário (se existir tabela USER_TOKEN_BLACKLIST)
-        try:
-            cur.execute("SELECT REVOKED_AFTER FROM USER_TOKEN_BLACKLIST WHERE USER_ID = ?;", (int(user_sub),))
-            row = cur.fetchone()
-            if row and row[0] is not None and token_iat is not None:
-                # token_iat é epoch seconds; compara com REVOKED_AFTER
-                from datetime import datetime, timezone
-                revoked_after = row[0]
-                token_time = datetime.fromtimestamp(int(token_iat), tz=timezone.utc)
-                # Se token é anterior ao momento de revogação, considerar revogado
-                if token_time <= revoked_after.replace(tzinfo=timezone.utc):
-                    return True
-        except fdb.Error:
-            # Se a tabela não existir, ignora verificação de usuário
-            pass
+            
+        # 2) Revogação global por usuário (verifica token especial de revogação)
+        if user_sub:
+            try:
+                # Verifica se existe um token de revogação global para este usuário
+                cur.execute("SELECT JTI FROM TOKEN_BLACKLIST WHERE JTI LIKE ?", (f"REVOKE_USER_{user_sub}_%",))
+                revoke_token = cur.fetchone()
+                
+                if revoke_token and token_iat is not None:
+                    # Extrai o timestamp do token de revogação
+                    revoke_jti = revoke_token[0]
+                    # Formato: "REVOKE_USER_{USER_ID}_{TIMESTAMP}"
+                    try:
+                        revoke_timestamp_str = revoke_jti.split('_')[-1]
+                        revoke_timestamp = datetime.strptime(revoke_timestamp_str, "%Y%m%d%H%M%S")
+                        
+                        # Converte token_iat (epoch seconds) para datetime
+                        token_time = datetime.fromtimestamp(int(token_iat), tz=timezone.utc)
+                        
+                        # Se o token foi criado antes da revogação, considera revogado
+                        if token_time <= revoke_timestamp.replace(tzinfo=timezone.utc):
+                            print(f"Token revogado: token criado em {token_time}, revogação em {revoke_timestamp}")
+                            return True
+                        else:
+                            print(f"Token válido: token criado em {token_time}, revogação em {revoke_timestamp}")
+                            
+                    except (ValueError, IndexError) as e:
+                        print(f"Erro ao processar timestamp de revogação: {e}")
+                        # Se não conseguir extrair o timestamp, considera revogado por segurança
+                        return True
+                        
+            except fdb.Error as e:
+                print(f"Erro ao verificar revogação global do usuário {user_sub}: {e}")
+                # Em caso de erro, não considera revogado para não bloquear usuários
+                pass
+                
         return False  
     except fdb.Error as e:  
         print(f"Erro ao verificar a blacklist de tokens: {e}")  
@@ -148,20 +177,61 @@ def is_token_revoked(jwt_payload):
 
 def revoke_all_tokens_for_user(user_id):
     """Marca todos os tokens do usuário como revogados a partir de agora.
-    Requer tabela USER_TOKEN_BLACKLIST (USER_ID INTEGER PRIMARY KEY, REVOKED_AFTER TIMESTAMP).
+    Usa a tabela TOKEN_BLACKLIST existente com um token especial para marcar a revogação global.
     """
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Upsert (em Firebird: tenta update, se 0 linhas, faz insert)
-        cur.execute("UPDATE USER_TOKEN_BLACKLIST SET REVOKED_AFTER = CURRENT_TIMESTAMP WHERE USER_ID = ?;", (user_id,))
-        if cur.rowcount == 0:
-            cur.execute("INSERT INTO USER_TOKEN_BLACKLIST (USER_ID, REVOKED_AFTER) VALUES (?, CURRENT_TIMESTAMP);", (user_id,))
+        
+        # Cria um token especial para marcar a revogação global do usuário
+        # Formato: "REVOKE_USER_{USER_ID}_{TIMESTAMP}"
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        special_jti = f"REVOKE_USER_{user_id}_{timestamp}"
+        
+        # Adiciona o token especial à blacklist com expiração longa (1 ano)
+        expires_at = datetime.now().replace(year=datetime.now().year + 1)
+        
+        # Verifica se já existe um token de revogação para este usuário
+        cur.execute("SELECT JTI FROM TOKEN_BLACKLIST WHERE JTI LIKE ?", (f"REVOKE_USER_{user_id}_%",))
+        existing_revoke = cur.fetchone()
+        
+        if existing_revoke:
+            # Remove o token de revogação antigo
+            cur.execute("DELETE FROM TOKEN_BLACKLIST WHERE JTI = ?", (existing_revoke[0],))
+            print(f"Token de revogação antigo removido: {existing_revoke[0]}")
+        
+        # Adiciona o novo token de revogação
+        cur.execute("INSERT INTO TOKEN_BLACKLIST (JTI, EXPIRES_AT) VALUES (?, ?)", (special_jti, expires_at))
+        
         conn.commit()
+        print(f"Tokens do usuário {user_id} revogados com sucesso. Token de revogação: {special_jti}")
         return True
     except fdb.Error as e:
         print(f"Erro ao revogar tokens do usuário {user_id}: {e}")
+        if conn: conn.rollback()
+        return False
+    finally:
+        if conn: conn.close()
+
+def clear_user_revoke_tokens(user_id):
+    """Remove tokens de revogação antigos quando o usuário faz login novamente."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Remove todos os tokens de revogação para este usuário
+        cur.execute("DELETE FROM TOKEN_BLACKLIST WHERE JTI LIKE ?", (f"REVOKE_USER_{user_id}_%",))
+        deleted_count = cur.rowcount
+        
+        if deleted_count > 0:
+            conn.commit()
+            print(f"Removidos {deleted_count} tokens de revogação antigos para o usuário {user_id}")
+        
+        return True
+    except fdb.Error as e:
+        print(f"Erro ao limpar tokens de revogação do usuário {user_id}: {e}")
         if conn: conn.rollback()
         return False
     finally:
