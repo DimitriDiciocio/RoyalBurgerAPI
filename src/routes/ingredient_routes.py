@@ -11,13 +11,18 @@ def list_ingredients_route():
     name = request.args.get('name')  
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
-    result = ingredient_service.list_ingredients(name_filter=name, status_filter=status_filter, page=page, page_size=page_size)  
+    result = ingredient_service.list_ingredients(name_filter=name, status_filter=status_filter, page=page, page_size=page_size)
     return jsonify(result), 200  
 
 @ingredient_bp.route('/', methods=['POST'])  
 @require_role('admin', 'manager')  
 def create_ingredient_route():  
-    data = request.get_json() or {}  
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400  
     ingredient, error_code, message = ingredient_service.create_ingredient(data)  
     if ingredient:  
         return jsonify(ingredient), 201  
@@ -32,7 +37,12 @@ def create_ingredient_route():
 @ingredient_bp.route('/<int:ingredient_id>', methods=['PUT'])  
 @require_role('admin', 'manager')  
 def update_ingredient_route(ingredient_id):  
-    data = request.get_json() or {}  
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400  
     success, error_code, message = ingredient_service.update_ingredient(ingredient_id, data)  
     if success:  
         return jsonify({"msg": message}), 200  
@@ -65,7 +75,12 @@ def delete_ingredient_route(ingredient_id):
 @ingredient_bp.route('/<int:ingredient_id>/availability', methods=['PATCH'])  
 @require_role('admin', 'manager')  
 def update_availability_route(ingredient_id):  
-    data = request.get_json()  
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     is_available = data.get('is_available')  
     if is_available is None or not isinstance(is_available, bool):  
         return jsonify({"error": "O campo 'is_available' é obrigatório e deve ser true ou false"}), 400  
@@ -78,7 +93,12 @@ def update_availability_route(ingredient_id):
 @ingredient_bp.route('/<int:ingredient_id>/stock', methods=['POST'])  
 @require_role('admin', 'manager')  
 def adjust_ingredient_stock_route(ingredient_id):  
-    data = request.get_json()  
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     change = data.get('change')  
     if change is None:  
         return jsonify({"error": "O campo 'change' é obrigatório"}), 400  

@@ -28,7 +28,12 @@ def create_product_route():
     # Verifica se há dados JSON ou form data
     data = {}
     if request.is_json:
-        data = request.get_json() or {}
+        try:
+            data = request.get_json()
+            if data is None:
+                return jsonify({"error": "JSON inválido ou vazio"}), 400
+        except Exception as e:
+            return jsonify({"error": "Erro ao processar JSON"}), 400
     else:
         # Para multipart/form-data, pega os dados do form
         data = {}
@@ -108,7 +113,12 @@ def update_product_route(product_id):
     # Verifica se há dados JSON ou form data
     data = {}
     if request.is_json:
-        data = request.get_json() or {}
+        try:
+            data = request.get_json()
+            if data is None:
+                return jsonify({"error": "JSON inválido ou vazio"}), 400
+        except Exception as e:
+            return jsonify({"error": "Erro ao processar JSON"}), 400
     else:
         # Para multipart/form-data, pega os dados do form
         data = {}
@@ -205,7 +215,12 @@ def get_product_ingredients_route(product_id):
 @product_bp.route('/<int:product_id>/ingredients', methods=['POST'])  
 @require_role('admin', 'manager')  
 def add_ingredient_to_product_route(product_id):  
-    data = request.get_json()  
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     ingredient_id = data.get('ingredient_id')  
     quantity = data.get('quantity')  
     unit = data.get('unit')  
@@ -228,7 +243,12 @@ def remove_ingredient_from_product_route(product_id, ingredient_id):
 @product_bp.route('/<int:product_id>/ingredients/<int:ingredient_id>', methods=['PUT'])
 @require_role('admin', 'manager')
 def update_product_ingredient_route(product_id, ingredient_id):
-    data = request.get_json() or {}
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     quantity = data.get('quantity')
     unit = data.get('unit')
     from ..services import ingredient_service

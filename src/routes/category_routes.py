@@ -8,7 +8,12 @@ category_bp = Blueprint('categories', __name__)
 @category_bp.route('/', methods=['POST'])
 @require_role('admin', 'manager')
 def create_category_route():
-    data = request.get_json() or {}
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     new_category, error_code, message = category_service.create_category(data)
     if new_category:
         return jsonify(new_category), 201
@@ -33,7 +38,12 @@ def list_categories_route():
 @category_bp.route('/<int:category_id>', methods=['PUT'])
 @require_role('admin', 'manager')
 def update_category_route(category_id):
-    data = request.get_json() or {}
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     success, error_code, message = category_service.update_category(category_id, data)
     if success:
         return jsonify({"msg": message}), 200
@@ -72,7 +82,12 @@ def reorder_categories_route():
     Reordena categorias baseado em uma lista de {id, display_order}.
     Body: {"categories": [{"id": 1, "display_order": 1}, {"id": 2, "display_order": 2}]}
     """
-    data = request.get_json() or {}
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     categories = data.get('categories', [])
     
     if not categories:
@@ -117,7 +132,12 @@ def move_category_route(category_id):
     Move uma categoria para uma nova posição.
     Body: {"position": 2}
     """
-    data = request.get_json() or {}
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
     new_position = data.get('position')
     
     if new_position is None or not isinstance(new_position, int):

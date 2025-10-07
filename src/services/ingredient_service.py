@@ -25,10 +25,9 @@ def create_ingredient(data):
         cur.execute("SELECT 1 FROM INGREDIENTS WHERE UPPER(NAME) = UPPER(?)", (name,))  
         if cur.fetchone():  
             return (None, "INGREDIENT_NAME_EXISTS", "Já existe um insumo com este nome")  
-        sql = "INSERT INTO INGREDIENTS (NAME, DESCRIPTION, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD) VALUES (?, ?, ?, ?, ?, ?) RETURNING ID, NAME, DESCRIPTION, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD;"  
+        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD) VALUES (?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD;"  
         cur.execute(sql, (  
             name,  
-            data.get('description'),  
             price,  
             current_stock,  
             stock_unit,  
@@ -37,11 +36,11 @@ def create_ingredient(data):
         row = cur.fetchone()  
         conn.commit()  
         return ({  
-            "id": row[0], "name": row[1], "description": row[2],  
-            "price": float(row[3]) if row[3] is not None else 0.0, "is_available": row[4],  
-            "current_stock": float(row[5]) if row[5] is not None else 0.0,  
-            "stock_unit": row[6],  
-            "min_stock_threshold": float(row[7]) if row[7] is not None else 0.0  
+            "id": row[0], "name": row[1],  
+            "price": float(row[2]) if row[2] is not None else 0.0, "is_available": row[3],  
+            "current_stock": float(row[4]) if row[4] is not None else 0.0,  
+            "stock_unit": row[5],  
+            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0  
         }, None, None)
     except fdb.Error as e:  
         print(f"Erro ao criar ingrediente: {e}")  
@@ -75,19 +74,18 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD "  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD "  
             f"FROM INGREDIENTS{where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
         items = [{  
             "id": row[0],  
             "name": row[1],  
-            "description": row[2],  
-            "price": float(row[3]) if row[3] is not None else 0.0,  
-            "is_available": row[4],  
-            "current_stock": float(row[5]) if row[5] is not None else 0.0,  
-            "stock_unit": row[6],  
-            "min_stock_threshold": float(row[7]) if row[7] is not None else 0.0  
+            "price": float(row[2]) if row[2] is not None else 0.0,  
+            "is_available": row[3],  
+            "current_stock": float(row[4]) if row[4] is not None else 0.0,  
+            "stock_unit": row[5],  
+            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0  
         } for row in cur.fetchall()]  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -114,7 +112,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         if conn: conn.close()  
 
 def update_ingredient(ingredient_id, data):  
-    allowed_fields = ['name', 'description', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold']  
+    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold']  
     fields_to_update = {k: v for k, v in data.items() if k in allowed_fields}  
     if not fields_to_update:  
         return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  

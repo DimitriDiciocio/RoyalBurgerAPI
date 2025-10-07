@@ -472,9 +472,6 @@ components:
         name:
           type: string
           example: "Carne de Hambúrguer"
-        description:
-          type: string
-          example: "Carne bovina moída para hambúrguer"
         price:
           type: number
           format: float
@@ -501,9 +498,6 @@ components:
         name:
           type: string
           example: "Carne de Hambúrguer"
-        description:
-          type: string
-          example: "Carne bovina moída para hambúrguer"
         price:
           type: number
           format: float
