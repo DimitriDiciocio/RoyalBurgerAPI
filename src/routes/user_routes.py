@@ -502,6 +502,8 @@ def verify_email_route():
             return jsonify({"error": "Código de verificação expirado. Solicite um novo código"}), 400
         elif error_code == "INVALID_CODE":
             return jsonify({"error": "Código de verificação inválido"}), 400
+        elif error_code == "NO_UNVERIFIED_USER":
+            return jsonify({"error": message}), 404
         elif error_code == "DATABASE_ERROR":
             return jsonify({"error": "Erro interno do servidor"}), 500
         else:
