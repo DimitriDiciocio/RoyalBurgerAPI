@@ -65,3 +65,75 @@ def delete_category_route(category_id):
     return jsonify({"error": "Falha ao excluir categoria"}), 500
 
 
+@category_bp.route('/reorder', methods=['POST'])
+@require_role('admin', 'manager')
+def reorder_categories_route():
+    """
+    Reordena categorias baseado em uma lista de {id, display_order}.
+    Body: {"categories": [{"id": 1, "display_order": 1}, {"id": 2, "display_order": 2}]}
+    """
+    data = request.get_json() or {}
+    categories = data.get('categories', [])
+    
+    if not categories:
+        return jsonify({"error": "Lista de categorias é obrigatória"}), 400
+    
+    success, error_code, message = category_service.reorder_categories(categories)
+    if success:
+        return jsonify({"msg": message}), 200
+    
+    if error_code == "INVALID_DATA":
+        return jsonify({"error": message}), 400
+    if error_code == "CATEGORY_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    if error_code == "INVALID_ORDER":
+        return jsonify({"error": message}), 400
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    
+    return jsonify({"error": "Falha ao reordenar categorias"}), 500
+
+
+@category_bp.route('/reorder', methods=['GET'])
+@require_role('admin', 'manager')
+def get_categories_for_reorder_route():
+    """
+    Retorna todas as categorias ativas ordenadas por display_order para reordenação.
+    """
+    categories, error_code, message = category_service.get_categories_for_reorder()
+    if categories is not None:
+        return jsonify({"categories": categories}), 200
+    
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    
+    return jsonify({"error": "Falha ao buscar categorias"}), 500
+
+
+@category_bp.route('/<int:category_id>/move', methods=['PUT'])
+@require_role('admin', 'manager')
+def move_category_route(category_id):
+    """
+    Move uma categoria para uma nova posição.
+    Body: {"position": 2}
+    """
+    data = request.get_json() or {}
+    new_position = data.get('position')
+    
+    if new_position is None or not isinstance(new_position, int):
+        return jsonify({"error": "Posição é obrigatória e deve ser um número inteiro"}), 400
+    
+    success, error_code, message = category_service.move_category_to_position(category_id, new_position)
+    if success:
+        return jsonify({"msg": message}), 200
+    
+    if error_code == "CATEGORY_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    if error_code == "INVALID_POSITION":
+        return jsonify({"error": message}), 400
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    
+    return jsonify({"error": "Falha ao mover categoria"}), 500
+
+

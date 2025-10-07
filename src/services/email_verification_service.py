@@ -9,6 +9,9 @@ def generate_verification_code():
     return ''.join(random.choices(string.digits, k=6))
 
 def create_email_verification(email):
+    # Normaliza o email para minúsculas
+    email = email.lower().strip()
+    
     user = get_user_by_email_for_verification(email)
     if not user:
         return (False, "USER_NOT_FOUND", "Usuário não encontrado")
@@ -60,6 +63,9 @@ def create_email_verification(email):
 def verify_email_code(email, code):
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -104,6 +110,9 @@ def verify_email_code(email, code):
 def get_user_by_email_for_verification(email):
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
         sql = "SELECT ID, FULL_NAME, EMAIL, IS_EMAIL_VERIFIED FROM USERS WHERE EMAIL = ? AND IS_ACTIVE = TRUE"

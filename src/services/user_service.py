@@ -34,6 +34,9 @@ def convert_date_format(date_string):
 def create_user(user_data):
     full_name = user_data.get('full_name')
     email = user_data.get('email')
+    # Normaliza o email para minúsculas
+    if email:
+        email = email.lower().strip()
     password = user_data.get('password')
     phone = user_data.get('phone')
     cpf = user_data.get('cpf')
@@ -229,6 +232,9 @@ def get_user_by_id(user_id):
 def get_user_by_email(email):
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
         sql = "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE FROM USERS WHERE EMAIL = ? AND IS_ACTIVE = TRUE;"
@@ -266,6 +272,10 @@ def update_user(user_id, update_data, is_admin_request=False):
             
             # Validação de email para administradores
             new_email = update_data['email']
+            # Normaliza o email para minúsculas
+            new_email = new_email.lower().strip()
+            update_data['email'] = new_email
+            
             is_valid, message = validators.is_valid_email(new_email)
             if not is_valid:
                 return (False, "INVALID_EMAIL", message)
@@ -367,6 +377,9 @@ def get_user_ids_by_roles(roles):
 def initiate_password_reset(email):
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -425,6 +438,9 @@ def finalize_password_reset(email, reset_code, new_password):
 
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -890,6 +906,9 @@ def check_email_availability(email):
     """Verifica se um email está disponível (considerando apenas emails verificados)."""
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM USERS WHERE EMAIL = ? AND IS_EMAIL_VERIFIED = TRUE", (email,))

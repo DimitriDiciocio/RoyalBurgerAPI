@@ -16,6 +16,9 @@ def create_pending_email_change(user_id, new_email):
     """
     conn = None
     try:
+        # Normaliza o email para minúsculas
+        new_email = new_email.lower().strip()
+        
         conn = get_db_connection()
         cur = conn.cursor()
         

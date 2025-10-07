@@ -9,6 +9,9 @@ from .two_factor_service import create_2fa_verification, verify_2fa_code, is_2fa
 def authenticate(email, password):  
     conn = None  
     try:  
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
+        
         conn = get_db_connection()  
         cur = conn.cursor()  
         sql_check_user = (
