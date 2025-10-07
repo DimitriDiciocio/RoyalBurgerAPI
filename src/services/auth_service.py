@@ -24,13 +24,15 @@ def authenticate(email, password):
         if not user_record:  
             return (None, "USER_NOT_FOUND", "Usuário não encontrado")  
         user_id, hashed_password, role, full_name, is_active, two_factor_enabled, is_email_verified = user_record  
+        # Verifica conta inativa PRIMEIRO
         if not is_active:  
             return (None, "ACCOUNT_INACTIVE", "Sua conta está inativa. Entre em contato com o suporte para reativá-la.")  
-        if not bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8')):  
-            return (None, "INVALID_PASSWORD", "Senha incorreta")  
-        # Bloqueia login se e-mail não verificado
+        # Verifica email ANTES da senha para dar feedback mais específico
         if not is_email_verified:
             return (None, "EMAIL_NOT_VERIFIED", "E-mail não verificado. Verifique seu e-mail para continuar.")
+        # Por último, verifica a senha
+        if not bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8')):  
+            return (None, "INVALID_PASSWORD", "Senha incorreta")
         
         # Se 2FA está habilitado, retorna status especial
         if two_factor_enabled:
