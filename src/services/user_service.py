@@ -89,11 +89,7 @@ def create_user(user_data):
         if cur.fetchone():
             return (None, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta verificada.")
 
-        if phone:
-            sql_check_phone = "SELECT ID FROM USERS WHERE PHONE = ?;"
-            cur.execute(sql_check_phone, (phone,))
-            if cur.fetchone():
-                return (None, "PHONE_ALREADY_EXISTS", "Este telefone já está em uso por outra conta.")
+        # Telefone não precisa ser único - múltiplos usuários podem ter o mesmo telefone
 
         if cpf:
             sql_check_cpf = "SELECT ID FROM USERS WHERE CPF = ?;"
@@ -266,24 +262,30 @@ def update_user(user_id, update_data, is_admin_request=False):
             return (False, "USER_NOT_FOUND", "Usuário não encontrado.")
 
         # Email só pode ser alterado diretamente por administradores
+        email_changed = False
         if 'email' in update_data:
             if not is_admin_request:
                 return (False, "EMAIL_CHANGE_REQUIRES_VERIFICATION", "Para alterar o email, use o endpoint específico que requer verificação.")
             
-            # Validação de email para administradores
+            # Verifica se o email está realmente mudando
+            cur.execute("SELECT EMAIL FROM USERS WHERE ID = ?;", (user_id,))
+            current_email = cur.fetchone()[0]
             new_email = update_data['email']
             # Normaliza o email para minúsculas
             new_email = new_email.lower().strip()
-            update_data['email'] = new_email
             
-            is_valid, message = validators.is_valid_email(new_email)
-            if not is_valid:
-                return (False, "INVALID_EMAIL", message)
-            
-            sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ? AND IS_EMAIL_VERIFIED = TRUE;"
-            cur.execute(sql_check_email, (new_email, user_id))
-            if cur.fetchone():
-                return (False, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta verificada.")
+            if current_email != new_email:
+                email_changed = True
+                update_data['email'] = new_email
+                
+                is_valid, message = validators.is_valid_email(new_email)
+                if not is_valid:
+                    return (False, "INVALID_EMAIL", message)
+                
+                sql_check_email = "SELECT ID FROM USERS WHERE EMAIL = ? AND ID <> ? AND IS_EMAIL_VERIFIED = TRUE;"
+                cur.execute(sql_check_email, (new_email, user_id))
+                if cur.fetchone():
+                    return (False, "EMAIL_ALREADY_EXISTS", "Este e-mail já está em uso por outra conta verificada.")
 
         if 'phone' in update_data:
             new_phone = update_data['phone']
@@ -291,11 +293,7 @@ def update_user(user_id, update_data, is_admin_request=False):
                 is_valid, message = validators.is_valid_phone(new_phone)
                 if not is_valid:
                     return (False, "INVALID_PHONE", message)
-                
-                sql_check_phone = "SELECT ID FROM USERS WHERE PHONE = ? AND ID <> ?;"
-                cur.execute(sql_check_phone, (new_phone, user_id))
-                if cur.fetchone():
-                    return (False, "PHONE_ALREADY_EXISTS", "Este telefone já está em uso por outra conta.")
+                # Telefone não precisa ser único - múltiplos usuários podem ter o mesmo telefone
 
         if 'cpf' in update_data:
             new_cpf = update_data['cpf']
@@ -316,7 +314,11 @@ def update_user(user_id, update_data, is_admin_request=False):
         if not fields_to_update:
             return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido.")
 
-        set_parts = [f"{key} = ?" for key in fields_to_update]
+        # Se o email foi alterado por um admin, marca como não verificado
+        if email_changed and is_admin_request:
+            fields_to_update['is_email_verified'] = False
+
+        set_parts = [f"{key.upper()} = ?" for key in fields_to_update]
         values = list(fields_to_update.values())
         values.append(user_id)
 
@@ -324,7 +326,11 @@ def update_user(user_id, update_data, is_admin_request=False):
         cur.execute(sql_update, tuple(values))
         conn.commit()
 
-        return (True, None, "Dados atualizados com sucesso.")
+        # Mensagem personalizada se o email foi alterado
+        if email_changed and is_admin_request:
+            return (True, None, "Dados atualizados com sucesso. O usuário precisará verificar o novo email para continuar usando a conta.")
+        else:
+            return (True, None, "Dados atualizados com sucesso.")
 
     except fdb.Error as e:
         print(f"Erro ao atualizar usuário: {e}")
