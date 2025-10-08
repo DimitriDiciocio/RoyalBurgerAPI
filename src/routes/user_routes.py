@@ -206,6 +206,71 @@ def create_user_route():
             return jsonify({"error": "Não foi possível criar o usuário."}), 500
 
 
+@user_bp.route('/<int:user_id>/metrics', methods=['GET'])
+@require_role('admin', 'manager')
+def get_user_metrics_route(user_id):
+    """Retorna métricas de performance de um funcionário específico."""
+    metrics = user_service.get_user_metrics(user_id)
+    if metrics is None:
+        return jsonify({"error": "Usuário não encontrado ou não é um funcionário"}), 404
+    return jsonify(metrics), 200
+
+
+@user_bp.route('/<int:user_id>/status', methods=['PATCH'])
+@require_role('admin', 'manager')
+def update_user_status_route(user_id):
+    """Ativa/desativa um usuário"""
+    data = request.get_json()
+    if not data or 'is_active' not in data:
+        return jsonify({"error": "Campo 'is_active' é obrigatório"}), 400
+    
+    # Verifica se está tentando desativar o último admin ativo
+    if data['is_active'] is False:
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
+    
+    success, error_code, message = user_service.update_user_status(user_id, data['is_active'])
+    if success:
+        status_text = "ativado" if data['is_active'] else "desativado"
+        return jsonify({"msg": f"Usuário {status_text} com sucesso"}), 200
+    else:
+        if error_code == "USER_NOT_FOUND":
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": "Erro interno do servidor"}), 500
+        else:
+            return jsonify({"error": message}), 400
+
+
+@user_bp.route('/<int:user_id>/role', methods=['PATCH'])
+@require_role('admin', 'manager')
+def update_user_role_route(user_id):
+    """Atualiza o cargo/role de um usuário"""
+    data = request.get_json()
+    if not data or 'role' not in data:
+        return jsonify({"error": "Campo 'role' é obrigatório"}), 400
+    
+    valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+    if data['role'] not in valid_roles:
+        return jsonify({"error": "Cargo inválido"}), 400
+    
+    # Verifica se está tentando alterar o role do último admin ativo
+    if data['role'] != 'admin':
+        if user_service.is_last_active_admin(user_id):
+            return jsonify({"error": "Não é possível alterar o cargo do último administrador ativo do sistema"}), 409
+    
+    success, error_code, message = user_service.update_user_role(user_id, data['role'])
+    if success:
+        return jsonify({"msg": "Cargo atualizado com sucesso"}), 200
+    else:
+        if error_code == "USER_NOT_FOUND":
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": "Erro interno do servidor"}), 500
+        else:
+            return jsonify({"error": message}), 400
+
+
 @user_bp.route('/<int:user_id>', methods=['GET'])
 @require_role('admin', 'manager')
 def get_user_by_id_route(user_id):
@@ -352,15 +417,6 @@ def update_admin_route(user_id):
         return jsonify({"error": "Falha ao atualizar administrador"}), 500
 
 
-@user_bp.route('/<int:user_id>/metrics', methods=['GET'])
-@require_role('admin', 'manager')
-def get_user_metrics_route(user_id):
-    metrics = user_service.get_user_metrics(user_id)
-    if metrics is None:
-        return jsonify({"error": "Usuário não encontrado ou não é um funcionário"}), 404
-    return jsonify(metrics), 200
-
-
 # Endpoints para gerenciamento completo de usuários
 @user_bp.route('/metrics', methods=['GET'])
 @require_role('admin', 'manager')
@@ -394,63 +450,6 @@ def check_email_availability_route():
     
     is_available = user_service.check_email_availability(email)
     return jsonify({"available": is_available}), 200
-
-
-@user_bp.route('/<int:user_id>/status', methods=['PATCH'])
-@require_role('admin', 'manager')
-def update_user_status_route(user_id):
-    """Ativa/desativa um usuário"""
-    data = request.get_json()
-    if not data or 'is_active' not in data:
-        return jsonify({"error": "Campo 'is_active' é obrigatório"}), 400
-    
-    # Verifica se está tentando desativar o último admin ativo
-    if data['is_active'] is False:
-        if user_service.is_last_active_admin(user_id):
-            return jsonify({"error": "Não é possível desativar o último administrador ativo do sistema"}), 409
-    
-    success, error_code, message = user_service.update_user_status(user_id, data['is_active'])
-    if success:
-        status_text = "ativado" if data['is_active'] else "desativado"
-        return jsonify({"msg": f"Usuário {status_text} com sucesso"}), 200
-    else:
-        if error_code == "USER_NOT_FOUND":
-            return jsonify({"error": "Usuário não encontrado"}), 404
-        elif error_code == "DATABASE_ERROR":
-            return jsonify({"error": "Erro interno do servidor"}), 500
-        else:
-            return jsonify({"error": message}), 400
-
-
-@user_bp.route('/<int:user_id>/role', methods=['PATCH'])
-@require_role('admin', 'manager')
-def update_user_role_route(user_id):
-    """Atualiza o cargo/role de um usuário"""
-    data = request.get_json()
-    if not data or 'role' not in data:
-        return jsonify({"error": "Campo 'role' é obrigatório"}), 400
-    
-    valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
-    if data['role'] not in valid_roles:
-        return jsonify({"error": "Cargo inválido"}), 400
-    
-    # Verifica se está tentando alterar o role do último admin ativo
-    if data['role'] != 'admin':
-        if user_service.is_last_active_admin(user_id):
-            return jsonify({"error": "Não é possível alterar o cargo do último administrador ativo do sistema"}), 409
-    
-    success, error_code, message = user_service.update_user_role(user_id, data['role'])
-    if success:
-        return jsonify({"msg": "Cargo atualizado com sucesso"}), 200
-    else:
-        if error_code == "USER_NOT_FOUND":
-            return jsonify({"error": "Usuário não encontrado"}), 404
-        elif error_code == "DATABASE_ERROR":
-            return jsonify({"error": "Erro interno do servidor"}), 500
-        else:
-            return jsonify({"error": message}), 400
-
-
 
 
 @user_bp.route('/request-email-verification', methods=['POST'])

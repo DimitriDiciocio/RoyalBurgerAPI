@@ -242,7 +242,7 @@ def get_user_by_id(user_id):
         sql = (
             "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE, DATE_OF_BIRTH, IS_ACTIVE, CREATED_AT, "
             "IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED "
-            "FROM USERS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+            "FROM USERS WHERE ID = ?;"
         )
         cur.execute(sql, (user_id,))
         row = cur.fetchone()
@@ -1010,9 +1010,9 @@ def update_user_status(user_id, is_active):
             return (False, "CANNOT_DEACTIVATE_LAST_ADMIN", "Não é possível desativar o último administrador ativo do sistema")
         
         cur.execute("UPDATE USERS SET IS_ACTIVE = ? WHERE ID = ?", (is_active, user_id))
-        conn.commit()
         
         if cur.rowcount > 0:
+            conn.commit()
             return (True, None, "Status do usuário atualizado com sucesso")
         else:
             return (False, "USER_NOT_FOUND", "Usuário não encontrado")
