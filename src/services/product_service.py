@@ -157,7 +157,10 @@ def update_product(product_id, update_data):
             return (False, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")  
     if 'category_id' in fields_to_update:  
         category_id = fields_to_update['category_id']  
-        if category_id is None:  
+        if category_id == -1:  # Valor especial para remoção de categoria
+            # Remove a categoria (define como NULL no banco)
+            fields_to_update['category_id'] = None
+        elif category_id is None:  
             return (False, "INVALID_CATEGORY", "Categoria é obrigatória")  
     conn = None  
     try:  
@@ -172,7 +175,7 @@ def update_product(product_id, update_data):
             cur.execute(sql_check_name, (fields_to_update['name'], product_id))  
             if cur.fetchone():  
                 return (False, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")  
-        if 'category_id' in fields_to_update:  
+        if 'category_id' in fields_to_update and fields_to_update['category_id'] is not None:  
             cur.execute("SELECT 1 FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (fields_to_update['category_id'],))  
             if not cur.fetchone():  
                 return (False, "CATEGORY_NOT_FOUND", "Categoria informada não existe ou está inativa")  
