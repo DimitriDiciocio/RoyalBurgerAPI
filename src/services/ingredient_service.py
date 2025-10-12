@@ -132,7 +132,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         if conn: conn.close()  
 
 def update_ingredient(ingredient_id, data):  
-    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category']  
+    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category', 'is_available']
     fields_to_update = {k: v for k, v in data.items() if k in allowed_fields}  
     if not fields_to_update:  
         return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
@@ -200,23 +200,38 @@ def delete_ingredient(ingredient_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        # existe?  
+        
+        # Verificar se existe
         cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
         if not cur.fetchone():  
             return (False, "INGREDIENT_NOT_FOUND", "Ingrediente não encontrado")  
-        # vínculos com produtos?  
+        
+        # Verificar vínculos com produtos
         cur.execute("SELECT COUNT(*) FROM PRODUCT_INGREDIENTS WHERE INGREDIENT_ID = ?", (ingredient_id,))  
         count_links = cur.fetchone()[0] or 0  
+        
         if count_links > 0:  
             return (False, "INGREDIENT_IN_USE", "Exclusão bloqueada: há produtos vinculados a este insumo")  
-        # excluir  
+        
+        # Excluir
         cur.execute("DELETE FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
+        rows_affected = cur.rowcount
+        
         conn.commit()  
-        return (cur.rowcount > 0, None, "Ingrediente excluído com sucesso")  
+        
+        if rows_affected > 0:
+            return (True, None, "Ingrediente excluído com sucesso")
+        else:
+            return (False, "NO_ROWS_AFFECTED", "Nenhuma linha foi afetada na exclusão")
+            
     except fdb.Error as e:  
         print(f"Erro ao excluir ingrediente: {e}")  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
+    except Exception as e:
+        print(f"Erro geral ao excluir ingrediente: {e}")
+        if conn: conn.rollback()
+        return (False, "GENERAL_ERROR", "Erro geral")
     finally:  
         if conn: conn.close()  
 
