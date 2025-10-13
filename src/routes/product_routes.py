@@ -12,7 +12,8 @@ def list_products_route():
     category_id = request.args.get('category_id', type=int)  
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
-    result = product_service.list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size)  
+    include_inactive = request.args.get('include_inactive', type=bool, default=False)  
+    result = product_service.list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)  
     return jsonify(result), 200  
 
 @product_bp.route('/<int:product_id>', methods=['GET'])  
@@ -270,7 +271,23 @@ def search_products_route():
     category_id = request.args.get('category_id', type=int)  
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
-    result = product_service.search_products(name=name, category_id=category_id, page=page, page_size=page_size)  
+    include_inactive = request.args.get('include_inactive', type=bool, default=False)  
+    result = product_service.search_products(name=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)  
+    return jsonify(result), 200
+
+@product_bp.route('/inactive', methods=['GET'])  
+@require_role('admin', 'manager')  
+def list_inactive_products_route():  
+    """Lista apenas produtos inativos - apenas para administradores e gerentes"""
+    name = request.args.get('name')  
+    category_id = request.args.get('category_id', type=int)  
+    page = request.args.get('page', type=int, default=1)  
+    page_size = request.args.get('page_size', type=int, default=10)  
+    result = product_service.list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size, include_inactive=True)  
+    # Filtra apenas produtos inativos
+    if result and 'items' in result:
+        result['items'] = [item for item in result['items'] if not item.get('is_active', True)]
+        result['pagination']['total'] = len(result['items'])
     return jsonify(result), 200
 
 @product_bp.route('/image/<int:product_id>', methods=['GET'])

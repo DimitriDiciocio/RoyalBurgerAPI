@@ -26,10 +26,11 @@ def create_ingredient(data):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        # nome único (case-insensitive)  
-        cur.execute("SELECT 1 FROM INGREDIENTS WHERE UPPER(NAME) = UPPER(?)", (name,))  
-        if cur.fetchone():  
-            return (None, "INGREDIENT_NAME_EXISTS", "Já existe um insumo com este nome")  
+        # nome único (case-insensitive) - verificação mais robusta
+        cur.execute("SELECT ID, NAME FROM INGREDIENTS WHERE UPPER(TRIM(NAME)) = UPPER(TRIM(?))", (name,))  
+        existing = cur.fetchone()
+        if existing:  
+            return (None, "INGREDIENT_NAME_EXISTS", f"Já existe um insumo com o nome '{existing[1]}' (ID: {existing[0]})")  
         sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY;"  
         cur.execute(sql, (  
             name,  
@@ -56,6 +57,11 @@ def create_ingredient(data):
     except fdb.Error as e:  
         print(f"Erro ao criar ingrediente: {e}")  
         if conn: conn.rollback()  
+        
+        # Verificar se é erro de constraint de nome único
+        if e.args and len(e.args) > 1 and e.args[1] == -803:
+            return (None, "INGREDIENT_NAME_EXISTS", f"Já existe um insumo com o nome '{name}'. Verifique se não há duplicatas.")
+        
         return (None, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  
         if conn: conn.close()  
@@ -241,18 +247,24 @@ def add_ingredient_to_product(product_id, ingredient_id, quantity, unit=None):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        # Tenta persistir unidade por vínculo, assumindo coluna UNIT na tabela de associação
-        sql = """
-            MERGE INTO PRODUCT_INGREDIENTS pi
-            USING (SELECT ? AS PRODUCT_ID, ? AS INGREDIENT_ID, ? AS QUANTITY, ? AS UNIT FROM RDB$DATABASE) AS new_data
-            ON (pi.PRODUCT_ID = new_data.PRODUCT_ID AND pi.INGREDIENT_ID = new_data.INGREDIENT_ID)
-            WHEN MATCHED THEN
-                UPDATE SET pi.QUANTITY = new_data.QUANTITY, pi.UNIT = new_data.UNIT
-            WHEN NOT MATCHED THEN
-                INSERT (PRODUCT_ID, INGREDIENT_ID, QUANTITY, UNIT)
-                VALUES (new_data.PRODUCT_ID, new_data.INGREDIENT_ID, new_data.QUANTITY, new_data.UNIT);
-        """  
-        cur.execute(sql, (product_id, ingredient_id, quantity, unit))  
+        
+        # Usar unidade padrão se não fornecida
+        if unit is None:
+            unit = 'un'
+        
+        # Verificar se a vinculação já existe
+        cur.execute("SELECT 1 FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?", (product_id, ingredient_id))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Atualizar vinculação existente
+            sql = "UPDATE PRODUCT_INGREDIENTS SET QUANTITY = ?, UNIT = ? WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?"
+            cur.execute(sql, (quantity, unit, product_id, ingredient_id))
+        else:
+            # Inserir nova vinculação
+            sql = "INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, QUANTITY, UNIT) VALUES (?, ?, ?, ?)"
+            cur.execute(sql, (product_id, ingredient_id, quantity, unit))
+        
         conn.commit()  
         return True  
     except fdb.Error as e:  
@@ -400,6 +412,35 @@ def add_ingredient_quantity(ingredient_id, quantity_to_add):
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  
+        if conn: conn.close()
+
+
+def check_ingredient_name_exists(name):
+    """
+    Verifica se um nome de ingrediente já existe (case-insensitive)
+    Retorna: (exists: bool, existing_ingredient: dict or None)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Busca ingrediente com nome similar (case-insensitive, ignorando espaços)
+        cur.execute("SELECT ID, NAME FROM INGREDIENTS WHERE UPPER(TRIM(NAME)) = UPPER(TRIM(?))", (name,))
+        existing = cur.fetchone()
+        
+        if existing:
+            return (True, {
+                "id": existing[0],
+                "name": existing[1]
+            })
+        
+        return (False, None)
+        
+    except fdb.Error as e:
+        print(f"Erro ao verificar nome do ingrediente: {e}")
+        return (False, None)
+    finally:
         if conn: conn.close()  
 
 

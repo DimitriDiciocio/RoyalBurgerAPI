@@ -141,4 +141,25 @@ def add_quantity_route(ingredient_id):
     elif error_code == "INVALID_QUANTITY":  
         return jsonify({"error": message}), 400  
     else:  
-        return jsonify({"error": "Erro interno do servidor"}), 500  
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@ingredient_bp.route('/check-name', methods=['POST'])  
+def check_name_route():  
+    """Verifica se um nome de ingrediente já existe"""
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
+    
+    name = data.get('name')
+    if not name or not name.strip():
+        return jsonify({"error": "Nome é obrigatório"}), 400
+    
+    exists, existing_ingredient = ingredient_service.check_ingredient_name_exists(name.strip())
+    
+    return jsonify({
+        "exists": exists,
+        "existing_ingredient": existing_ingredient
+    }), 200  

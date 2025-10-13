@@ -44,7 +44,7 @@ def create_product(product_data):
         if conn: conn.close()  
 
 
-def list_products(name_filter=None, category_id=None, page=1, page_size=10):  
+def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False):  
     page = max(int(page or 1), 1)  
     page_size = max(int(page_size or 10), 1)  
     offset = (page - 1) * page_size  
@@ -52,7 +52,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        where_clauses = ["IS_ACTIVE = TRUE"]  
+        where_clauses = [] if include_inactive else ["IS_ACTIVE = TRUE"]  
         params = []  
         if name_filter:  
             where_clauses.append("UPPER(NAME) LIKE UPPER(?)")  
@@ -60,13 +60,13 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10):
         if category_id:  
             where_clauses.append("CATEGORY_ID = ?")  
             params.append(category_id)  
-        where_sql = " AND ".join(where_clauses)  
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"  
         # total  
         cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL "  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE "  
             f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
@@ -80,7 +80,8 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10):
                 "price": str(row[3]),  
                 "cost_price": str(row[4]) if row[4] else "0.00",  
                 "preparation_time_minutes": row[5] if row[5] else 0,  
-                "category_id": row[6]  
+                "category_id": row[6],
+                "is_active": row[8] if len(row) > 8 else True
             }
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
@@ -270,9 +271,9 @@ def reactivate_product(product_id):
         if conn: conn.close()
 
 
-def search_products(name=None, category_id=None, page=1, page_size=10):  
+def search_products(name=None, category_id=None, page=1, page_size=10, include_inactive=False):  
     # Alias para list_products com mesmos filtros — mantém rota semanticamente distinta
-    return list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size)
+    return list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)
 
 
 
