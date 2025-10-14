@@ -119,5 +119,44 @@ def get_product_image_url(product_id):
     """
     file_path = get_product_image_path(product_id)
     if file_path:
-        return f"/uploads/products/{product_id}.jpeg"
+        return f"/api/uploads/products/{product_id}.jpeg"
     return None
+
+def update_product_image(product_id, image_file=None, remove_image=False):
+    """
+    Atualiza a imagem do produto
+    - Se image_file for fornecido: substitui a imagem atual
+    - Se remove_image=True: remove a imagem atual
+    - Se nenhum parâmetro for fornecido: não altera nada
+    
+    Retorna: (success: bool, image_url: str, error_message: str)
+    """
+    try:
+        # Se deve remover a imagem
+        if remove_image:
+            success, error_msg = delete_product_image(product_id)
+            if success:
+                # Atualiza a URL no banco para None
+                return True, None, "Imagem removida com sucesso"
+            else:
+                return False, None, error_msg
+        
+        # Se deve substituir a imagem
+        if image_file:
+            # Remove a imagem antiga primeiro
+            delete_product_image(product_id)
+            
+            # Salva a nova imagem
+            success, file_path, error_msg = save_product_image(image_file, product_id)
+            if success:
+                image_url = f"/api/uploads/products/{product_id}.jpeg"
+                return True, image_url, "Imagem atualizada com sucesso"
+            else:
+                return False, None, error_msg
+        
+        # Se nenhum parâmetro foi fornecido, não altera nada
+        current_image_url = get_product_image_url(product_id)
+        return True, current_image_url, "Nenhuma alteração na imagem"
+        
+    except Exception as e:
+        return False, None, f"Erro ao atualizar imagem: {str(e)}"

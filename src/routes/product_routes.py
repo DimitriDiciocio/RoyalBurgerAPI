@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, send_from_directory
 import os
 from ..services import product_service  
 from ..services.auth_service import require_role
-from ..utils.image_handler import save_product_image, delete_product_image  
+from ..utils.image_handler import save_product_image, delete_product_image, update_product_image  
 
 product_bp = Blueprint('products', __name__)  
 
@@ -155,10 +155,11 @@ def update_product_route(product_id):
             except (ValueError, TypeError):
                 pass
     
-    # Verifica se há arquivo de imagem
+    # Verifica se há arquivo de imagem ou se deve remover a imagem
     image_file = request.files.get('image')
+    remove_image = request.form.get('remove_image', '').lower() == 'true' or data.get('remove_image', False)
     
-    if not data and not image_file:
+    if not data and not image_file and not remove_image:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
     
     # Atualiza o produto primeiro
@@ -177,16 +178,23 @@ def update_product_route(product_id):
         else:  
             return jsonify({"error": "Falha ao atualizar produto"}), 500
     
-    # Se o produto foi atualizado com sucesso e há uma nova imagem, salva a imagem
-    if image_file:
-        success, file_path, error_msg = save_product_image(image_file, product_id)
+    # Atualiza a imagem do produto usando a nova função
+    if image_file or remove_image:
+        img_success, image_url, img_error = update_product_image(
+            product_id, 
+            image_file=image_file, 
+            remove_image=remove_image
+        )
         
-        if not success:
-            return jsonify({"error": f"Produto atualizado mas falha ao salvar imagem: {error_msg}"}), 500
+        if not img_success:
+            return jsonify({"error": f"Produto atualizado mas falha ao processar imagem: {img_error}"}), 500
         
-        # Salva a URL da imagem no banco de dados
-        image_url = f"/api/uploads/products/{product_id}.jpeg"
-        product_service.update_product_image_url(product_id, image_url)
+        # Atualiza a URL da imagem no banco de dados
+        if image_url:
+            product_service.update_product_image_url(product_id, image_url)
+        else:
+            # Remove a URL da imagem do banco se foi removida
+            product_service.update_product_image_url(product_id, None)
     
     return jsonify({"msg": message}), 200  
 
@@ -315,6 +323,55 @@ def get_products_by_category_route(category_id):
         return jsonify({"error": error_message}), 500
     
     return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@product_bp.route('/<int:product_id>/image', methods=['PUT'])
+@require_role('admin', 'manager')
+def update_product_image_route(product_id):
+    """
+    Atualiza apenas a imagem do produto
+    - Se enviar arquivo: substitui a imagem atual
+    - Se enviar remove_image=true: remove a imagem atual
+    """
+    try:
+        # Verifica se o produto existe
+        product = product_service.get_product_by_id(product_id)
+        if not product:
+            return jsonify({"error": "Produto não encontrado"}), 404
+        
+        # Verifica se há arquivo de imagem ou se deve remover
+        image_file = request.files.get('image')
+        remove_image = request.form.get('remove_image', '').lower() == 'true'
+        
+        if not image_file and not remove_image:
+            return jsonify({"error": "Deve enviar uma imagem ou marcar remove_image=true"}), 400
+        
+        # Atualiza a imagem
+        img_success, image_url, img_error = update_product_image(
+            product_id, 
+            image_file=image_file, 
+            remove_image=remove_image
+        )
+        
+        if not img_success:
+            return jsonify({"error": img_error}), 500
+        
+        # Atualiza a URL da imagem no banco de dados
+        if image_url:
+            product_service.update_product_image_url(product_id, image_url)
+            return jsonify({
+                "msg": "Imagem atualizada com sucesso",
+                "image_url": image_url
+            }), 200
+        else:
+            # Remove a URL da imagem do banco
+            product_service.update_product_image_url(product_id, None)
+            return jsonify({
+                "msg": "Imagem removida com sucesso"
+            }), 200
+            
+    except Exception as e:
+        return jsonify({"error": f"Erro interno: {str(e)}"}), 500
 
 
 @product_bp.route('/image/<int:product_id>', methods=['GET'])
