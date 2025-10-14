@@ -290,6 +290,33 @@ def list_inactive_products_route():
         result['pagination']['total'] = len(result['items'])
     return jsonify(result), 200
 
+@product_bp.route('/category/<int:category_id>', methods=['GET'])
+def get_products_by_category_route(category_id):
+    """
+    Busca produtos por ID da categoria
+    """
+    page = request.args.get('page', type=int, default=1)
+    page_size = request.args.get('page_size', type=int, default=10)
+    include_inactive = request.args.get('include_inactive', type=bool, default=False)
+    
+    result, error_code, error_message = product_service.get_products_by_category_id(
+        category_id=category_id, 
+        page=page, 
+        page_size=page_size, 
+        include_inactive=include_inactive
+    )
+    
+    if result:
+        return jsonify(result), 200
+    
+    if error_code == "CATEGORY_NOT_FOUND":
+        return jsonify({"error": error_message}), 404
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": error_message}), 500
+    
+    return jsonify({"error": "Erro interno do servidor"}), 500
+
+
 @product_bp.route('/image/<int:product_id>', methods=['GET'])
 def get_product_image_route(product_id):
     """

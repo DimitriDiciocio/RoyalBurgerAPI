@@ -277,6 +277,89 @@ def search_products(name=None, category_id=None, page=1, page_size=10, include_i
 
 
 
+def get_products_by_category_id(category_id, page=1, page_size=10, include_inactive=False):  
+    """
+    Busca produtos por ID da categoria específica
+    """
+    page = max(int(page or 1), 1)  
+    page_size = max(int(page_size or 10), 1)  
+    offset = (page - 1) * page_size  
+    conn = None  
+    try:  
+        conn = get_db_connection()  
+        cur = conn.cursor()  
+        
+        # Primeiro verifica se a categoria existe
+        cur.execute("SELECT ID, NAME FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (category_id,))  
+        category_row = cur.fetchone()
+        if not category_row:
+            return (None, "CATEGORY_NOT_FOUND", "Categoria não encontrada ou inativa")
+        
+        category_name = category_row[1]
+        
+        # Monta a query para buscar produtos
+        where_clauses = ["CATEGORY_ID = ?"]
+        params = [category_id]
+        
+        if not include_inactive:
+            where_clauses.append("IS_ACTIVE = TRUE")
+            
+        where_sql = " AND ".join(where_clauses)
+        
+        # Conta total de produtos na categoria
+        cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
+        total = cur.fetchone()[0] or 0  
+        
+        # Busca os produtos paginados
+        cur.execute(  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE "  
+            f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
+            tuple(params)  
+        )  
+        
+        items = []  
+        for row in cur.fetchall():
+            product_id = row[0]
+            item = {  
+                "id": product_id,  
+                "name": row[1],  
+                "description": row[2],  
+                "price": str(row[3]),  
+                "cost_price": str(row[4]) if row[4] else "0.00",  
+                "preparation_time_minutes": row[5] if row[5] else 0,  
+                "category_id": row[6],
+                "is_active": row[8] if len(row) > 8 else True
+            }
+            # Adiciona URL da imagem do banco se existir
+            if row[7]:  # IMAGE_URL
+                item["image_url"] = row[7]
+            items.append(item)  
+            
+        total_pages = (total + page_size - 1) // page_size  
+        
+        result = {  
+            "category": {
+                "id": category_id,
+                "name": category_name
+            },
+            "items": items,  
+            "pagination": {  
+                "total": total,  
+                "page": page,  
+                "page_size": page_size,  
+                "total_pages": total_pages  
+            }  
+        }
+        
+        return (result, None, None)
+        
+    except fdb.Error as e:  
+        print(f"Erro ao buscar produtos por categoria: {e}")  
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:  
+        if conn: conn.close()
+
+
 def get_menu_summary():  
     conn = None  
     try:  
