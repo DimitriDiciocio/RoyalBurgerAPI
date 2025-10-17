@@ -399,4 +399,141 @@ def get_menu_summary():
             "average_preparation_time": 0.0
         }
     finally:  
-        if conn: conn.close()  
+        if conn: conn.close()
+
+
+def calculate_product_cost_by_ingredients(product_id):
+    """
+    Calcula o custo do produto baseado nas porções dos ingredientes
+    """
+    from .ingredient_service import calculate_product_cost_by_portions
+    return calculate_product_cost_by_portions(product_id)
+
+
+def consume_ingredients_for_sale(product_id, quantity=1):
+    """
+    Consome ingredientes do estoque quando um produto é vendido
+    """
+    from .ingredient_service import consume_ingredients_for_product
+    return consume_ingredients_for_product(product_id, quantity)
+
+
+def get_product_ingredients_with_costs(product_id):
+    """
+    Retorna os ingredientes do produto com cálculos de custo baseados em porções
+    """
+    from .ingredient_service import get_ingredients_for_product
+    return get_ingredients_for_product(product_id)
+
+
+def delete_product(product_id):
+    """
+    Exclui permanentemente um produto e todos os seus relacionamentos
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Verificar se o produto existe
+        cur.execute("SELECT ID, NAME FROM PRODUCTS WHERE ID = ?", (product_id,))
+        product = cur.fetchone()
+        if not product:
+            return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado")
+        
+        product_name = product[1]
+        
+        # 2. Verificar se o produto tem pedidos associados
+        cur.execute("""
+            SELECT COUNT(*) FROM ORDER_ITEMS oi
+            JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE oi.PRODUCT_ID = ? AND o.STATUS NOT IN ('cancelled', 'delivered')
+        """, (product_id,))
+        active_orders = cur.fetchone()[0] or 0
+        
+        if active_orders > 0:
+            return (False, "PRODUCT_IN_ACTIVE_ORDERS", 
+                   f"Produto não pode ser excluído pois possui {active_orders} pedido(s) ativo(s)")
+        
+        # 3. Verificar se o produto tem itens no carrinho
+        cur.execute("""
+            SELECT COUNT(*) FROM CART_ITEMS ci
+            JOIN CARTS c ON ci.CART_ID = c.ID
+            WHERE ci.PRODUCT_ID = ? AND c.IS_ACTIVE = TRUE
+        """, (product_id,))
+        cart_items = cur.fetchone()[0] or 0
+        
+        if cart_items > 0:
+            return (False, "PRODUCT_IN_CART", 
+                   f"Produto não pode ser excluído pois está em {cart_items} carrinho(s) ativo(s)")
+        
+        # 4. Remover ingredientes relacionados (PRODUCT_INGREDIENTS)
+        cur.execute("DELETE FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?", (product_id,))
+        ingredients_removed = cur.rowcount
+        
+        # 5. Remover extras relacionados (ORDER_ITEM_EXTRAS) - se existir
+        cur.execute("""
+            DELETE FROM ORDER_ITEM_EXTRAS 
+            WHERE ORDER_ITEM_ID IN (
+                SELECT ID FROM ORDER_ITEMS WHERE PRODUCT_ID = ?
+            )
+        """, (product_id,))
+        extras_removed = cur.rowcount
+        
+        # 6. Remover itens de pedido relacionados (ORDER_ITEMS)
+        cur.execute("DELETE FROM ORDER_ITEMS WHERE PRODUCT_ID = ?", (product_id,))
+        order_items_removed = cur.rowcount
+        
+        # 7. Remover itens do carrinho relacionados (CART_ITEMS)
+        cur.execute("DELETE FROM CART_ITEMS WHERE PRODUCT_ID = ?", (product_id,))
+        cart_items_removed = cur.rowcount
+        
+        # 8. Remover extras do carrinho relacionados (CART_ITEM_EXTRAS) - se existir
+        cur.execute("""
+            DELETE FROM CART_ITEM_EXTRAS 
+            WHERE CART_ITEM_ID IN (
+                SELECT ID FROM CART_ITEMS WHERE PRODUCT_ID = ?
+            )
+        """, (product_id,))
+        cart_extras_removed = cur.rowcount
+        
+        # 9. Finalmente, excluir o produto
+        cur.execute("DELETE FROM PRODUCTS WHERE ID = ?", (product_id,))
+        product_removed = cur.rowcount
+        
+        if product_removed == 0:
+            return (False, "DELETE_FAILED", "Falha ao excluir o produto")
+        
+        conn.commit()
+        
+        # 10. Remover imagem do produto se existir
+        try:
+            from ..utils.image_handler import delete_product_image
+            delete_product_image(product_id)
+        except Exception as e:
+            print(f"Aviso: Erro ao remover imagem do produto {product_id}: {e}")
+        
+        return (True, None, {
+            "message": f"Produto '{product_name}' excluído permanentemente",
+            "details": {
+                "ingredients_removed": ingredients_removed,
+                "order_items_removed": order_items_removed,
+                "cart_items_removed": cart_items_removed,
+                "extras_removed": extras_removed,
+                "cart_extras_removed": cart_extras_removed
+            }
+        })
+        
+    except fdb.Error as e:
+        print(f"Erro ao excluir produto: {e}")
+        if conn: 
+            conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    except Exception as e:
+        print(f"Erro geral ao excluir produto: {e}")
+        if conn: 
+            conn.rollback()
+        return (False, "GENERAL_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: 
+            conn.close()  

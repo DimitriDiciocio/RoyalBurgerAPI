@@ -10,6 +10,10 @@ def create_ingredient(data):
     max_stock = data.get('max_stock', 0.0)  
     supplier = (data.get('supplier') or '').strip()  
     category = (data.get('category') or '').strip()  
+    # Campos para porção base
+    base_portion_quantity = data.get('base_portion_quantity', 1.0)
+    base_portion_unit = (data.get('base_portion_unit') or 'un').strip()
+    
     if not name:  
         return (None, "INVALID_NAME", "Nome do insumo é obrigatório")  
     if not stock_unit:  
@@ -21,7 +25,11 @@ def create_ingredient(data):
     if min_stock_threshold is not None and float(min_stock_threshold) < 0:  
         return (None, "INVALID_MIN_STOCK", "Estoque mínimo não pode ser negativo")  
     if max_stock is not None and float(max_stock) < 0:  
-        return (None, "INVALID_MAX_STOCK", "Estoque máximo não pode ser negativo")  
+        return (None, "INVALID_MAX_STOCK", "Estoque máximo não pode ser negativo")
+    if base_portion_quantity is None or float(base_portion_quantity) <= 0:  
+        return (None, "INVALID_BASE_PORTION_QUANTITY", "Quantidade da porção base deve ser maior que zero")  
+    if not base_portion_unit:  
+        return (None, "INVALID_BASE_PORTION_UNIT", "Unidade da porção base é obrigatória")  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -31,7 +39,7 @@ def create_ingredient(data):
         existing = cur.fetchone()
         if existing:  
             return (None, "INGREDIENT_NAME_EXISTS", f"Já existe um insumo com o nome '{existing[1]}' (ID: {existing[0]})")  
-        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY;"  
+        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT;"  
         cur.execute(sql, (  
             name,  
             price,  
@@ -40,7 +48,9 @@ def create_ingredient(data):
             min_stock_threshold,  
             max_stock,  
             supplier,  
-            category  
+            category,
+            base_portion_quantity,
+            base_portion_unit
         ))  
         row = cur.fetchone()  
         conn.commit()  
@@ -52,7 +62,9 @@ def create_ingredient(data):
             "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0,  
             "max_stock": float(row[7]) if row[7] is not None else 0.0,  
             "supplier": row[8] if row[8] else "",  
-            "category": row[9] if row[9] else ""  
+            "category": row[9] if row[9] else "",
+            "base_portion_quantity": float(row[10]) if row[10] is not None else 1.0,
+            "base_portion_unit": row[11] if row[11] else "un"
         }, None, None)
     except fdb.Error as e:  
         print(f"Erro ao criar ingrediente: {e}")  
@@ -97,7 +109,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY "  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT "  
             f"FROM INGREDIENTS{where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
@@ -111,7 +123,9 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
             "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0,  
             "max_stock": float(row[7]) if row[7] is not None else 0.0,  
             "supplier": row[8] if row[8] else "",  
-            "category": row[9] if row[9] else ""  
+            "category": row[9] if row[9] else "",
+            "base_portion_quantity": float(row[10]) if row[10] is not None else 1.0,
+            "base_portion_unit": row[11] if row[11] else "un"
         } for row in cur.fetchall()]  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -138,7 +152,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         if conn: conn.close()  
 
 def update_ingredient(ingredient_id, data):  
-    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category', 'is_available']
+    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category', 'is_available', 'base_portion_quantity', 'base_portion_unit']
     fields_to_update = {k: v for k, v in data.items() if k in allowed_fields}  
     if not fields_to_update:  
         return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
@@ -157,7 +171,13 @@ def update_ingredient(ingredient_id, data):
     if 'min_stock_threshold' in fields_to_update and float(fields_to_update['min_stock_threshold']) < 0:  
         return (False, "INVALID_MIN_STOCK", "Estoque mínimo não pode ser negativo")  
     if 'max_stock' in fields_to_update and float(fields_to_update['max_stock']) < 0:  
-        return (False, "INVALID_MAX_STOCK", "Estoque máximo não pode ser negativo")  
+        return (False, "INVALID_MAX_STOCK", "Estoque máximo não pode ser negativo")
+    if 'base_portion_quantity' in fields_to_update and float(fields_to_update['base_portion_quantity']) <= 0:  
+        return (False, "INVALID_BASE_PORTION_QUANTITY", "Quantidade da porção base deve ser maior que zero")
+    if 'base_portion_unit' in fields_to_update:  
+        unit = (fields_to_update['base_portion_unit'] or '').strip()  
+        if not unit:  
+            return (False, "INVALID_BASE_PORTION_UNIT", "Unidade da porção base é obrigatória")  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -242,15 +262,11 @@ def delete_ingredient(ingredient_id):
         if conn: conn.close()  
 
 
-def add_ingredient_to_product(product_id, ingredient_id, quantity, unit=None):  
+def add_ingredient_to_product(product_id, ingredient_id, portions):  
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        
-        # Usar unidade padrão se não fornecida
-        if unit is None:
-            unit = 'un'
         
         # Verificar se a vinculação já existe
         cur.execute("SELECT 1 FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?", (product_id, ingredient_id))
@@ -258,12 +274,12 @@ def add_ingredient_to_product(product_id, ingredient_id, quantity, unit=None):
         
         if existing:
             # Atualizar vinculação existente
-            sql = "UPDATE PRODUCT_INGREDIENTS SET QUANTITY = ?, UNIT = ? WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?"
-            cur.execute(sql, (quantity, unit, product_id, ingredient_id))
+            sql = "UPDATE PRODUCT_INGREDIENTS SET PORTIONS = ? WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?"
+            cur.execute(sql, (portions, product_id, ingredient_id))
         else:
             # Inserir nova vinculação
-            sql = "INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, QUANTITY, UNIT) VALUES (?, ?, ?, ?)"
-            cur.execute(sql, (product_id, ingredient_id, quantity, unit))
+            sql = "INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS) VALUES (?, ?, ?)"
+            cur.execute(sql, (product_id, ingredient_id, portions))
         
         conn.commit()  
         return True  
@@ -275,9 +291,9 @@ def add_ingredient_to_product(product_id, ingredient_id, quantity, unit=None):
         if conn: conn.close()  
 
 
-def update_product_ingredient(product_id, ingredient_id, quantity=None, unit=None):
-    if quantity is None and unit is None:
-        return (False, "NO_VALID_FIELDS", "Forneça 'quantity' e/ou 'unit' para atualizar")
+def update_product_ingredient(product_id, ingredient_id, portions=None):
+    if portions is None:
+        return (False, "NO_VALID_FIELDS", "Forneça 'portions' para atualizar")
     conn = None
     try:
         conn = get_db_connection()
@@ -286,17 +302,9 @@ def update_product_ingredient(product_id, ingredient_id, quantity=None, unit=Non
         cur.execute("SELECT 1 FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?", (product_id, ingredient_id))
         if not cur.fetchone():
             return (False, "LINK_NOT_FOUND", "Vínculo produto-insumo não encontrado")
-        set_parts = []
-        params = []
-        if quantity is not None:
-            set_parts.append("QUANTITY = ?")
-            params.append(quantity)
-        if unit is not None:
-            set_parts.append("UNIT = ?")
-            params.append(unit)
-        params.extend([product_id, ingredient_id])
-        sql = f"UPDATE PRODUCT_INGREDIENTS SET {', '.join(set_parts)} WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?;"
-        cur.execute(sql, tuple(params))
+        
+        sql = "UPDATE PRODUCT_INGREDIENTS SET PORTIONS = ? WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?;"
+        cur.execute(sql, (portions, product_id, ingredient_id))
         conn.commit()
         return (cur.rowcount > 0, None, "Vínculo atualizado com sucesso")
     except fdb.Error as e:
@@ -328,7 +336,8 @@ def get_ingredients_for_product(product_id):
         conn = get_db_connection()  
         cur = conn.cursor()  
         sql = """
-            SELECT i.ID, i.NAME, pi.QUANTITY, COALESCE(pi.UNIT, i.STOCK_UNIT) AS UNIT, i.PRICE, i.IS_AVAILABLE
+            SELECT i.ID, i.NAME, pi.PORTIONS, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT, 
+                   i.PRICE, i.IS_AVAILABLE, i.STOCK_UNIT
             FROM PRODUCT_INGREDIENTS pi
             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
             WHERE pi.PRODUCT_ID = ?;
@@ -339,20 +348,35 @@ def get_ingredients_for_product(product_id):
         for row in cur.fetchall():
             ingredient_id = row[0]
             name = row[1]
-            quantity = float(row[2]) if row[2] is not None else 0.0
-            unit = row[3]
-            price = float(row[4]) if row[4] is not None else 0.0
-            is_available = row[5]
+            portions = float(row[2]) if row[2] is not None else 0.0
+            base_portion_quantity = float(row[3]) if row[3] is not None else 1.0
+            base_portion_unit = row[4] if row[4] else "un"
+            price = float(row[5]) if row[5] is not None else 0.0
+            is_available = row[6]
+            stock_unit = row[7] if row[7] else "un"
+            
+            # Calcular quantidade real consumida baseada na porção
+            actual_quantity = portions * base_portion_quantity
+            # Calcular custo por porção (preço por unidade base * quantidade da porção base)
+            portion_cost = price * base_portion_quantity
+            # Calcular custo total da linha (custo por porção * número de porções)
+            line_cost = portion_cost * portions
+            
             items.append({
                 "ingredient_id": ingredient_id,
                 "name": name,
-                "quantity": quantity,
-                "unit": unit,
+                "portions": portions,
+                "base_portion_quantity": base_portion_quantity,
+                "base_portion_unit": base_portion_unit,
+                "actual_quantity": round(actual_quantity, 3),
+                "actual_unit": base_portion_unit,
+                "stock_unit": stock_unit,
                 "price": price,
+                "portion_cost": round(portion_cost, 2),
                 "is_available": is_available,
-                "line_cost": round(quantity * price, 2)
+                "line_cost": round(line_cost, 2)
             })
-            estimated_cost += quantity * price
+            estimated_cost += line_cost
         return {"items": items, "estimated_cost": round(estimated_cost, 2)}  
     except fdb.Error as e:  
         print(f"Erro ao buscar ingredientes do produto: {e}")  
@@ -517,4 +541,128 @@ def generate_purchase_order():
         print(f"Erro ao gerar pedido de compra: {e}")  
         return {"items": [], "total_items": 0, "total_estimated_cost": 0.0}  
     finally:  
+        if conn: conn.close()
+
+
+def consume_ingredients_for_product(product_id, quantity=1):
+    """
+    Consome ingredientes do estoque baseado na ficha técnica do produto
+    quantity: quantidade de unidades do produto a ser produzida
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Buscar ingredientes do produto com suas porções
+        sql = """
+            SELECT i.ID, i.NAME, pi.PORTIONS, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT, 
+                   i.CURRENT_STOCK, i.STOCK_UNIT
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ? AND i.IS_AVAILABLE = TRUE;
+        """
+        cur.execute(sql, (product_id,))
+        ingredients = cur.fetchall()
+        
+        if not ingredients:
+            return (False, "NO_INGREDIENTS", "Produto não possui ingredientes cadastrados")
+        
+        # Verificar se há estoque suficiente para todos os ingredientes
+        consumption_plan = []
+        for row in ingredients:
+            ingredient_id = row[0]
+            name = row[1]
+            portions = float(row[2])
+            base_portion_quantity = float(row[3])
+            base_portion_unit = row[4]
+            current_stock = float(row[5]) if row[5] is not None else 0.0
+            stock_unit = row[6]
+            
+            # Calcular consumo total (porções * quantidade da porção base * quantidade do produto)
+            total_consumption = portions * base_portion_quantity * quantity
+            
+            if current_stock < total_consumption:
+                return (False, "INSUFFICIENT_STOCK", 
+                       f"Estoque insuficiente para {name}. Necessário: {total_consumption:.3f} {base_portion_unit}, "
+                       f"disponível: {current_stock:.3f} {stock_unit}")
+            
+            consumption_plan.append({
+                "ingredient_id": ingredient_id,
+                "name": name,
+                "consumption": total_consumption,
+                "new_stock": current_stock - total_consumption
+            })
+        
+        # Executar baixa de estoque para todos os ingredientes
+        for item in consumption_plan:
+            cur.execute(
+                "UPDATE INGREDIENTS SET CURRENT_STOCK = ? WHERE ID = ?",
+                (item["new_stock"], item["ingredient_id"])
+            )
+        
+        conn.commit()
+        return (True, None, f"Estoque consumido com sucesso para {quantity} unidade(s) do produto")
+        
+    except fdb.Error as e:
+        print(f"Erro ao consumir ingredientes: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+
+def calculate_product_cost_by_portions(product_id):
+    """
+    Calcula o custo do produto baseado nas porções dos ingredientes
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        sql = """
+            SELECT i.ID, i.NAME, pi.PORTIONS, i.BASE_PORTION_QUANTITY, i.PRICE
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ? AND i.IS_AVAILABLE = TRUE;
+        """
+        cur.execute(sql, (product_id,))
+        ingredients = cur.fetchall()
+        
+        total_cost = 0.0
+        cost_breakdown = []
+        
+        for row in ingredients:
+            ingredient_id = row[0]
+            name = row[1]
+            portions = float(row[2])
+            base_portion_quantity = float(row[3])
+            price = float(row[4]) if row[4] is not None else 0.0
+            
+            # Custo por porção = preço por unidade base * quantidade da porção base
+            portion_cost = price * base_portion_quantity
+            # Custo total do ingrediente = custo por porção * número de porções
+            ingredient_cost = portion_cost * portions
+            
+            cost_breakdown.append({
+                "ingredient_id": ingredient_id,
+                "name": name,
+                "portions": portions,
+                "base_portion_quantity": base_portion_quantity,
+                "portion_cost": round(portion_cost, 2),
+                "ingredient_cost": round(ingredient_cost, 2)
+            })
+            
+            total_cost += ingredient_cost
+        
+        return {
+            "total_cost": round(total_cost, 2),
+            "cost_breakdown": cost_breakdown
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao calcular custo do produto: {e}")
+        return {"total_cost": 0.0, "cost_breakdown": []}
+    finally:
         if conn: conn.close()  

@@ -26,7 +26,7 @@ def create_ingredient_route():
     ingredient, error_code, message = ingredient_service.create_ingredient(data)  
     if ingredient:  
         return jsonify(ingredient), 201  
-    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK", "INVALID_MAX_STOCK"]:  
+    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK", "INVALID_MAX_STOCK", "INVALID_BASE_PORTION_QUANTITY", "INVALID_BASE_PORTION_UNIT"]:  
         return jsonify({"error": message}), 400  
     if error_code == "INGREDIENT_NAME_EXISTS":  
         return jsonify({"error": message}), 409  
@@ -48,7 +48,7 @@ def update_ingredient_route(ingredient_id):
         return jsonify({"msg": message}), 200  
     if error_code == "NO_VALID_FIELDS":  
         return jsonify({"error": message}), 400  
-    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK", "INVALID_MAX_STOCK"]:  
+    if error_code in ["INVALID_NAME", "INVALID_UNIT", "INVALID_COST", "INVALID_STOCK", "INVALID_MIN_STOCK", "INVALID_MAX_STOCK", "INVALID_BASE_PORTION_QUANTITY", "INVALID_BASE_PORTION_UNIT"]:  
         return jsonify({"error": message}), 400  
     if error_code == "INGREDIENT_NOT_FOUND":  
         return jsonify({"error": message}), 404  

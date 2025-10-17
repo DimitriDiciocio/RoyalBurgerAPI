@@ -231,12 +231,13 @@ def add_ingredient_to_product_route(product_id):
     except Exception as e:
         return jsonify({"error": "Erro ao processar JSON"}), 400
     ingredient_id = data.get('ingredient_id')  
-    quantity = data.get('quantity')  
-    unit = data.get('unit')  
-    if not ingredient_id or quantity is None:  
-        return jsonify({"error": "'ingredient_id' e 'quantity' são obrigatórios"}), 400  
+    portions = data.get('portions')  
+    if not ingredient_id or portions is None:  
+        return jsonify({"error": "'ingredient_id' e 'portions' são obrigatórios"}), 400  
+    if portions <= 0:
+        return jsonify({"error": "Número de porções deve ser maior que zero"}), 400
     from ..services import ingredient_service
-    if ingredient_service.add_ingredient_to_product(product_id, ingredient_id, quantity, unit):  
+    if ingredient_service.add_ingredient_to_product(product_id, ingredient_id, portions):  
         return jsonify({"msg": "Ingrediente associado/atualizado com sucesso"}), 201  
     return jsonify({"error": "Falha ao associar ingrediente"}), 500  
 
@@ -258,10 +259,13 @@ def update_product_ingredient_route(product_id, ingredient_id):
             return jsonify({"error": "JSON inválido ou vazio"}), 400
     except Exception as e:
         return jsonify({"error": "Erro ao processar JSON"}), 400
-    quantity = data.get('quantity')
-    unit = data.get('unit')
+    portions = data.get('portions')
+    if portions is None:
+        return jsonify({"error": "Campo 'portions' é obrigatório"}), 400
+    if portions <= 0:
+        return jsonify({"error": "Número de porções deve ser maior que zero"}), 400
     from ..services import ingredient_service
-    success, error_code, message = ingredient_service.update_product_ingredient(product_id, ingredient_id, quantity=quantity, unit=unit)
+    success, error_code, message = ingredient_service.update_product_ingredient(product_id, ingredient_id, portions=portions)
     if success:
         return jsonify({"msg": message}), 200
     if error_code == "NO_VALID_FIELDS":
@@ -411,4 +415,150 @@ def get_product_image_route(product_id):
         
     except Exception as e:
         print(f"Erro ao servir imagem: {e}")
-        return jsonify({"error": "Erro interno ao carregar imagem"}), 500  
+        return jsonify({"error": "Erro interno ao carregar imagem"}), 500
+
+
+@product_bp.route('/<int:product_id>/cost-calculation', methods=['GET'])
+@require_role('admin', 'manager')
+def get_product_cost_calculation_route(product_id):
+    """
+    Calcula o custo do produto baseado nas porções dos ingredientes
+    """
+    try:
+        result = product_service.calculate_product_cost_by_ingredients(product_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": f"Erro ao calcular custo: {str(e)}"}), 500
+
+
+@product_bp.route('/<int:product_id>/consume-ingredients', methods=['POST'])
+@require_role('admin', 'manager')
+def consume_ingredients_route(product_id):
+    """
+    Consome ingredientes do estoque para produção/venda do produto
+    """
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception as e:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
+    
+    quantity = data.get('quantity', 1)
+    if quantity <= 0:
+        return jsonify({"error": "Quantidade deve ser maior que zero"}), 400
+    
+    success, error_code, message = product_service.consume_ingredients_for_sale(product_id, quantity)
+    
+    if success:
+        return jsonify({"msg": message}), 200
+    elif error_code == "NO_INGREDIENTS":
+        return jsonify({"error": message}), 400
+    elif error_code == "INSUFFICIENT_STOCK":
+        return jsonify({"error": message}), 409
+    elif error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    else:
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@product_bp.route('/<int:product_id>/can-delete', methods=['GET'])
+@require_role('admin', 'manager')
+def can_delete_product_route(product_id):
+    """
+    Verifica se um produto pode ser excluído permanentemente
+    """
+    try:
+        conn = None
+        try:
+            from ..database import get_db_connection
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Verificar se o produto existe
+            cur.execute("SELECT ID, NAME FROM PRODUCTS WHERE ID = ?", (product_id,))
+            product = cur.fetchone()
+            if not product:
+                return jsonify({"error": "Produto não encontrado"}), 404
+            
+            product_name = product[1]
+            
+            # Verificar pedidos ativos
+            cur.execute("""
+                SELECT COUNT(*) FROM ORDER_ITEMS oi
+                JOIN ORDERS o ON oi.ORDER_ID = o.ID
+                WHERE oi.PRODUCT_ID = ? AND o.STATUS NOT IN ('cancelled', 'delivered')
+            """, (product_id,))
+            active_orders = cur.fetchone()[0] or 0
+            
+            # Verificar itens no carrinho
+            cur.execute("""
+                SELECT COUNT(*) FROM CART_ITEMS ci
+                JOIN CARTS c ON ci.CART_ID = c.ID
+                WHERE ci.PRODUCT_ID = ? AND c.IS_ACTIVE = TRUE
+            """, (product_id,))
+            cart_items = cur.fetchone()[0] or 0
+            
+            # Verificar ingredientes relacionados
+            cur.execute("SELECT COUNT(*) FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?", (product_id,))
+            ingredients_count = cur.fetchone()[0] or 0
+            
+            can_delete = active_orders == 0 and cart_items == 0
+            reasons = []
+            
+            if active_orders > 0:
+                reasons.append(f"Produto possui {active_orders} pedido(s) ativo(s)")
+            if cart_items > 0:
+                reasons.append(f"Produto está em {cart_items} carrinho(s) ativo(s)")
+            
+            return jsonify({
+                "product_id": product_id,
+                "product_name": product_name,
+                "can_delete": can_delete,
+                "reasons": reasons,
+                "details": {
+                    "active_orders": active_orders,
+                    "cart_items": cart_items,
+                    "ingredients_count": ingredients_count
+                }
+            }), 200
+            
+        except Exception as e:
+            return jsonify({"error": f"Erro ao verificar: {str(e)}"}), 500
+        finally:
+            if conn:
+                conn.close()
+                
+    except Exception as e:
+        return jsonify({"error": f"Erro interno: {str(e)}"}), 500
+
+
+@product_bp.route('/<int:product_id>/permanent-delete', methods=['DELETE'])
+@require_role('admin')  # Apenas admin pode excluir permanentemente
+def permanent_delete_product_route(product_id):
+    """
+    Exclui permanentemente um produto e todos os seus relacionamentos
+    ATENÇÃO: Esta operação é irreversível!
+    """
+    try:
+        success, error_code, message = product_service.delete_product(product_id)
+        
+        if success:
+            return jsonify(message), 200
+        elif error_code == "PRODUCT_NOT_FOUND":
+            return jsonify({"error": message}), 404
+        elif error_code == "PRODUCT_IN_ACTIVE_ORDERS":
+            return jsonify({"error": message}), 409
+        elif error_code == "PRODUCT_IN_CART":
+            return jsonify({"error": message}), 409
+        elif error_code == "DELETE_FAILED":
+            return jsonify({"error": message}), 500
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": message}), 500
+        elif error_code == "GENERAL_ERROR":
+            return jsonify({"error": message}), 500
+        else:
+            return jsonify({"error": "Erro interno do servidor"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Erro interno: {str(e)}"}), 500  
