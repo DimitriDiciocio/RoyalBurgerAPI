@@ -502,3 +502,75 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         return (None, "UNKNOWN_ERROR", "Erro inesperado")
     finally:
         if conn: conn.close()
+
+
+def get_orders_with_filters(filters=None):
+    """
+    Busca pedidos com filtros para relatórios
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Query base
+        base_sql = """
+            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.TOTAL_AMOUNT,
+                   u.FULL_NAME as customer_name, a.STREET, a."NUMBER"
+            FROM ORDERS o
+            JOIN USERS u ON o.USER_ID = u.ID
+            LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
+            WHERE 1=1
+        """
+        
+        # Filtros
+        conditions = []
+        params = []
+        
+        if filters:
+            if filters.get('start_date'):
+                conditions.append("DATE(o.CREATED_AT) >= ?")
+                params.append(filters['start_date'])
+            
+            if filters.get('end_date'):
+                conditions.append("DATE(o.CREATED_AT) <= ?")
+                params.append(filters['end_date'])
+            
+            if filters.get('status'):
+                conditions.append("o.STATUS = ?")
+                params.append(filters['status'])
+        
+        if conditions:
+            base_sql += " AND " + " AND ".join(conditions)
+        
+        # Ordenação
+        sort_by = filters.get('sort_by', 'date_desc') if filters else 'date_desc'
+        if sort_by == 'date_desc':
+            base_sql += " ORDER BY o.CREATED_AT DESC"
+        elif sort_by == 'date_asc':
+            base_sql += " ORDER BY o.CREATED_AT ASC"
+        else:
+            base_sql += " ORDER BY o.CREATED_AT DESC"
+        
+        cur.execute(base_sql, params)
+        orders = []
+        
+        for row in cur.fetchall():
+            orders.append({
+                "id": row[0],
+                "status": row[1],
+                "confirmation_code": row[2],
+                "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+                "total_amount": float(row[4]) if row[4] else 0.0,
+                "customer_name": row[5],
+                "address": f"{row[6]}, {row[7]}" if row[6] and row[7] else "N/A",
+                "order_type": "Delivery"  # Por enquanto sempre delivery
+            })
+        
+        return orders
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar pedidos com filtros: {e}")
+        return []
+    finally:
+        if conn: conn.close()

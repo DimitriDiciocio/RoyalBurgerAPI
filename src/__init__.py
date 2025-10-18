@@ -79,6 +79,8 @@ def create_app():
     app.register_blueprint(menu_bp, url_prefix='/api/menu')  
     from .routes.reports_routes import reports_bp  
     app.register_blueprint(reports_bp, url_prefix='/api/reports')  
+    from .routes.pdf_report_routes import pdf_reports_bp  
+    app.register_blueprint(pdf_reports_bp, url_prefix='/api/pdf_reports')  
     from .routes.financial_routes import financial_bp  
     app.register_blueprint(financial_bp, url_prefix='/api/financials')  
     from .routes.settings_routes import settings_bp  

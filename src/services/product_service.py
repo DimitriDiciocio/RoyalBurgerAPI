@@ -66,8 +66,8 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE "  
-            f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
+            f"SELECT FIRST {page_size} SKIP {offset} p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID, p.IMAGE_URL, p.IS_ACTIVE, c.NAME as CATEGORY_NAME "  
+            f"FROM PRODUCTS p LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID WHERE {where_sql} ORDER BY p.NAME;",  
             tuple(params)  
         )  
         items = []  
@@ -81,7 +81,8 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 "cost_price": str(row[4]) if row[4] else "0.00",  
                 "preparation_time_minutes": row[5] if row[5] else 0,  
                 "category_id": row[6],
-                "is_active": row[8] if len(row) > 8 else True
+                "is_active": row[8] if len(row) > 8 else True,
+                "category_name": row[9] if len(row) > 9 and row[9] else "Sem categoria"
             }
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
@@ -312,8 +313,8 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         
         # Busca os produtos paginados
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE "  
-            f"FROM PRODUCTS WHERE {where_sql} ORDER BY NAME;",  
+            f"SELECT FIRST {page_size} SKIP {offset} p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID, p.IMAGE_URL, p.IS_ACTIVE, c.NAME as CATEGORY_NAME "  
+            f"FROM PRODUCTS p LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID WHERE {where_sql} ORDER BY p.NAME;",  
             tuple(params)  
         )  
         
@@ -328,7 +329,8 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                 "cost_price": str(row[4]) if row[4] else "0.00",  
                 "preparation_time_minutes": row[5] if row[5] else 0,  
                 "category_id": row[6],
-                "is_active": row[8] if len(row) > 8 else True
+                "is_active": row[8] if len(row) > 8 else True,
+                "category_name": row[9] if len(row) > 9 and row[9] else "Sem categoria"
             }
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL

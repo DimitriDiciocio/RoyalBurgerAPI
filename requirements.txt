@@ -12,3 +12,4 @@ PyYAML
 requests
 python-dateutil
 Pillow
+fpdf2

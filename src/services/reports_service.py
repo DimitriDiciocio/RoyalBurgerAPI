@@ -1,6 +1,7 @@
 import fdb
 from datetime import datetime, date, timedelta
 from ..database import get_db_connection
+from .pdf_report_service import generate_pdf_report
 
 def get_reports(report_type, period):
     conn = None
@@ -176,7 +177,7 @@ def _get_employees_report(cur, start_date, end_date):
             "total_revenue": float(row[4]) if row[4] else 0.0,
             "avg_prep_time": round(float(row[5]), 1) if row[5] else 0.0
         })
-    return {  
+        return {  
         "type": "employees",
         "period": {
             "start_date": start_date.isoformat(),
@@ -184,3 +185,123 @@ def _get_employees_report(cur, start_date, end_date):
         },
         "employees_performance": employees_performance
     }
+
+
+def generate_users_pdf_report(filters=None):
+    """
+    Gera relatório de usuários em PDF
+    """
+    from .user_service import get_users_paginated
+    
+    # Busca todos os usuários (sem paginação para o relatório)
+    result = get_users_paginated(page=1, per_page=10000, filters=filters)
+    users = result.get('users', [])
+    
+    # Calcula resumo
+    summary = {
+        "Total de Usuários": len(users),
+        "Usuários Ativos": len([u for u in users if u.get('is_active', True)]),
+        "Usuários Inativos": len([u for u in users if not u.get('is_active', True)]),
+        "Por Cargo": {}
+    }
+    
+    # Conta por cargo
+    for user in users:
+        role = user.get('role', 'N/A')
+        summary["Por Cargo"][role] = summary["Por Cargo"].get(role, 0) + 1
+    
+    # Gera PDF
+    return generate_pdf_report('users', users, filters, summary)
+
+
+def generate_ingredients_pdf_report(filters=None):
+    """
+    Gera relatório de ingredientes em PDF
+    """
+    from .ingredient_service import list_ingredients, get_stock_summary
+    
+    # Busca todos os ingredientes
+    result = list_ingredients(
+        name_filter=filters.get('name') if filters else None,
+        status_filter=filters.get('stock_status') if filters else None,
+        page=1,
+        page_size=10000
+    )
+    ingredients = result.get('items', [])
+    
+    # Busca resumo do estoque
+    stock_summary = get_stock_summary()
+    
+    # Calcula resumo
+    summary = {
+        "Total de Ingredientes": len(ingredients),
+        "Valor Total do Estoque": f"R$ {stock_summary.get('total_stock_value', 0):.2f}",
+        "Esgotados": stock_summary.get('out_of_stock_count', 0),
+        "Estoque Baixo": stock_summary.get('low_stock_count', 0),
+        "Em Estoque": stock_summary.get('in_stock_count', 0)
+    }
+    
+    # Gera PDF
+    return generate_pdf_report('ingredients', ingredients, filters, summary)
+
+
+def generate_products_pdf_report(filters=None):
+    """
+    Gera relatório de produtos em PDF
+    """
+    from .product_service import list_products, get_menu_summary
+    
+    # Busca todos os produtos
+    result = list_products(
+        name_filter=filters.get('name') if filters else None,
+        category_id=filters.get('section_id') if filters else None,
+        page=1,
+        page_size=10000,
+        include_inactive=filters.get('include_inactive', False) if filters else False
+    )
+    products = result.get('items', [])
+    
+    # Busca resumo do cardápio
+    menu_summary = get_menu_summary()
+    
+    # Calcula resumo
+    summary = {
+        "Total de Produtos": len(products),
+        "Produtos Ativos": len([p for p in products if p.get('is_active', True)]),
+        "Produtos Inativos": len([p for p in products if not p.get('is_active', True)]),
+        "Preço Médio": f"R$ {menu_summary.get('average_price', 0):.2f}",
+        "Margem Média": f"R$ {menu_summary.get('average_margin', 0):.2f}"
+    }
+    
+    # Gera PDF
+    return generate_pdf_report('products', products, filters, summary)
+
+
+def generate_orders_pdf_report(filters=None):
+    """
+    Gera relatório de pedidos em PDF
+    """
+    from .order_service import get_orders_with_filters
+    
+    # Busca pedidos com filtros
+    orders = get_orders_with_filters(filters or {})
+    
+    # Calcula resumo
+    total_orders = len(orders)
+    total_revenue = sum(float(order.get('total_amount', 0)) for order in orders)
+    
+    # Conta por status
+    status_count = {}
+    for order in orders:
+        status = order.get('status', 'N/A')
+        status_count[status] = status_count.get(status, 0) + 1
+    
+    summary = {
+        "Período Analisado": f"{filters.get('start_date', 'N/A')} a {filters.get('end_date', 'N/A')}" if filters else "Todos os períodos",
+        "Total de Pedidos": total_orders,
+        "Valor Total Faturado": f"R$ {total_revenue:.2f}",
+        "Por Status": status_count
+    }
+    
+    # Gera PDF
+    return generate_pdf_report('orders', orders, filters, summary)

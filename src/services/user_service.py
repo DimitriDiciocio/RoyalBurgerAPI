@@ -746,6 +746,14 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
             if filters.get('status') is not None:
                 conditions.append("IS_ACTIVE = ?")
                 params.append(bool(filters['status']))
+            
+            if filters.get('created_after'):
+                conditions.append("DATE(CREATED_AT) >= ?")
+                params.append(filters['created_after'])
+            
+            if filters.get('created_before'):
+                conditions.append("DATE(CREATED_AT) <= ?")
+                params.append(filters['created_before'])
         
         if conditions:
             base_sql += " AND " + " AND ".join(conditions)
