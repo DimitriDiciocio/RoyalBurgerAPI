@@ -200,12 +200,10 @@ def update_product_route(product_id):
 
 @product_bp.route('/<int:product_id>', methods=['DELETE'])  
 @require_role('admin', 'manager')  
-def delete_product_route(product_id):  
-    if product_service.deactivate_product(product_id):  
-        # Remove a imagem do produto se existir
-        delete_product_image(product_id)
-        return jsonify({"msg": "Produto inativado com sucesso"}), 200  
-    return jsonify({"error": "Falha ao inativar produto ou produto não encontrado"}), 404  
+def delete_product_route(product_id):
+    if product_service.deactivate_product(product_id):
+        # Não apague a imagem no soft delete
+        return jsonify({"msg": "Produto inativado com sucesso"}), 200
 
 @product_bp.route('/<int:product_id>/reactivate', methods=['POST'])  
 @require_role('admin', 'manager')  
