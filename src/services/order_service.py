@@ -5,8 +5,11 @@ import random
 import string
 
 from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service
+from .printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket
+from ..config import Config
 from ..database import get_db_connection
 from ..utils import validators
+from datetime import datetime
 
 
 def _generate_confirmation_code(length=8):
@@ -93,7 +96,7 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
         extra_prices = {}
         if extra_ingredient_ids:
             placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
-            sql_extra_prices = f"SELECT ID, PRICE FROM INGREDIENTS WHERE ID IN ({placeholders});"
+            sql_extra_prices = f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) AS EXTRA_PRICE FROM INGREDIENTS WHERE ID IN ({placeholders});"
             cur.execute(sql_extra_prices, tuple(extra_ingredient_ids))
             extra_prices = {row[0]: row[1] for row in cur.fetchall()}
             for item in items:
@@ -131,10 +134,28 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                     cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_price))
 
         conn.commit()
-        
 
         new_order_data = {"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}
-        
+
+        # Impressão automática (não bloqueante além do timeout configurado)
+        try:
+            if Config.ENABLE_AUTOPRINT:
+                order_details = {
+                    "id": new_order_id,
+                    "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "order_type": "Delivery",
+                    "notes": notes or "",
+                    "items": [
+                        {
+                            "quantity": it.get('quantity', 1),
+                            "product_name": f"Produto {it.get('product_id')}",
+                            "extras": it.get('extras', [])
+                        } for it in items
+                    ]
+                }
+                _ = print_kitchen_ticket(order_details)
+        except Exception as e:
+            print(f"[WARN] Falha na impressão automática do pedido {new_order_id}: {e}")
 
         return (new_order_data, None, None)
 
@@ -308,7 +329,7 @@ def get_order_details(order_id, user_id, user_role):
 
         
         sql_items = """
-            SELECT oi.QUANTITY, oi.UNIT_PRICE, p.NAME, p.DESCRIPTION
+            SELECT oi.ID, oi.QUANTITY, oi.UNIT_PRICE, p.NAME, p.DESCRIPTION
             FROM ORDER_ITEMS oi
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
             WHERE oi.ORDER_ID = ?;
@@ -317,12 +338,32 @@ def get_order_details(order_id, user_id, user_role):
 
         order_items = []
         for item_row in cur.fetchall():
-            order_items.append({
-                "quantity": item_row[0],
-                "unit_price": item_row[1],
-                "product_name": item_row[2],
-                "product_description": item_row[3]
-            })
+            order_item_id = item_row[0]
+            item_dict = {
+                "quantity": item_row[1],
+                "unit_price": item_row[2],
+                "product_name": item_row[3],
+                "product_description": item_row[4],
+                "extras": []
+            }
+            # Busca extras do item
+            cur2 = conn.cursor()
+            cur2.execute(
+                """
+                SELECT e.INGREDIENT_ID, i.NAME, e.QUANTITY
+                FROM ORDER_ITEM_EXTRAS e
+                JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
+                WHERE e.ORDER_ITEM_ID = ?
+                """,
+                (order_item_id,)
+            )
+            for ex in cur2.fetchall():
+                item_dict["extras"].append({
+                    "ingredient_id": ex[0],
+                    "name": ex[1],
+                    "quantity": ex[2]
+                })
+            order_items.append(item_dict)
 
         
         order_details['items'] = order_items
@@ -483,6 +524,19 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         
         # Busca dados completos do pedido criado
         order_data = get_order_details(order_id, user_id, ['customer'])
+
+        # Impressão automática (não bloqueante além do timeout configurado)
+        try:
+            if Config.ENABLE_AUTOPRINT and order_data:
+                _ = print_kitchen_ticket({
+                    "id": order_id,
+                    "created_at": order_data.get('created_at'),
+                    "order_type": order_data.get('order_type', 'Delivery'),
+                    "notes": order_data.get('notes', ''),
+                    "items": order_data.get('items', [])
+                })
+        except Exception as e:
+            print(f"[WARN] Falha na impressão automática do pedido {order_id}: {e}")
         
         # Envia notificação
         try:

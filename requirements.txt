@@ -13,3 +13,4 @@ requests
 python-dateutil
 Pillow
 fpdf2
+pywin32; platform_system == "Windows"

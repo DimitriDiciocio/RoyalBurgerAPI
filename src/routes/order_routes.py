@@ -1,7 +1,8 @@
-from flask import Blueprint, request, jsonify  
+from flask import Blueprint, request, jsonify, Response, send_file  
 from ..services import order_service, address_service, store_service  
 from ..services.auth_service import require_role  
 from flask_jwt_extended import jwt_required, get_jwt  
+from ..services.printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket
 
 order_bp = Blueprint('orders', __name__)  
 
@@ -120,3 +121,47 @@ def cancel_order_route(order_id):
         return jsonify({"msg": message}), 200  
     else:  
         return jsonify({"error": message}), 403  
+
+
+# --- Rotas de impressão de cozinha ---
+@order_bp.route('/<int:order_id>/print-kitchen-ticket', methods=['POST'])
+@require_role('admin', 'manager')
+def print_kitchen_ticket_route(order_id):
+    claims = get_jwt()
+    user_id = int(claims.get('sub'))
+    # Admin/manager podem visualizar e imprimir qualquer pedido
+    order = order_service.get_order_details(order_id, user_id, claims.get('roles', []))
+    if not order:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    try:
+        result = print_kitchen_ticket({
+            "id": order.get('id') or order_id,
+            "created_at": order.get('created_at'),
+            "order_type": order.get('order_type', 'Delivery'),
+            "notes": order.get('notes', ''),
+            "items": order.get('items', [])
+        })
+        status_code = 200 if result.get('status') == 'printed' else 500
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@order_bp.route('/<int:order_id>/kitchen-ticket.pdf', methods=['GET'])
+@require_role('admin', 'manager')
+def get_kitchen_ticket_pdf_route(order_id):
+    claims = get_jwt()
+    user_id = int(claims.get('sub'))
+    order = order_service.get_order_details(order_id, user_id, claims.get('roles', []))
+    if not order:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    pdf_bytes = generate_kitchen_ticket_pdf({
+        "id": order.get('id') or order_id,
+        "created_at": order.get('created_at'),
+        "order_type": order.get('order_type', 'Delivery'),
+        "notes": order.get('notes', ''),
+        "items": order.get('items', [])
+    })
+    return Response(pdf_bytes, mimetype='application/pdf', headers={
+        'Content-Disposition': f'inline; filename="kitchen-ticket-{order_id}.pdf"'
+    })

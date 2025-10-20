@@ -5,6 +5,7 @@ def create_ingredient(data):
     name = (data.get('name') or '').strip()  
     stock_unit = (data.get('stock_unit') or '').strip()  
     price = data.get('price', 0.0)  
+    additional_price = data.get('additional_price', 0.0)
     current_stock = data.get('current_stock', 0.0)  
     min_stock_threshold = data.get('min_stock_threshold', 0.0)  
     max_stock = data.get('max_stock', 0.0)  
@@ -20,6 +21,8 @@ def create_ingredient(data):
         return (None, "INVALID_UNIT", "Unidade do insumo é obrigatória")  
     if price is None or float(price) < 0:  
         return (None, "INVALID_COST", "Custo (price) deve ser maior ou igual a zero")  
+    if additional_price is None or float(additional_price) < 0:
+        return (None, "INVALID_ADDITIONAL_PRICE", "additional_price deve ser maior ou igual a zero")
     if current_stock is not None and float(current_stock) < 0:  
         return (None, "INVALID_STOCK", "Estoque atual não pode ser negativo")  
     if min_stock_threshold is not None and float(min_stock_threshold) < 0:  
@@ -39,10 +42,11 @@ def create_ingredient(data):
         existing = cur.fetchone()
         if existing:  
             return (None, "INGREDIENT_NAME_EXISTS", f"Já existe um insumo com o nome '{existing[1]}' (ID: {existing[0]})")  
-        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT;"  
+        sql = "INSERT INTO INGREDIENTS (NAME, PRICE, ADDITIONAL_PRICE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID, NAME, PRICE, ADDITIONAL_PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT;"  
         cur.execute(sql, (  
             name,  
-            price,  
+            price,
+            additional_price,
             current_stock,  
             stock_unit,  
             min_stock_threshold,  
@@ -56,15 +60,17 @@ def create_ingredient(data):
         conn.commit()  
         return ({  
             "id": row[0], "name": row[1],  
-            "price": float(row[2]) if row[2] is not None else 0.0, "is_available": row[3],  
-            "current_stock": float(row[4]) if row[4] is not None else 0.0,  
-            "stock_unit": row[5],  
-            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0,  
-            "max_stock": float(row[7]) if row[7] is not None else 0.0,  
-            "supplier": row[8] if row[8] else "",  
-            "category": row[9] if row[9] else "",
-            "base_portion_quantity": float(row[10]) if row[10] is not None else 1.0,
-            "base_portion_unit": row[11] if row[11] else "un"
+            "price": float(row[2]) if row[2] is not None else 0.0,
+            "additional_price": float(row[3]) if row[3] is not None else 0.0,
+            "is_available": row[4],  
+            "current_stock": float(row[5]) if row[5] is not None else 0.0,  
+            "stock_unit": row[6],  
+            "min_stock_threshold": float(row[7]) if row[7] is not None else 0.0,  
+            "max_stock": float(row[8]) if row[8] is not None else 0.0,  
+            "supplier": row[9] if row[9] else "",  
+            "category": row[10] if row[10] else "",
+            "base_portion_quantity": float(row[11]) if row[11] is not None else 1.0,
+            "base_portion_unit": row[12] if row[12] else "un"
         }, None, None)
     except fdb.Error as e:  
         print(f"Erro ao criar ingrediente: {e}")  
@@ -109,23 +115,24 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         total = cur.fetchone()[0] or 0  
         # page  
         cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT "  
+            f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, PRICE, ADDITIONAL_PRICE, IS_AVAILABLE, CURRENT_STOCK, STOCK_UNIT, MIN_STOCK_THRESHOLD, MAX_STOCK, SUPPLIER, CATEGORY, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT "  
             f"FROM INGREDIENTS{where_sql} ORDER BY NAME;",  
             tuple(params)  
         )  
         items = [{  
             "id": row[0],  
             "name": row[1],  
-            "price": float(row[2]) if row[2] is not None else 0.0,  
-            "is_available": row[3],  
-            "current_stock": float(row[4]) if row[4] is not None else 0.0,  
-            "stock_unit": row[5],  
-            "min_stock_threshold": float(row[6]) if row[6] is not None else 0.0,  
-            "max_stock": float(row[7]) if row[7] is not None else 0.0,  
-            "supplier": row[8] if row[8] else "",  
-            "category": row[9] if row[9] else "",
-            "base_portion_quantity": float(row[10]) if row[10] is not None else 1.0,
-            "base_portion_unit": row[11] if row[11] else "un"
+            "price": float(row[2]) if row[2] is not None else 0.0,
+            "additional_price": float(row[3]) if row[3] is not None else 0.0,
+            "is_available": row[4],  
+            "current_stock": float(row[5]) if row[5] is not None else 0.0,  
+            "stock_unit": row[6],  
+            "min_stock_threshold": float(row[7]) if row[7] is not None else 0.0,  
+            "max_stock": float(row[8]) if row[8] is not None else 0.0,  
+            "supplier": row[9] if row[9] else "",  
+            "category": row[10] if row[10] else "",
+            "base_portion_quantity": float(row[11]) if row[11] is not None else 1.0,
+            "base_portion_unit": row[12] if row[12] else "un"
         } for row in cur.fetchall()]  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -152,7 +159,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         if conn: conn.close()  
 
 def update_ingredient(ingredient_id, data):  
-    allowed_fields = ['name', 'price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category', 'is_available', 'base_portion_quantity', 'base_portion_unit']
+    allowed_fields = ['name', 'price', 'additional_price', 'stock_unit', 'current_stock', 'min_stock_threshold', 'max_stock', 'supplier', 'category', 'is_available', 'base_portion_quantity', 'base_portion_unit']
     fields_to_update = {k: v for k, v in data.items() if k in allowed_fields}  
     if not fields_to_update:  
         return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
@@ -166,6 +173,8 @@ def update_ingredient(ingredient_id, data):
             return (False, "INVALID_UNIT", "Unidade do insumo é obrigatória")  
     if 'price' in fields_to_update and float(fields_to_update['price']) < 0:  
         return (False, "INVALID_COST", "Custo (price) deve ser maior ou igual a zero")  
+    if 'additional_price' in fields_to_update and float(fields_to_update['additional_price']) < 0:
+        return (False, "INVALID_ADDITIONAL_PRICE", "additional_price deve ser maior ou igual a zero")
     if 'current_stock' in fields_to_update and float(fields_to_update['current_stock']) < 0:  
         return (False, "INVALID_STOCK", "Estoque atual não pode ser negativo")  
     if 'min_stock_threshold' in fields_to_update and float(fields_to_update['min_stock_threshold']) < 0:  

@@ -476,6 +476,10 @@ components:
           type: number
           format: float
           example: 8.50
+        additional_price:
+          type: number
+          format: float
+          example: 2.00
         is_available:
           type: boolean
           example: true
@@ -502,6 +506,10 @@ components:
           type: number
           format: float
           example: 8.50
+        additional_price:
+          type: number
+          format: float
+          example: 2.00
         current_stock:
           type: number
           format: float
