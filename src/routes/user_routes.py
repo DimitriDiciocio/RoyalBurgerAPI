@@ -12,6 +12,7 @@ def login_route():
     data = request.get_json()
     email = data.get('email')
     password = data.get('password')
+    guest_cart_id = data.get('guest_cart_id')
     # SMS removido: sempre e-mail
     if not email or not password:
         return jsonify({"error": "E-mail e senha são obrigatórios"}), 400
@@ -30,6 +31,29 @@ def login_route():
     if result and isinstance(result, str):  # result é o token
         user = user_service.get_user_by_email(email)
         full_name = user.get('full_name', 'Usuário') if user else 'Usuário'
+
+        # Fusão (V1 + V2-lite): se guest_cart_id fornecido, tenta reivindicar/mesclar
+        if guest_cart_id and user and user.get('id'):
+            from ..services import cart_service
+            try:
+                ok, err, msg = cart_service.claim_guest_cart(guest_cart_id, user['id'])
+                if not ok:
+                    # Não bloqueia o login: apenas anexa aviso
+                    return jsonify({
+                        "access_token": result,
+                        "message": f"Bem-vindo, {full_name}",
+                        "user": user,
+                        "cart_merge_warning": msg or "Não foi possível mesclar o carrinho"
+                    }), 200
+            except Exception as e:
+                print(f"Erro ao reivindicar carrinho convidado no login: {e}")
+                return jsonify({
+                    "access_token": result,
+                    "message": f"Bem-vindo, {full_name}",
+                    "user": user,
+                    "cart_merge_warning": "Erro interno ao mesclar o carrinho"
+                }), 200
+
         return jsonify({"access_token": result, "message": f"Bem-vindo, {full_name}", "user": user}), 200
     
     # Tratamento de erros

@@ -351,6 +351,10 @@ components:
         password:
           type: string
           example: "MinhaSenh@123"
+        guest_cart_id:
+          type: integer
+          nullable: true
+          description: "ID do carrinho de convidado para reivindicação após login"
 
     LoginResponse:
       type: object
@@ -1510,7 +1514,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NewCustomer"
+              allOf:
+                - $ref: "#/components/schemas/NewCustomer"
+                - type: object
+                  properties:
+                    guest_cart_id:
+                      type: integer
+                      nullable: true
+                      description: "ID do carrinho de convidado para reivindicação após registro"
       responses:
         "201":
           description: Cliente cadastrado com sucesso
@@ -2820,6 +2831,174 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /cart/items:
+    post:
+      tags: [Carrinho]
+      summary: Adicionar item (autenticado ou convidado)
+      description: "Smart Add: adiciona item no carrinho do usuário ou no carrinho convidado; cria carrinho se necessário"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id]
+              properties:
+                product_id:
+                  type: integer
+                quantity:
+                  type: integer
+                  default: 1
+                extras:
+                  type: array
+                  items:
+                    type: object
+                    required: [ingredient_id]
+                    properties:
+                      ingredient_id:
+                        type: integer
+                      quantity:
+                        type: integer
+                        default: 1
+                notes:
+                  type: string
+                guest_cart_id:
+                  type: integer
+                  nullable: true
+      responses:
+        "201":
+          description: Item adicionado ao carrinho com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  cart_id:
+                    type: integer
+                    description: "Presente quando um novo carrinho convidado é criado"
+                  cart:
+                    $ref: "#/components/schemas/CartResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Carrinho ou produto não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cart/items/{id}:
+    put:
+      tags: [Carrinho]
+      summary: Atualizar item (autenticado ou convidado)
+      description: "Atualiza quantidade/extras/observações de um item do carrinho"
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                quantity:
+                  type: integer
+                extras:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ingredient_id:
+                        type: integer
+                      quantity:
+                        type: integer
+                notes:
+                  type: string
+                guest_cart_id:
+                  type: integer
+                  nullable: true
+      responses:
+        "200":
+          description: Item atualizado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  cart:
+                    $ref: "#/components/schemas/CartResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Item ou carrinho não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      tags: [Carrinho]
+      summary: Remover item (autenticado ou convidado)
+      description: "Remove um item do carrinho"
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                guest_cart_id:
+                  type: integer
+                  nullable: true
+      responses:
+        "200":
+          description: Item removido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  cart:
+                    $ref: "#/components/schemas/CartResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Item ou carrinho não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /cart/me/items/{cart_item_id}:
     put:
       tags: [Carrinho]

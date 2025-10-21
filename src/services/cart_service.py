@@ -146,6 +146,66 @@ def get_cart_items(cart_id):
         if conn: conn.close()
 
 
+def get_active_cart_by_user_id(user_id):
+    """
+    Retorna o carrinho ativo do usuário (apenas metadados) ou None
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT ID FROM CARTS WHERE USER_ID = ? AND IS_ACTIVE = TRUE;", (user_id,))
+        row = cur.fetchone()
+        if row:
+            return {"id": row[0]}
+        return None
+    except fdb.Error as e:
+        print(f"Erro ao buscar carrinho ativo do usuário: {e}")
+        return None
+    finally:
+        if conn: conn.close()
+
+
+def get_guest_cart_by_id(cart_id):
+    """
+    Retorna o carrinho convidado (USER_ID IS NULL) se existir e estiver ativo
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT ID FROM CARTS WHERE ID = ? AND USER_ID IS NULL AND IS_ACTIVE = TRUE;", (cart_id,))
+        row = cur.fetchone()
+        if row:
+            return {"id": row[0]}
+        return None
+    except fdb.Error as e:
+        print(f"Erro ao buscar carrinho convidado: {e}")
+        return None
+    finally:
+        if conn: conn.close()
+
+
+def create_guest_cart():
+    """
+    Cria um novo carrinho convidado (USER_ID = NULL)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO CARTS (USER_ID, IS_ACTIVE) VALUES (NULL, TRUE) RETURNING ID;")
+        cart_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": cart_id}
+    except fdb.Error as e:
+        print(f"Erro ao criar carrinho convidado: {e}")
+        if conn: conn.rollback()
+        return None
+    finally:
+        if conn: conn.close()
+
+
 def get_cart_summary(user_id):
     """
     Retorna o resumo completo do carrinho do usuário
@@ -303,6 +363,74 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
         if conn: conn.close()
 
 
+def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, notes=None):
+    """
+    Adiciona item ao carrinho identificado por cart_id (convidado)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verifica existência do carrinho convidado ativo
+        cur.execute("SELECT ID FROM CARTS WHERE ID = ? AND USER_ID IS NULL AND IS_ACTIVE = TRUE;", (cart_id,))
+        if not cur.fetchone():
+            return (False, "CART_NOT_FOUND", "Carrinho convidado não encontrado")
+
+        # Verifica se produto existe e está ativo
+        sql = "SELECT ID, NAME, PRICE FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+        cur.execute(sql, (product_id,))
+        product = cur.fetchone()
+        if not product:
+            return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado ou inativo")
+
+        # Verifica e valida extras conforme regras do produto
+        rules = _get_product_rules(cur, product_id)
+        if extras:
+            for extra in extras:
+                ing_id = extra.get("ingredient_id")
+                qty = int(extra.get("quantity", 1))
+                rule = rules.get(ing_id)
+                if not rule:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                if float(rule["portions"]) != 0.0:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                min_q = int(rule["min_quantity"] or 0)
+                max_q = int(rule["max_quantity"] or 0)
+                if qty < min_q or (max_q > 0 and qty > max_q):
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+
+        # Verifica item idêntico
+        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "")
+
+        if existing_item_id:
+            sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
+            cur.execute(sql, (quantity, existing_item_id))
+        else:
+            sql = "INSERT INTO CART_ITEMS (CART_ID, PRODUCT_ID, QUANTITY, NOTES) VALUES (?, ?, ?, ?) RETURNING ID;"
+            cur.execute(sql, (cart_id, product_id, quantity, notes))
+            new_item_id = cur.fetchone()[0]
+
+            if extras:
+                for extra in extras:
+                    ingredient_id = extra.get("ingredient_id")
+                    extra_quantity = extra.get("quantity", 1)
+                    sql_check = "SELECT ID FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;"
+                    cur.execute(sql_check, (ingredient_id,))
+                    if cur.fetchone():
+                        sql_extra = "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);"
+                        cur.execute(sql_extra, (new_item_id, ingredient_id, extra_quantity))
+
+        conn.commit()
+        return (True, None, "Item adicionado ao carrinho com sucesso")
+    except fdb.Error as e:
+        print(f"Erro ao adicionar item ao carrinho por cart_id: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+
 def _get_setting_percent(key, default=0.0):
     """Busca percentuais em APP_SETTINGS (0..100). Retorna float."""
     conn = None
@@ -443,6 +571,76 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         if conn: conn.close()
 
 
+def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, notes=None):
+    """
+    Atualiza um item do carrinho para carrinho convidado (por cart_id)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verifica se o item pertence ao carrinho convidado
+        sql = (
+            "SELECT ci.ID FROM CART_ITEMS ci "
+            "JOIN CARTS c ON ci.CART_ID = c.ID "
+            "WHERE ci.ID = ? AND c.ID = ? AND c.USER_ID IS NULL AND c.IS_ACTIVE = TRUE;"
+        )
+        cur.execute(sql, (cart_item_id, cart_id))
+        if not cur.fetchone():
+            return (False, "ITEM_NOT_FOUND", "Item não encontrado no carrinho informado")
+
+        if quantity is not None:
+            if quantity <= 0:
+                return (False, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
+            cur.execute("UPDATE CART_ITEMS SET QUANTITY = ? WHERE ID = ?;", (quantity, cart_item_id))
+
+        if extras is not None:
+            # Valida conforme regras do produto deste item
+            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+            row = cur.fetchone()
+            if not row:
+                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+            product_id = row[0]
+            rules = _get_product_rules(cur, product_id)
+            for extra in extras:
+                ing_id = extra.get("ingredient_id")
+                qty = int(extra.get("quantity", 1))
+                rule = rules.get(ing_id)
+                if not rule:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                if float(rule["portions"]) != 0.0:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                min_q = int(rule["min_quantity"] or 0)
+                max_q = int(rule["max_quantity"] or 0)
+                if qty < min_q or (max_q > 0 and qty > max_q):
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+
+            # Atualiza notes
+            if notes is not None:
+                cur.execute("UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;", (notes, cart_item_id))
+
+            # Remove extras antigos e adiciona novos
+            cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;", (cart_item_id,))
+            for extra in extras:
+                ingredient_id = extra.get("ingredient_id")
+                extra_quantity = extra.get("quantity", 1)
+                sql_check = "SELECT ID FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;"
+                cur.execute(sql_check, (ingredient_id,))
+                if cur.fetchone():
+                    sql_extra = "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);"
+                    cur.execute(sql_extra, (cart_item_id, ingredient_id, extra_quantity))
+
+        conn.commit()
+        return (True, None, "Item atualizado com sucesso")
+    except fdb.Error as e:
+        print(f"Erro ao atualizar item do carrinho por cart_id: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+
 def _get_product_rules(cur, product_id):
     """Busca regras de ingredientes para um produto e retorna dict por ingredient_id"""
     cur.execute(
@@ -491,6 +689,35 @@ def remove_cart_item(user_id, cart_item_id):
         
     except fdb.Error as e:
         print(f"Erro ao remover item do carrinho: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+
+def remove_cart_item_by_cart(cart_id, cart_item_id):
+    """
+    Remove item do carrinho convidado (por cart_id)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        sql = (
+            "SELECT ci.ID FROM CART_ITEMS ci "
+            "JOIN CARTS c ON ci.CART_ID = c.ID "
+            "WHERE ci.ID = ? AND c.ID = ? AND c.USER_ID IS NULL AND c.IS_ACTIVE = TRUE;"
+        )
+        cur.execute(sql, (cart_item_id, cart_id))
+        if not cur.fetchone():
+            return (False, "ITEM_NOT_FOUND", "Item não encontrado no carrinho informado")
+
+        cur.execute("DELETE FROM CART_ITEMS WHERE ID = ?;", (cart_item_id,))
+        conn.commit()
+        return (True, None, "Item removido do carrinho com sucesso")
+    except fdb.Error as e:
+        print(f"Erro ao remover item do carrinho por cart_id: {e}")
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -559,3 +786,109 @@ def get_cart_for_order(user_id):
         "items": order_items,
         "total_amount": cart_summary["summary"]["subtotal"]
     }
+
+
+def get_cart_summary_by_cart_id(cart_id):
+    """
+    Retorna o resumo do carrinho por cart_id (convidado)
+    """
+    items = get_cart_items(cart_id)
+    if items is None:
+        return None
+
+    # Calcula totais
+    total_items = sum(item["quantity"] for item in items)
+    subtotal = sum(item["item_subtotal"] for item in items)
+
+    fees_percent = _get_setting_percent("CART_FEES_PERCENT", default=0.0)
+    taxes_percent = _get_setting_percent("CART_TAXES_PERCENT", default=0.0)
+    discount_percent = _get_setting_percent("CART_DISCOUNT_PERCENT", default=0.0)
+
+    fees = round(subtotal * (fees_percent / 100.0), 2)
+    taxes = round(subtotal * (taxes_percent / 100.0), 2)
+    discounts = round(subtotal * (discount_percent / 100.0), 2)
+    total = round(subtotal + fees + taxes - discounts, 2)
+
+    return {
+        "cart": {"id": cart_id, "user_id": None},
+        "items": items,
+        "summary": {
+            "total_items": total_items,
+            "subtotal": subtotal,
+            "fees": fees,
+            "taxes": taxes,
+            "discounts": discounts,
+            "total": total,
+            "is_empty": len(items) == 0,
+            "availability_alerts": []
+        }
+    }
+
+
+def claim_guest_cart(guest_cart_id, user_id):
+    """
+    Reivindica um carrinho convidado para um usuário.
+    V1: Se o usuário não possui carrinho ativo, apenas atualiza USER_ID.
+    V2-lite: Se já possui carrinho ativo, mescla itens do convidado e desativa o convidado.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verifica carrinho convidado
+        cur.execute("SELECT ID FROM CARTS WHERE ID = ? AND USER_ID IS NULL AND IS_ACTIVE = TRUE;", (guest_cart_id,))
+        guest_row = cur.fetchone()
+        if not guest_row:
+            return (False, "CART_NOT_FOUND", "Carrinho convidado não encontrado")
+
+        # Verifica se usuário já possui carrinho ativo
+        cur.execute("SELECT ID FROM CARTS WHERE USER_ID = ? AND IS_ACTIVE = TRUE;", (user_id,))
+        user_cart_row = cur.fetchone()
+
+        if not user_cart_row:
+            # Atualiza o carrinho convidado para o usuário
+            cur.execute("UPDATE CARTS SET USER_ID = ? WHERE ID = ? AND USER_ID IS NULL;", (user_id, guest_cart_id))
+            if cur.rowcount == 0:
+                return (False, "CONFLICT", "Carrinho já foi reivindicado")
+            conn.commit()
+            return (True, None, "Carrinho reivindicado com sucesso")
+
+        # Mescla itens: usa carrinho existente do usuário
+        user_cart_id = user_cart_row[0]
+
+        # Copia itens do convidado para o carrinho do usuário (mescla por item idêntico)
+        cur.execute("SELECT ID, PRODUCT_ID, QUANTITY, NOTES FROM CART_ITEMS WHERE CART_ID = ?;", (guest_cart_id,))
+        guest_items = cur.fetchall()
+        for item_id, product_id, quantity, notes in guest_items:
+            # Busca extras do item convidado
+            cur.execute("SELECT INGREDIENT_ID, QUANTITY FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY INGREDIENT_ID;", (item_id,))
+            extras_rows = cur.fetchall()
+            extras = [{"ingredient_id": r[0], "quantity": r[1]} for r in extras_rows]
+
+            # Verifica item idêntico no carrinho do usuário
+            identical_id = find_identical_cart_item(user_cart_id, product_id, extras, notes or "")
+            if identical_id:
+                cur.execute("UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;", (quantity, identical_id))
+            else:
+                cur.execute(
+                    "INSERT INTO CART_ITEMS (CART_ID, PRODUCT_ID, QUANTITY, NOTES) VALUES (?, ?, ?, ?) RETURNING ID;",
+                    (user_cart_id, product_id, quantity, notes)
+                )
+                new_user_item_id = cur.fetchone()[0]
+                for ex in extras:
+                    cur.execute(
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);",
+                        (new_user_item_id, ex["ingredient_id"], ex["quantity"])
+                    )
+
+        # Desativa o carrinho convidado após mesclar
+        cur.execute("UPDATE CARTS SET IS_ACTIVE = FALSE WHERE ID = ?;", (guest_cart_id,))
+        conn.commit()
+        return (True, None, "Carrinho mesclado com sucesso")
+    except fdb.Error as e:
+        print(f"Erro ao reivindicar carrinho convidado: {e}")
+        if conn: conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()

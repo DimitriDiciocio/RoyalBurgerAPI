@@ -9,6 +9,7 @@ customer_bp = Blueprint('customers', __name__)
 @customer_bp.route('/', methods=['POST'])  
 def create_customer_route():  
     data = request.get_json()  
+    guest_cart_id = data.get('guest_cart_id') if data else None
 
     required_fields = ['full_name', 'email', 'password', 'password_confirmation', 'date_of_birth', 'phone']  
     if not data or not all(field in data for field in required_fields):  
@@ -34,6 +35,18 @@ def create_customer_route():
     new_user, error_code, error_message = user_service.create_user(data)  
 
     if new_user:  
+        # Reivindica carrinho convidado, se houver
+        if guest_cart_id and new_user.get('id'):
+            try:
+                from ..services import cart_service
+                ok, err, msg = cart_service.claim_guest_cart(guest_cart_id, new_user['id'])
+                # Não bloqueia o fluxo de registro; apenas adiciona aviso em caso de falha
+                if not ok:
+                    return jsonify({**new_user, "message": "Cliente registrado com sucesso", "cart_merge_warning": msg}), 201
+            except Exception as e:
+                print(f"Erro ao reivindicar carrinho convidado no registro: {e}")
+                return jsonify({**new_user, "message": "Cliente registrado com sucesso", "cart_merge_warning": "Erro interno ao mesclar o carrinho"}), 201
+
         return jsonify({**new_user, "message": "Cliente registrado com sucesso"}), 201  
     else:  
         if error_code == "EMAIL_ALREADY_EXISTS":  
