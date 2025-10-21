@@ -65,6 +65,7 @@ def get_cart_items(cart_id):
                 ci.ID,
                 ci.PRODUCT_ID,
                 ci.QUANTITY,
+                ci.NOTES,
                 p.NAME as PRODUCT_NAME,
                 p.PRICE as PRODUCT_PRICE,
                 p.DESCRIPTION as PRODUCT_DESCRIPTION,
@@ -81,10 +82,11 @@ def get_cart_items(cart_id):
             item_id = row[0]
             product_id = row[1]
             quantity = row[2]
-            product_name = row[3]
-            product_price = float(row[4]) if row[4] else 0.0
-            product_description = row[4]
-            product_image_url = row[6]
+            notes = row[3]
+            product_name = row[4]
+            product_price = float(row[5]) if row[5] else 0.0
+            product_description = row[6]
+            product_image_url = row[7]
             
             # Busca extras do item
             extras_sql = """
@@ -121,6 +123,7 @@ def get_cart_items(cart_id):
                 "id": item_id,
                 "product_id": product_id,
                 "quantity": quantity,
+                "notes": notes or "",
                 "product": {
                     "id": product_id,
                     "name": product_name,
@@ -152,10 +155,61 @@ def get_cart_summary(user_id):
         return None
     
     items = get_cart_items(cart["id"])
+
+    # Validação básica de disponibilidade (produto e extras disponíveis)
+    availability_alerts = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        for item in items:
+            # Disponibilidade de ingredientes base do produto
+            cur.execute(
+                """
+                SELECT i.ID, i.IS_AVAILABLE
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
+                WHERE pi.PRODUCT_ID = ?
+                """,
+                (item["product_id"],)
+            )
+            for ing_id, is_av in cur.fetchall():
+                if not is_av:
+                    availability_alerts.append({
+                        "product_id": item["product_id"],
+                        "ingredient_id": ing_id,
+                        "issue": "ingredient_unavailable"
+                    })
+            # Disponibilidade de extras
+            for extra in item.get("extras", []):
+                cur.execute("SELECT IS_AVAILABLE FROM INGREDIENTS WHERE ID = ?", (extra["ingredient_id"],))
+                row = cur.fetchone()
+                if row and row[0] is False:
+                    availability_alerts.append({
+                        "product_id": item["product_id"],
+                        "ingredient_id": extra["ingredient_id"],
+                        "issue": "extra_unavailable"
+                    })
+    except Exception:
+        pass
+    finally:
+        try:
+            if conn: conn.close()
+        except Exception:
+            pass
     
     # Calcula totais
     total_items = sum(item["quantity"] for item in items)
     subtotal = sum(item["item_subtotal"] for item in items)
+
+    # Calcula taxas/fees e descontos (simples; pode ser parametrizado em APP_SETTINGS)
+    fees_percent = _get_setting_percent("CART_FEES_PERCENT", default=0.0)
+    taxes_percent = _get_setting_percent("CART_TAXES_PERCENT", default=0.0)
+    discount_percent = _get_setting_percent("CART_DISCOUNT_PERCENT", default=0.0)
+
+    fees = round(subtotal * (fees_percent / 100.0), 2)
+    taxes = round(subtotal * (taxes_percent / 100.0), 2)
+    discounts = round(subtotal * (discount_percent / 100.0), 2)
+    total = round(subtotal + fees + taxes - discounts, 2)
     
     return {
         "cart": cart,
@@ -163,12 +217,17 @@ def get_cart_summary(user_id):
         "summary": {
             "total_items": total_items,
             "subtotal": subtotal,
-            "is_empty": len(items) == 0
+            "fees": fees,
+            "taxes": taxes,
+            "discounts": discounts,
+            "total": total,
+            "is_empty": len(items) == 0,
+            "availability_alerts": availability_alerts
         }
     }
 
 
-def add_item_to_cart(user_id, product_id, quantity, extras=None):
+def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
     """
     Adiciona um item ao carrinho do usuário
     """
@@ -191,8 +250,24 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None):
         if not product:
             return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado ou inativo")
         
-        # Verifica se já existe um item idêntico (mesmo produto e mesmos extras)
-        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [])
+        # Verifica e valida extras conforme regras do produto (PORTIONS=0, min/max)
+        rules = _get_product_rules(cur, product_id)
+        if extras:
+            for extra in extras:
+                ing_id = extra.get("ingredient_id")
+                qty = int(extra.get("quantity", 1))
+                rule = rules.get(ing_id)
+                if not rule:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                if float(rule["portions"]) != 0.0:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                min_q = int(rule["min_quantity"] or 0)
+                max_q = int(rule["max_quantity"] or 0)
+                if qty < min_q or (max_q > 0 and qty > max_q):
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+
+        # Verifica se já existe um item idêntico (mesmo produto, mesmos extras e mesmas notas)
+        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "")
         
         if existing_item_id:
             # Incrementa quantidade do item existente
@@ -200,8 +275,8 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None):
             cur.execute(sql, (quantity, existing_item_id))
         else:
             # Cria novo item
-            sql = "INSERT INTO CART_ITEMS (CART_ID, PRODUCT_ID, QUANTITY) VALUES (?, ?, ?) RETURNING ID;"
-            cur.execute(sql, (cart_id, product_id, quantity))
+            sql = "INSERT INTO CART_ITEMS (CART_ID, PRODUCT_ID, QUANTITY, NOTES) VALUES (?, ?, ?, ?) RETURNING ID;"
+            cur.execute(sql, (cart_id, product_id, quantity, notes))
             new_item_id = cur.fetchone()[0]
             
             # Adiciona extras se fornecidos
@@ -228,7 +303,27 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None):
         if conn: conn.close()
 
 
-def find_identical_cart_item(cart_id, product_id, extras):
+def _get_setting_percent(key, default=0.0):
+    """Busca percentuais em APP_SETTINGS (0..100). Retorna float."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT SETTING_VALUE FROM APP_SETTINGS WHERE SETTING_KEY = ?", (key,))
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return default
+        try:
+            return float(row[0])
+        except Exception:
+            return default
+    except Exception:
+        return default
+    finally:
+        if conn: conn.close()
+
+
+def find_identical_cart_item(cart_id, product_id, extras, notes):
     """
     Verifica se já existe um item idêntico no carrinho (mesmo produto e mesmos extras)
     """
@@ -238,11 +333,11 @@ def find_identical_cart_item(cart_id, product_id, extras):
         cur = conn.cursor()
         
         # Busca itens do mesmo produto
-        sql = "SELECT ID FROM CART_ITEMS WHERE CART_ID = ? AND PRODUCT_ID = ?;"
+        sql = "SELECT ID, NOTES FROM CART_ITEMS WHERE CART_ID = ? AND PRODUCT_ID = ?;"
         cur.execute(sql, (cart_id, product_id))
         items = cur.fetchall()
         
-        for (item_id,) in items:
+        for item_id, existing_notes in items:
             # Busca extras deste item
             sql_extras = "SELECT INGREDIENT_ID, QUANTITY FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY INGREDIENT_ID;"
             cur.execute(sql_extras, (item_id,))
@@ -258,7 +353,7 @@ def find_identical_cart_item(cart_id, product_id, extras):
                         extras_match = False
                         break
                 
-                if extras_match:
+                if extras_match and (existing_notes or "") == (notes or ""):
                     return item_id
         
         return None
@@ -270,7 +365,7 @@ def find_identical_cart_item(cart_id, product_id, extras):
         if conn: conn.close()
 
 
-def update_cart_item(user_id, cart_item_id, quantity=None, extras=None):
+def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=None):
     """
     Atualiza um item do carrinho
     """
@@ -298,6 +393,29 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None):
         
         # Atualiza extras se fornecidos
         if extras is not None:
+            # Valida conforme regras do produto deste item
+            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+            row = cur.fetchone()
+            if not row:
+                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+            product_id = row[0]
+            rules = _get_product_rules(cur, product_id)
+            for extra in extras:
+                ing_id = extra.get("ingredient_id")
+                qty = int(extra.get("quantity", 1))
+                rule = rules.get(ing_id)
+                if not rule:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                if float(rule["portions"]) != 0.0:
+                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                min_q = int(rule["min_quantity"] or 0)
+                max_q = int(rule["max_quantity"] or 0)
+                if qty < min_q or (max_q > 0 and qty > max_q):
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+        # Atualiza notes se fornecido
+        if notes is not None:
+            sql = "UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;"
+            cur.execute(sql, (notes, cart_item_id))
             # Remove extras antigos
             sql = "DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;"
             cur.execute(sql, (cart_item_id,))
@@ -323,6 +441,26 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None):
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
+
+
+def _get_product_rules(cur, product_id):
+    """Busca regras de ingredientes para um produto e retorna dict por ingredient_id"""
+    cur.execute(
+        """
+        SELECT INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY
+        FROM PRODUCT_INGREDIENTS
+        WHERE PRODUCT_ID = ?
+        """,
+        (product_id,)
+    )
+    rules = {}
+    for row in cur.fetchall():
+        rules[row[0]] = {
+            "portions": float(row[1] or 0),
+            "min_quantity": int(row[2] or 0),
+            "max_quantity": int(row[3] or 0)
+        }
+    return rules
 
 
 def remove_cart_item(user_id, cart_item_id):

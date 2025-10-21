@@ -43,6 +43,7 @@ def add_item_to_cart_route():
         product_id = data.get('product_id')
         quantity = data.get('quantity', 1)
         extras = data.get('extras', [])
+        notes = data.get('notes')
         
         # Validações
         if not product_id:
@@ -67,7 +68,7 @@ def add_item_to_cart_route():
                 return jsonify({"error": "quantity do extra deve ser um número inteiro positivo"}), 400
         
         # Adiciona item ao carrinho
-        success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras)
+        success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes)
         
         if not success:
             if error_code == "PRODUCT_NOT_FOUND":
@@ -104,6 +105,7 @@ def update_cart_item_route(cart_item_id):
         
         quantity = data.get('quantity')
         extras = data.get('extras')
+        notes = data.get('notes')
         
         # Validações
         if quantity is not None and (not isinstance(quantity, int) or quantity <= 0):
@@ -130,7 +132,7 @@ def update_cart_item_route(cart_item_id):
             return jsonify({"error": "Pelo menos um campo (quantity ou extras) deve ser fornecido"}), 400
         
         # Atualiza item do carrinho
-        success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras)
+        success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras, notes)
         
         if not success:
             if error_code == "ITEM_NOT_FOUND":
@@ -234,4 +236,24 @@ def get_cart_summary_route():
         
     except Exception as e:
         print(f"Erro ao buscar resumo do carrinho: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@cart_bp.route('/me/validate', methods=['GET'])
+@jwt_required()
+def validate_cart_route():
+    """
+    Valida o carrinho do usuário: disponibilidade e regras básicas.
+    Retorna alerts presentes no summary atual.
+    """
+    try:
+        user_id = get_jwt_identity()
+        cart_summary = cart_service.get_cart_summary(user_id)
+        if not cart_summary:
+            return jsonify({"error": "Erro ao acessar carrinho"}), 500
+        return jsonify({
+            "availability_alerts": cart_summary["summary"].get("availability_alerts", [])
+        }), 200
+    except Exception as e:
+        print(f"Erro ao validar carrinho: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500

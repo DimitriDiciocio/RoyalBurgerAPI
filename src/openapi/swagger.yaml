@@ -248,6 +248,8 @@ components:
                 type: integer
               quantity:
                 type: integer
+              notes:
+                type: string
               product:
                 type: object
                 properties:
@@ -287,8 +289,27 @@ components:
               type: integer
             subtotal:
               type: number
+            fees:
+              type: number
+            taxes:
+              type: number
+            discounts:
+              type: number
+            total:
+              type: number
             is_empty:
               type: boolean
+            availability_alerts:
+              type: array
+              items:
+                type: object
+                properties:
+                  product_id:
+                    type: integer
+                  ingredient_id:
+                    type: integer
+                  issue:
+                    type: string
           example: "Operação realizada com sucesso."
 
     ErrorResponse:
@@ -817,6 +838,31 @@ components:
           minimum: 0
 
 paths:
+  /cart/me/validate:
+    get:
+      tags: [Carrinho]
+      summary: Validar carrinho do usuário
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Alerts de disponibilidade
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  availability_alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        product_id:
+                          type: integer
+                        ingredient_id:
+                          type: integer
+                        issue:
+                          type: string
   /groups:
     get:
       tags: [Grupos]
