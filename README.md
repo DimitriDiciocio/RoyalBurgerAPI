@@ -90,8 +90,9 @@ Acesse a documentação interativa em: `http://localhost:5000/api/docs`
 
 - `POST /api/users/login` - Fazer login
 - `POST /api/users/logout` - Fazer logout
-- `POST /api/users/request-password-reset` - Solicitar recuperação de senha
-- `POST /api/users/reset-password` - Redefinir senha
+- `POST /api/users/request-password-reset` - Solicitar recuperação de senha (verifica se email existe)
+- `POST /api/users/verify-reset-code` - Verificar código de recuperação
+- `POST /api/users/reset-password` - Redefinir senha com código
 
 #### Clientes
 
@@ -132,8 +133,13 @@ Acesse a documentação interativa em: `http://localhost:5000/api/docs`
 
 #### Fidelidade
 
-- `GET /api/customers/{id}/loyalty/balance` - Consultar saldo de pontos
-- `GET /api/customers/{id}/loyalty/history` - Histórico de pontos
+- `GET /api/loyalty/balance/{user_id}` - Consultar saldo de pontos
+- `GET /api/loyalty/history/{user_id}` - Histórico de pontos
+- `POST /api/loyalty/add-points` - Adicionar pontos (admin/manager)
+- `POST /api/loyalty/spend-points` - Gastar pontos (admin/manager)
+- `POST /api/loyalty/redeem` - Resgatar pontos por desconto
+- `POST /api/loyalty/expire-accounts` - Executar expiração de pontos
+- `GET /api/loyalty/stats` - Estatísticas do sistema (admin/manager)
 
 ## 🔐 Autenticação
 

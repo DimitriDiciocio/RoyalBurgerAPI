@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify  
-from ..services import user_service, address_service, loyalty_service  
+from ..services import user_service, address_service  
 from ..services.auth_service import require_role  
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from ..utils.validators import validate_birth_date, convert_br_date_to_iso  
@@ -263,25 +263,8 @@ def set_default_address_route(user_id, address_id):
         else:
             return jsonify({"error": message}), 500  
 
-@customer_bp.route('/<int:user_id>/loyalty/balance', methods=['GET'])  
-@require_role('customer')
-def get_loyalty_balance_route(user_id):  
-    claims = get_jwt()  
-    if int(claims.get('sub')) != user_id:  
-        return jsonify({"msg": "Acesso não autorizado"}), 403  
-    balance = loyalty_service.get_loyalty_balance(user_id)  
-    if balance is not None:
-        return jsonify(balance), 200  
-    return jsonify({"error": "Não foi possível buscar o saldo"}), 500  
-
-@customer_bp.route('/<int:user_id>/loyalty/history', methods=['GET'])  
-@require_role('customer')  
-def get_loyalty_history_route(user_id):  
-    claims = get_jwt()  
-    if 'admin' not in claims.get('roles', []) and int(claims.get('sub')) != user_id:  
-        return jsonify({"msg": "Acesso não autorizado"}), 403  
-    history = loyalty_service.get_loyalty_history(user_id)  
-    return jsonify(history), 200  
+# Endpoints de loyalty foram movidos para loyalty_routes.py
+# Use /api/loyalty/balance/{user_id} e /api/loyalty/history/{user_id}  
 
 @customer_bp.route('/<int:user_id>/reactivate', methods=['POST'])  
 @jwt_required()  

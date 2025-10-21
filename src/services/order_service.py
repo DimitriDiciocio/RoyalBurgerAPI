@@ -256,7 +256,11 @@ def update_order_status(order_id, new_status):
             result = cur.fetchone()
             if result:
                 user_id = result[0]
-                loyalty_service.add_points_for_order(user_id, order_id, cur)
+                # Busca o total do pedido para calcular pontos
+                cur.execute("SELECT TOTAL_AMOUNT FROM ORDERS WHERE ID = ?;", (order_id,))
+                order_total = cur.fetchone()
+                if order_total:
+                    loyalty_service.earn_points_for_order(user_id, order_id, order_total[0], cur)
 
         conn.commit()
         
@@ -476,7 +480,8 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         
         # Aplica desconto de pontos se fornecido
         if points_to_redeem > 0:
-            points_value = loyalty_service.calculate_points_value(points_to_redeem)
+            # 1 ponto = R$ 0,10 de desconto
+            points_value = points_to_redeem / 10.0
             total_amount = max(0, total_amount - points_value)
         
         # Cria o pedido
@@ -511,13 +516,13 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         cart_id = cart_data["cart_id"]
         cur.execute("DELETE FROM CART_ITEMS WHERE CART_ID = ?;", (cart_id,))
         
-        # Aplica pontos de fidelidade se houver
+        # Aplica pontos de fidelidade se houver (apenas se o pedido foi pago)
         if total_amount > 0:
-            loyalty_service.add_loyalty_points(user_id, total_amount)
+            loyalty_service.earn_points_for_order(user_id, order_id, total_amount, cur)
         
         # Consome pontos se houver
         if points_to_redeem > 0:
-            loyalty_service.consume_loyalty_points(user_id, points_to_redeem)
+            loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, order_id, cur)
         
         # Confirma transação
         conn.commit()
