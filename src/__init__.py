@@ -91,6 +91,8 @@ def create_app():
     app.register_blueprint(cart_bp, url_prefix='/api/cart')  
     from .routes.loyalty_routes import loyalty_bp  
     app.register_blueprint(loyalty_bp, url_prefix='/api/loyalty')  
+    from .routes.groups_routes import groups_bp  
+    app.register_blueprint(groups_bp, url_prefix='/api/groups')  
     app.register_blueprint(swagger_bp, url_prefix='/api/docs')  
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')  
     from .sockets import chat_events  

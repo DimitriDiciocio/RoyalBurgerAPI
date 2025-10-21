@@ -83,6 +83,139 @@ components:
       description: "Token JWT obtido através do endpoint /users/login"
 
   schemas:
+    Group:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        ingredients:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupIngredient"
+
+    GroupCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: "Molhos Premium"
+        is_active:
+          type: boolean
+          default: true
+
+    GroupUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        is_active:
+          type: boolean
+
+    GroupIngredient:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        additional_price:
+          type: number
+          format: float
+        is_available:
+          type: boolean
+
+    GroupIngredientAddRequest:
+      type: object
+      required: [ingredient_id]
+      properties:
+        ingredient_id:
+          type: integer
+          example: 42
+
+    ProductIngredientRule:
+      type: object
+      required: [ingredient_id]
+      properties:
+        ingredient_id:
+          type: integer
+        portions:
+          type: number
+          format: float
+          description: "> 0 receita base; 0 = extra"
+        min_quantity:
+          type: integer
+          description: "Para extras: quantidade mínima"
+        max_quantity:
+          type: integer
+          description: "Para extras: quantidade máxima (0 = ilimitado)"
+
+    ProductCreateRequest:
+      type: object
+      required: [name, price, category_id]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        cost_price:
+          type: number
+        preparation_time_minutes:
+          type: integer
+        category_id:
+          type: integer
+        ingredients:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProductIngredientRule"
+
+    ProductUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        cost_price:
+          type: number
+        preparation_time_minutes:
+          type: integer
+        category_id:
+          type: integer
+        is_active:
+          type: boolean
+        ingredients:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProductIngredientRule"
+
+    ApplyGroupRequest:
+      type: object
+      required: [group_id]
+      properties:
+        group_id:
+          type: integer
+        default_min_quantity:
+          type: integer
+          default: 0
+        default_max_quantity:
+          type: integer
+          default: 1
+
     MessageResponse:
       type: object
       properties:
@@ -684,6 +817,269 @@ components:
           minimum: 0
 
 paths:
+  /groups:
+    get:
+      tags: [Grupos]
+      summary: Listar grupos de extras
+      description: Lista todos os grupos de extras (templates)
+      parameters:
+        - in: query
+          name: active_only
+          schema:
+            type: boolean
+            default: true
+          description: Se false, lista também inativos
+      responses:
+        "200":
+          description: Lista de grupos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Group"
+    post:
+      tags: [Grupos]
+      summary: Criar grupo de extras
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroupCreateRequest"
+      responses:
+        "201":
+          description: Grupo criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "400":
+          description: Dados inválidos
+        "409":
+          description: Nome já existe
+        "500":
+          description: Erro interno
+
+  /groups/{group_id}:
+    get:
+      tags: [Grupos]
+      summary: Obter grupo por ID (com ingredientes)
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Grupo encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "404":
+          description: Grupo não encontrado
+    put:
+      tags: [Grupos]
+      summary: Atualizar grupo de extras
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroupUpdateRequest"
+      responses:
+        "200":
+          description: Atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos
+        "404":
+          description: Não encontrado
+        "409":
+          description: Nome já existe
+        "500":
+          description: Erro interno
+    delete:
+      tags: [Grupos]
+      summary: Excluir grupo de extras
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Excluído com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Não encontrado
+
+  /groups/{group_id}/ingredients:
+    post:
+      tags: [Grupos]
+      summary: Adicionar ingrediente ao grupo
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroupIngredientAddRequest"
+      responses:
+        "201":
+          description: Ingrediente adicionado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Requisição inválida
+        "404":
+          description: Grupo ou ingrediente não encontrado
+        "500":
+          description: Erro interno
+
+  /groups/{group_id}/ingredients/{ingredient_id}:
+    delete:
+      tags: [Grupos]
+      summary: Remover ingrediente do grupo
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema:
+            type: integer
+        - in: path
+          name: ingredient_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Removido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Associação não encontrada
+
+  /products:
+    post:
+      tags: [Produtos]
+      summary: Criar produto
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductCreateRequest"
+      responses:
+        "201":
+          description: Produto criado
+        "400":
+          description: Dados inválidos (inclui regras de ingredientes)
+        "409":
+          description: Nome já existe
+        "500":
+          description: Erro interno
+
+  /products/{product_id}:
+    put:
+      tags: [Produtos]
+      summary: Atualizar produto
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: product_id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductUpdateRequest"
+      responses:
+        "200":
+          description: Atualizado
+        "400":
+          description: Dados inválidos (inclui regras de ingredientes)
+        "404":
+          description: Não encontrado
+        "409":
+          description: Conflito
+        "500":
+          description: Erro interno
+
+  /products/{product_id}/apply-group:
+    post:
+      tags: [Produtos]
+      summary: Aplicar template de grupo ao produto
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: product_id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplyGroupRequest"
+      responses:
+        "200":
+          description: Ingredientes adicionados
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added_ingredients:
+                    type: array
+                    items:
+                      type: integer
+        "404":
+          description: Produto ou grupo não encontrado
+        "500":
+          description: Erro interno
   # Endpoints de Autenticação
   /users/login:
     post:

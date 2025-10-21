@@ -57,14 +57,48 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                 for extra in item['extras']:
                     extra_ingredient_ids.add(extra['ingredient_id'])
 
+        # Busca regras de ingredientes por produto (para validar extras)
+        product_rules = {}
         if product_ids:
             placeholders = ', '.join(['?' for _ in product_ids])
-            sql_base_ingredients = f"SELECT INGREDIENT_ID FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID IN ({placeholders});"
-            cur.execute(sql_base_ingredients, tuple(product_ids))
+            sql_rules = f"""
+                SELECT PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY
+                FROM PRODUCT_INGREDIENTS
+                WHERE PRODUCT_ID IN ({placeholders})
+            """
+            cur.execute(sql_rules, tuple(product_ids))
             for row in cur.fetchall():
-                required_ingredients.add(row[0])
+                pid, ing_id, portions, min_q, max_q = row
+                if pid not in product_rules:
+                    product_rules[pid] = {}
+                product_rules[pid][ing_id] = {
+                    'portions': float(portions or 0),
+                    'min_quantity': int(min_q or 0),
+                    'max_quantity': int(max_q or 0)
+                }
+                required_ingredients.add(ing_id)
 
         required_ingredients.update(extra_ingredient_ids)
+
+        # Validação de extras conforme regras (devem existir em PRODUCT_INGREDIENTS com PORTIONS=0 e respeitar min/max)
+        for item in items:
+            pid = item['product_id']
+            extras = item.get('extras') or []
+            if not extras:
+                continue
+            rules_for_product = product_rules.get(pid, {})
+            for extra in extras:
+                ing_id = extra['ingredient_id']
+                qty = int(extra.get('quantity', 1))
+                rule = rules_for_product.get(ing_id)
+                if not rule:
+                    return (None, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não é permitido para o produto {pid}")
+                if float(rule['portions']) != 0.0:
+                    return (None, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} faz parte da receita base e não pode ser extra")
+                min_q = int(rule['min_quantity'] or 0)
+                max_q = int(rule['max_quantity'] or 0)
+                if qty < min_q or (max_q > 0 and qty > max_q):
+                    return (None, "EXTRA_OUT_OF_RANGE", f"Quantidade do extra {ing_id} fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
 
         if required_ingredients:
             placeholders = ', '.join(['?' for _ in required_ingredients])

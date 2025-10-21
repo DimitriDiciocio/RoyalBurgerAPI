@@ -76,7 +76,7 @@ def create_product_route():
     if not data and not image_file:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
     
-    # Cria o produto primeiro
+    # Cria o produto primeiro (agora aceita lista "ingredients" com portions/min/max)
     new_product, error_code, error_message = product_service.create_product(data)  
     if not new_product:
         if error_code in ["INVALID_NAME", "INVALID_PRICE", "INVALID_COST_PRICE", "INVALID_PREP_TIME", "INVALID_CATEGORY"]:  
@@ -85,6 +85,8 @@ def create_product_route():
             return jsonify({"error": error_message}), 404  
         if error_code == "PRODUCT_NAME_EXISTS":  
             return jsonify({"error": error_message}), 409  
+        if error_code == "INVALID_INGREDIENTS":
+            return jsonify({"error": error_message}), 400
         if error_code == "DATABASE_ERROR":  
             return jsonify({"error": error_message}), 500  
         return jsonify({"error": "Não foi possível criar o produto"}), 500
@@ -162,7 +164,7 @@ def update_product_route(product_id):
     if not data and not image_file and not remove_image:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
     
-    # Atualiza o produto primeiro
+    # Atualiza o produto primeiro (inclui diff de "ingredients")
     success, error_code, message = product_service.update_product(product_id, data)  
     if not success:
         if error_code == "PRODUCT_NOT_FOUND":  
@@ -173,6 +175,8 @@ def update_product_route(product_id):
             return jsonify({"error": message}), 400  
         if error_code == "CATEGORY_NOT_FOUND":  
             return jsonify({"error": message}), 404  
+        elif error_code == "INVALID_INGREDIENTS":
+            return jsonify({"error": message}), 400
         elif error_code == "DATABASE_ERROR":  
             return jsonify({"error": message}), 500  
         else:  
@@ -284,6 +288,34 @@ def search_products_route():
     include_inactive = request.args.get('include_inactive', type=bool, default=False)  
     result = product_service.search_products(name=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)  
     return jsonify(result), 200
+
+
+@product_bp.route('/<int:product_id>/apply-group', methods=['POST'])
+@require_role('admin', 'manager')
+def apply_group_to_product_route(product_id):
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
+
+    group_id = data.get('group_id')
+    if not group_id:
+        return jsonify({"error": "'group_id' é obrigatório"}), 400
+
+    default_min = int(data.get('default_min_quantity', 0))
+    default_max = int(data.get('default_max_quantity', 1))
+    added, error_code, message = product_service.apply_group_to_product(product_id, group_id, default_min, default_max)
+    if added is not None and error_code is None:
+        return jsonify({"added_ingredients": added}), 200
+    if error_code == "PRODUCT_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    if error_code == "GROUP_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    return jsonify({"error": "Falha ao aplicar grupo"}), 500
 
 @product_bp.route('/inactive', methods=['GET'])  
 @require_role('admin', 'manager')  

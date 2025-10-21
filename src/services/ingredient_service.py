@@ -346,7 +346,8 @@ def get_ingredients_for_product(product_id):
         cur = conn.cursor()  
         sql = """
             SELECT i.ID, i.NAME, pi.PORTIONS, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT, 
-                   i.PRICE, i.IS_AVAILABLE, i.STOCK_UNIT
+                   i.PRICE, i.IS_AVAILABLE, i.STOCK_UNIT,
+                   pi.MIN_QUANTITY, pi.MAX_QUANTITY
             FROM PRODUCT_INGREDIENTS pi
             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
             WHERE pi.PRODUCT_ID = ?;
@@ -363,6 +364,8 @@ def get_ingredients_for_product(product_id):
             price = float(row[5]) if row[5] is not None else 0.0
             is_available = row[6]
             stock_unit = row[7] if row[7] else "un"
+            min_quantity = int(row[8]) if row[8] is not None else 0
+            max_quantity = int(row[9]) if row[9] is not None else 0
             
             # Calcular quantidade real consumida baseada na porção
             actual_quantity = portions * base_portion_quantity
@@ -383,7 +386,9 @@ def get_ingredients_for_product(product_id):
                 "price": price,
                 "portion_cost": round(portion_cost, 2),
                 "is_available": is_available,
-                "line_cost": round(line_cost, 2)
+                "line_cost": round(line_cost, 2),
+                "min_quantity": min_quantity,
+                "max_quantity": max_quantity
             })
             estimated_cost += line_cost
         return {"items": items, "estimated_cost": round(estimated_cost, 2)}  

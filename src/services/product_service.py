@@ -1,5 +1,6 @@
 import fdb  
 from ..database import get_db_connection
+from . import groups_service
 from ..utils.image_handler import get_product_image_url  
 
 def create_product(product_data):  
@@ -9,6 +10,7 @@ def create_product(product_data):
     cost_price = product_data.get('cost_price', 0.0)  
     preparation_time_minutes = product_data.get('preparation_time_minutes', 0)  
     category_id = product_data.get('category_id')  
+    ingredients = product_data.get('ingredients') or []
     if not name or not name.strip():  
         return (None, "INVALID_NAME", "Nome do produto é obrigatório")  
     if price is None or price <= 0:  
@@ -34,12 +36,48 @@ def create_product(product_data):
         sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ID;"  
         cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes, category_id, None))  
         new_product_id = cur.fetchone()[0]  
+
+        # Insere ingredientes, se fornecidos
+        if ingredients:
+            for item in ingredients:
+                ingredient_id = item.get('ingredient_id')
+                portions = item.get('portions', 0)
+                min_quantity = item.get('min_quantity', 0)
+                max_quantity = item.get('max_quantity', 0)
+
+                if not ingredient_id and ingredient_id != 0:
+                    raise ValueError("ingredient_id é obrigatório nos ingredientes")
+                if portions is None or portions < 0:
+                    raise ValueError("portions deve ser >= 0")
+                if min_quantity is None or min_quantity < 0:
+                    raise ValueError("min_quantity deve ser >= 0")
+                if max_quantity is None or max_quantity < 0:
+                    raise ValueError("max_quantity deve ser >= 0")
+                if max_quantity and min_quantity and max_quantity < min_quantity:
+                    raise ValueError("max_quantity não pode ser menor que min_quantity")
+
+                # valida existência do ingrediente
+                cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
+                if not cur.fetchone():
+                    raise ValueError(f"Ingrediente {ingredient_id} não encontrado")
+
+                cur.execute(
+                    """
+                    INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (new_product_id, ingredient_id, portions, min_quantity, max_quantity)
+                )
+
         conn.commit()  
         return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id}, None, None)  
     except fdb.Error as e:  
         print(f"Erro ao criar produto: {e}")  
         if conn: conn.rollback()  
         return (None, "DATABASE_ERROR", "Erro interno do servidor")  
+    except ValueError as ve:
+        if conn: conn.rollback()
+        return (None, "INVALID_INGREDIENTS", str(ve))
     finally:  
         if conn: conn.close()  
 
@@ -148,6 +186,27 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             
             # Adiciona status de disponibilidade baseado no estoque
             item["availability_status"] = _get_product_availability_status(product_id, cur)
+
+            # Carrega ingredientes com regras (compacto para listagem)
+            try:
+                cur2 = conn.cursor()
+                cur2.execute(
+                    """
+                    SELECT pi.INGREDIENT_ID, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY
+                    FROM PRODUCT_INGREDIENTS pi
+                    WHERE pi.PRODUCT_ID = ?
+                    ORDER BY pi.INGREDIENT_ID
+                    """,
+                    (product_id,)
+                )
+                item["ingredients"] = [{
+                    "ingredient_id": r[0],
+                    "portions": float(r[1]) if r[1] is not None else 0.0,
+                    "min_quantity": int(r[2]) if r[2] is not None else 0,
+                    "max_quantity": int(r[3]) if r[3] is not None else 0
+                } for r in cur2.fetchall()]
+            except Exception:
+                item["ingredients"] = []
             
             items.append(item)  
         total_pages = (total + page_size - 1) // page_size  
@@ -193,7 +252,29 @@ def get_product_by_id(product_id):
             
             # Adiciona status de disponibilidade baseado no estoque
             product["availability_status"] = _get_product_availability_status(product_id, cur)
-            
+
+            # Carrega ingredientes com regras
+            cur.execute(
+                """
+                SELECT pi.INGREDIENT_ID, i.NAME, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY,
+                       i.ADDITIONAL_PRICE, i.IS_AVAILABLE
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
+                WHERE pi.PRODUCT_ID = ?
+                ORDER BY i.NAME
+                """,
+                (product_id,)
+            )
+            product["ingredients"] = [{
+                "ingredient_id": r[0],
+                "name": r[1],
+                "portions": float(r[2]) if r[2] is not None else 0.0,
+                "min_quantity": int(r[3]) if r[3] is not None else 0,
+                "max_quantity": int(r[4]) if r[4] is not None else 0,
+                "additional_price": float(r[5]) if r[5] is not None else 0.0,
+                "is_available": bool(r[6])
+            } for r in cur.fetchall()]
+
             return product
         return None  
     except fdb.Error as e:  
@@ -206,8 +287,11 @@ def get_product_by_id(product_id):
 def update_product(product_id, update_data):  
     allowed_fields = ['name', 'description', 'price', 'cost_price', 'preparation_time_minutes', 'is_active', 'category_id']  
     fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}  
+    new_ingredients = update_data.get('ingredients') if isinstance(update_data, dict) else None
     if not fields_to_update:  
-        return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
+        # Permite atualizar apenas ingredientes
+        if new_ingredients is None:
+            return (False, "NO_VALID_FIELDS", "Nenhum campo válido para atualização foi fornecido")  
     if 'name' in fields_to_update:  
         name = fields_to_update['name']  
         if not name or not name.strip():  
@@ -251,14 +335,102 @@ def update_product(product_id, update_data):
         set_parts = [f"{key} = ?" for key in fields_to_update]  
         values = list(fields_to_update.values())  
         values.append(product_id)  
-        sql = f"UPDATE PRODUCTS SET {', '.join(set_parts)} WHERE ID = ? AND IS_ACTIVE = TRUE;"  
-        cur.execute(sql, tuple(values))  
+        if set_parts:
+            sql = f"UPDATE PRODUCTS SET {', '.join(set_parts)} WHERE ID = ? AND IS_ACTIVE = TRUE;"  
+            cur.execute(sql, tuple(values))  
+
+        # Atualização das regras de ingredientes, se fornecidas
+        if new_ingredients is not None:
+            # Busca estado atual
+            cur.execute(
+                "SELECT INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?",
+                (product_id,)
+            )
+            current = {row[0]: {
+                "portions": float(row[1]) if row[1] is not None else 0.0,
+                "min_quantity": int(row[2]) if row[2] is not None else 0,
+                "max_quantity": int(row[3]) if row[3] is not None else 0
+            } for row in cur.fetchall()}
+
+            # Normaliza nova lista
+            desired = {}
+            for item in (new_ingredients or []):
+                ingredient_id = item.get('ingredient_id')
+                portions = item.get('portions', 0)
+                min_quantity = item.get('min_quantity', 0)
+                max_quantity = item.get('max_quantity', 0)
+
+                if ingredient_id is None:
+                    return (False, "INVALID_INGREDIENTS", "ingredient_id é obrigatório")
+                if portions is None or portions < 0:
+                    return (False, "INVALID_INGREDIENTS", "portions deve ser >= 0")
+                if min_quantity is None or min_quantity < 0:
+                    return (False, "INVALID_INGREDIENTS", "min_quantity deve ser >= 0")
+                if max_quantity is None or max_quantity < 0:
+                    return (False, "INVALID_INGREDIENTS", "max_quantity deve ser >= 0")
+                if max_quantity and min_quantity and max_quantity < min_quantity:
+                    return (False, "INVALID_INGREDIENTS", "max_quantity não pode ser menor que min_quantity")
+
+                desired[ingredient_id] = {
+                    "portions": float(portions),
+                    "min_quantity": int(min_quantity),
+                    "max_quantity": int(max_quantity)
+                }
+
+            current_ids = set(current.keys())
+            desired_ids = set(desired.keys())
+
+            # Deletar removidos
+            to_delete = current_ids - desired_ids
+            if to_delete:
+                placeholders = ', '.join(['?' for _ in to_delete])
+                cur.execute(
+                    f"DELETE FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID IN ({placeholders})",
+                    (product_id, *tuple(to_delete))
+                )
+
+            # Inserir adicionados
+            to_insert = desired_ids - current_ids
+            for ing_id in to_insert:
+                vals = desired[ing_id]
+                # valida existência do ingrediente
+                cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                if not cur.fetchone():
+                    return (False, "INGREDIENT_NOT_FOUND", f"Ingrediente {ing_id} não encontrado")
+                cur.execute(
+                    """
+                    INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (product_id, ing_id, vals['portions'], vals['min_quantity'], vals['max_quantity'])
+                )
+
+            # Atualizar alterados
+            to_update = current_ids & desired_ids
+            for ing_id in to_update:
+                cur_vals = current[ing_id]
+                new_vals = desired[ing_id]
+                if (cur_vals['portions'] != new_vals['portions'] or
+                    cur_vals['min_quantity'] != new_vals['min_quantity'] or
+                    cur_vals['max_quantity'] != new_vals['max_quantity']):
+                    cur.execute(
+                        """
+                        UPDATE PRODUCT_INGREDIENTS
+                        SET PORTIONS = ?, MIN_QUANTITY = ?, MAX_QUANTITY = ?
+                        WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?
+                        """,
+                        (new_vals['portions'], new_vals['min_quantity'], new_vals['max_quantity'], product_id, ing_id)
+                    )
+
         conn.commit()  
         return (True, None, "Produto atualizado com sucesso")  
     except fdb.Error as e:  
         print(f"Erro ao atualizar produto: {e}")  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
+    except ValueError as ve:
+        if conn: conn.rollback()
+        return (False, "INVALID_INGREDIENTS", str(ve))
     finally:  
         if conn: conn.close()  
 
@@ -403,6 +575,21 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
             if row[7]:  # IMAGE_URL
                 item["image_url"] = row[7]
                 item["image_hash"] = _get_image_hash(row[7])
+            # Inclui ingredientes (regras) resumidas
+            try:
+                cur2 = conn.cursor()
+                cur2.execute(
+                    "SELECT INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?",
+                    (product_id,)
+                )
+                item["ingredients"] = [{
+                    "ingredient_id": r[0],
+                    "portions": float(r[1]) if r[1] is not None else 0.0,
+                    "min_quantity": int(r[2]) if r[2] is not None else 0,
+                    "max_quantity": int(r[3]) if r[3] is not None else 0
+                } for r in cur2.fetchall()]
+            except Exception:
+                item["ingredients"] = []
             items.append(item)  
             
         total_pages = (total + page_size - 1) // page_size  
@@ -493,6 +680,7 @@ def get_product_ingredients_with_costs(product_id):
     Retorna os ingredientes do produto com cálculos de custo baseados em porções
     """
     from .ingredient_service import get_ingredients_for_product
+    # Mantém retorno existente (custos com porções), porém tabela já possui min/max
     return get_ingredients_for_product(product_id)
 
 
@@ -607,3 +795,60 @@ def delete_product(product_id):
     finally:
         if conn: 
             conn.close()  
+
+
+def apply_group_to_product(product_id, group_id, default_min_quantity=0, default_max_quantity=1):
+    """
+    Aplica um template de grupo ao produto inserindo ingredientes como extras (PORTIONS=0)
+    e regras padrão (min/max). Retorna lista dos ingredientes adicionados.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verifica produto
+        cur.execute("SELECT 1 FROM PRODUCTS WHERE ID = ?", (product_id,))
+        if not cur.fetchone():
+            return (None, "PRODUCT_NOT_FOUND", "Produto não encontrado")
+
+        # Carrega ingredientes do grupo
+        group_ingredients = groups_service.get_ingredients_for_group(group_id)
+        if group_ingredients is None:
+            return (None, "GROUP_NOT_FOUND", "Grupo não encontrado")
+
+        ingredient_ids = [gi.get('id') for gi in (group_ingredients or []) if gi and gi.get('id') is not None]
+        if not ingredient_ids:
+            return ([], None, "Nenhum ingrediente para aplicar")
+
+        # Busca existentes
+        cur.execute("SELECT INGREDIENT_ID FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?", (product_id,))
+        existing_ids = {row[0] for row in cur.fetchall()}
+
+        added = []
+        for ing_id in ingredient_ids:
+            if ing_id in existing_ids:
+                continue
+            # valida existência do ingrediente
+            cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+            if not cur.fetchone():
+                continue
+            cur.execute(
+                """
+                INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY)
+                VALUES (?, ?, 0, ?, ?)
+                """,
+                (product_id, ing_id, default_min_quantity, default_max_quantity)
+            )
+            added.append(ing_id)
+
+        conn.commit()
+        return (added, None, None)
+    except fdb.Error as e:
+        print(f"Erro ao aplicar grupo ao produto: {e}")
+        if conn:
+            conn.rollback()
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn:
+            conn.close()

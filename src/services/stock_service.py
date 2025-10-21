@@ -30,15 +30,15 @@ def deduct_stock_for_order(order_id):
         for product_id, quantity in order_items:
             # Busca ingredientes do produto
             cur.execute("""
-                SELECT INGREDIENT_ID, QUANTITY 
+                SELECT INGREDIENT_ID, PORTIONS 
                 FROM PRODUCT_INGREDIENTS 
                 WHERE PRODUCT_ID = ?
             """, (product_id,))
             product_ingredients = cur.fetchall()
             
             # Adiciona ingredientes base do produto
-            for ingredient_id, ingredient_quantity in product_ingredients:
-                total_needed = ingredient_quantity * quantity
+            for ingredient_id, portions in product_ingredients:
+                total_needed = float(portions or 0) * quantity
                 if ingredient_id in ingredient_deductions:
                     ingredient_deductions[ingredient_id] += total_needed
                 else:
@@ -312,7 +312,7 @@ def reactivate_products_for_ingredient(ingredient_id, cursor=None):
         for product_id, product_name in products_to_check:
             # Verifica se todos os ingredientes do produto estão disponíveis
             cursor.execute("""
-                SELECT PI.INGREDIENT_ID, PI.QUANTITY, I.CURRENT_STOCK, I.STOCK_STATUS
+                SELECT PI.INGREDIENT_ID, PI.PORTIONS, I.CURRENT_STOCK, I.STOCK_STATUS
                 FROM PRODUCT_INGREDIENTS PI
                 JOIN INGREDIENTS I ON PI.INGREDIENT_ID = I.ID
                 WHERE PI.PRODUCT_ID = ? AND I.IS_ACTIVE = TRUE
@@ -321,7 +321,8 @@ def reactivate_products_for_ingredient(ingredient_id, cursor=None):
             ingredients = cursor.fetchall()
             can_reactivate = True
             
-            for ing_id, required_qty, current_stock, status in ingredients:
+            for ing_id, portions, current_stock, status in ingredients:
+                required_qty = float(portions or 0)
                 if status == 'out_of_stock' or current_stock < required_qty:
                     can_reactivate = False
                     break
