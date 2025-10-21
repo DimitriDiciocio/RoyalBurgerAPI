@@ -115,14 +115,158 @@ def get_loyalty_history(user_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        sql = "SELECT POINTS, REASON, EARNED_AT FROM LOYALTY_POINTS_HISTORY WHERE USER_ID = ? ORDER BY EARNED_AT DESC;"  
+        sql = """
+            SELECT POINTS, REASON, EARNED_AT, ORDER_ID,
+                   CASE 
+                       WHEN POINTS > 0 THEN 'earned'
+                       WHEN POINTS < 0 THEN 'spent'
+                       ELSE 'neutral'
+                   END as transaction_type
+            FROM LOYALTY_POINTS_HISTORY 
+            WHERE USER_ID = ? 
+            ORDER BY EARNED_AT DESC
+        """  
         cur.execute(sql, (user_id,))  
-        history = [{"points": row[0], "reason": row[1], "date": row[2].strftime('%Y-%m-%d %H:%M:%S')} for row in cur.fetchall()]  
+        history = []
+        for row in cur.fetchall():
+            points, reason, earned_at, order_id, transaction_type = row
+            history.append({
+                "points": points,
+                "reason": reason,
+                "date": earned_at.strftime('%Y-%m-%d %H:%M:%S'),
+                "order_id": order_id,
+                "transaction_type": transaction_type,
+                "expiration_date": None  # Será calculado se necessário
+            })
         return history  
     except fdb.Error as e:  
         print(f"Erro ao buscar histórico de pontos: {e}")  
         return []  
     finally:  
+        if conn: conn.close()
+
+def add_points_manually(user_id, points, reason, order_id=None):
+    """Adiciona pontos manualmente (para admin)"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Cria conta se não existir
+        create_loyalty_account_if_not_exists(user_id, cur)
+        
+        # Atualiza pontos acumulados
+        sql_update = """
+            UPDATE LOYALTY_POINTS
+            SET 
+                ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
+                POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
+            WHERE USER_ID = ?;
+        """
+        cur.execute(sql_update, (points, user_id))
+        
+        # Adiciona ao histórico
+        sql_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"
+        cur.execute(sql_history, (user_id, order_id, points, reason))
+        
+        conn.commit()
+        print(f"Adicionados {points} pontos para o usuário {user_id}: {reason}")
+        return True
+    except fdb.Error as e:
+        print(f"Erro ao adicionar pontos manualmente: {e}")
+        if conn: conn.rollback()
+        return False
+    finally:
+        if conn: conn.close()
+
+def spend_points_manually(user_id, points, reason, order_id=None):
+    """Gasta pontos manualmente (para admin)"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica saldo
+        balance_data = get_loyalty_balance(user_id)
+        current_balance = balance_data.get("current_balance", 0)
+        
+        if current_balance < points:
+            raise ValueError(f"Saldo insuficiente. Saldo atual: {current_balance}, Pontos para gastar: {points}")
+        
+        # Atualiza pontos gastos
+        sql_update = "UPDATE LOYALTY_POINTS SET SPENT_POINTS = SPENT_POINTS + ? WHERE USER_ID = ?;"
+        cur.execute(sql_update, (points, user_id))
+        
+        # Adiciona ao histórico
+        sql_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"
+        cur.execute(sql_history, (user_id, order_id, -points, reason))
+        
+        conn.commit()
+        print(f"Gastos {points} pontos do usuário {user_id}: {reason}")
+        return True
+    except fdb.Error as e:
+        print(f"Erro ao gastar pontos manualmente: {e}")
+        if conn: conn.rollback()
+        return False
+    finally:
+        if conn: conn.close()
+
+def get_loyalty_balance_detailed(user_id):
+    """Retorna saldo detalhado com informações de expiração"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Cria conta se não existir
+        create_loyalty_account_if_not_exists(user_id, cur)
+        conn.commit()
+        
+        sql_get = """
+            SELECT ACCUMULATED_POINTS, SPENT_POINTS, POINTS_EXPIRATION_DATE,
+                   (ACCUMULATED_POINTS - SPENT_POINTS) as CURRENT_BALANCE
+            FROM LOYALTY_POINTS 
+            WHERE USER_ID = ?;
+        """
+        cur.execute(sql_get, (user_id,))
+        account = cur.fetchone()
+        
+        if not account:
+            return None
+            
+        accumulated, spent, expiration_date, current_balance = account
+        
+        # Verifica se pontos expiraram
+        if expiration_date and expiration_date < date.today() and current_balance > 0:
+            # Expira pontos
+            sql_expire = "UPDATE LOYALTY_POINTS SET SPENT_POINTS = ACCUMULATED_POINTS WHERE USER_ID = ?;"
+            cur.execute(sql_expire, (user_id,))
+            sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, POINTS, REASON) VALUES (?, ?, 'Pontos expirados por inatividade');"
+            cur.execute(sql_add_history, (user_id, -current_balance))
+            conn.commit()
+            
+            return {
+                "accumulated_points": accumulated,
+                "spent_points": accumulated,
+                "current_balance": 0,
+                "expiration_date": expiration_date.strftime('%Y-%m-%d'),
+                "points_expired": True,
+                "expired_points": current_balance
+            }
+        
+        return {
+            "accumulated_points": accumulated,
+            "spent_points": spent,
+            "current_balance": current_balance,
+            "expiration_date": expiration_date.strftime('%Y-%m-%d') if expiration_date else None,
+            "points_expired": False,
+            "expired_points": 0
+        }
+    except fdb.Error as e:
+        print(f"Erro ao buscar saldo detalhado: {e}")
+        if conn: conn.rollback()
+        return None
+    finally:
         if conn: conn.close()  
 
 def expire_inactive_accounts():  
@@ -152,4 +296,74 @@ def expire_inactive_accounts():
         if conn: conn.rollback()  
         return -1  
     finally:  
+        if conn: conn.close()
+
+def get_loyalty_statistics():
+    """Retorna estatísticas do sistema de fidelidade"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Inicializa valores padrão
+        total_users_with_points = 0
+        total_points_in_circulation = 0
+        total_points_expired = 0
+        average_points_per_user = 0
+        
+        # Verifica se as tabelas existem e busca dados
+        try:
+            # Total de usuários com pontos
+            cur.execute("SELECT COUNT(*) FROM LOYALTY_POINTS WHERE ACCUMULATED_POINTS > SPENT_POINTS")
+            result = cur.fetchone()
+            if result and result[0] is not None:
+                total_users_with_points = int(result[0])
+            
+            # Total de pontos em circulação
+            cur.execute("SELECT SUM(ACCUMULATED_POINTS - SPENT_POINTS) FROM LOYALTY_POINTS WHERE ACCUMULATED_POINTS > SPENT_POINTS")
+            result = cur.fetchone()
+            if result and result[0] is not None:
+                total_points_in_circulation = int(result[0])
+            
+            # Total de pontos expirados
+            cur.execute("SELECT SUM(ABS(POINTS)) FROM LOYALTY_POINTS_HISTORY WHERE REASON = 'Pontos expirados por inatividade'")
+            result = cur.fetchone()
+            if result and result[0] is not None:
+                total_points_expired = int(result[0])
+            
+            # Média de pontos por usuário
+            if total_users_with_points > 0:
+                average_points_per_user = round(total_points_in_circulation / total_users_with_points, 2)
+            
+        except fdb.Error as e:
+            print(f"Erro ao executar queries de estatísticas: {e}")
+            # Retorna dados vazios mas sem erro para não quebrar a API
+            pass
+        
+        return {
+            "total_users_with_points": total_users_with_points,
+            "total_points_in_circulation": total_points_in_circulation,
+            "total_points_expired": total_points_expired,
+            "average_points_per_user": average_points_per_user
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro de conexão com banco: {e}")
+        return {
+            "total_users_with_points": 0,
+            "total_points_in_circulation": 0,
+            "total_points_expired": 0,
+            "average_points_per_user": 0,
+            "error": f"Erro de banco de dados: {str(e)}"
+        }
+    except Exception as e:
+        print(f"Erro inesperado: {e}")
+        return {
+            "total_users_with_points": 0,
+            "total_points_in_circulation": 0,
+            "total_points_expired": 0,
+            "average_points_per_user": 0,
+            "error": f"Erro inesperado: {str(e)}"
+        }
+    finally:
         if conn: conn.close()  

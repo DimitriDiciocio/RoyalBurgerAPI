@@ -20,7 +20,7 @@ info:
     ```
     Authorization: Bearer <seu_token>
     ```
-  version: "2.1.0"
+  version: "2.2.0"
   contact:
     name: Royal Burger Development Team
     email: dev@royalburger.com
@@ -213,17 +213,41 @@ components:
           type: string
           format: email
           example: "cliente@email.com"
+          description: "Email do usuário para recuperação de senha"
+
+    VerifyResetCodeRequest:
+      type: object
+      required: [email, reset_code]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "cliente@email.com"
+          description: "Email do usuário"
+        reset_code:
+          type: string
+          pattern: "^[0-9]{6}$"
+          example: "123456"
+          description: "Código de 6 dígitos enviado por email"
 
     PasswordResetConfirm:
       type: object
-      required: [token, new_password]
+      required: [email, reset_code, new_password]
       properties:
-        token:
+        email:
           type: string
-          example: "abc123def456"
+          format: email
+          example: "cliente@email.com"
+          description: "Email do usuário"
+        reset_code:
+          type: string
+          pattern: "^[0-9]{6}$"
+          example: "123456"
+          description: "Código de 6 dígitos enviado por email"
         new_password:
           type: string
           example: "NovaSenh@123"
+          description: "Nova senha do usuário"
 
     User:
       type: object
@@ -656,6 +680,8 @@ components:
         points_to_redeem:
           type: integer
           example: 100
+          description: "Quantidade de pontos de fidelidade a resgatar (1 ponto = R$ 0,10 de desconto). Resgate automático durante a criação do pedido."
+          minimum: 0
 
 paths:
   # Endpoints de Autenticação
@@ -734,7 +760,9 @@ paths:
     post:
       tags: [Autenticação]
       summary: Solicitar recuperação de senha
-      description: Envia um e-mail com link para recuperação de senha
+      description: |
+        Envia um e-mail com código de 6 dígitos para recuperação de senha.
+        Verifica se o email existe no banco de dados antes de enviar.
       security: []
       requestBody:
         required: true
@@ -744,7 +772,7 @@ paths:
               $ref: "#/components/schemas/PasswordResetRequest"
       responses:
         "200":
-          description: E-mail de recuperação enviado
+          description: E-mail de recuperação enviado (se o email existir)
           content:
             application/json:
               schema:
@@ -755,12 +783,48 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Email não encontrado no banco de dados
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /users/verify-reset-code:
+    post:
+      tags: [Autenticação]
+      summary: Verificar código de recuperação
+      description: |
+        Verifica se o código de 6 dígitos enviado por email é válido.
+        Não altera a senha, apenas valida o código.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyResetCodeRequest"
+      responses:
+        "200":
+          description: Código válido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Código inválido, expirado ou já utilizado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /users/reset-password:
     post:
       tags: [Autenticação]
       summary: Redefinir senha
-      description: Redefine a senha usando o token de recuperação
+      description: |
+        Redefine a senha usando o email e código de 6 dígitos.
+        O código deve ter sido verificado anteriormente.
       security: []
       requestBody:
         required: true
@@ -776,7 +840,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
         "400":
-          description: Token inválido ou senha fraca
+          description: Código inválido, expirado ou senha fraca
           content:
             application/json:
               schema:
@@ -1956,51 +2020,51 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /uploads/{filename}:
-    get:
-      tags: [Uploads]
-      summary: Servir arquivo de upload
-      description: Serve arquivos de upload de forma segura com validação de segurança
-      security: []
-      parameters:
-        - name: filename
-          in: path
-          required: true
-          schema:
-            type: string
-          description: Caminho do arquivo (ex: products/1.jpeg)
-          example: "products/1.jpeg"
-      responses:
-        "200":
-          description: Arquivo servido com sucesso
-          content:
-            image/jpeg:
-              schema:
-                type: string
-                format: binary
-            image/png:
-              schema:
-                type: string
-                format: binary
-            image/gif:
-              schema:
-                type: string
-                format: binary
-          headers:
-            Cache-Control:
-              description: Cache por 1 hora
-              schema:
-                type: string
-                example: "public, max-age=3600"
-            X-Content-Type-Options:
-              description: Proteção contra MIME sniffing
-              schema:
-                type: string
-                example: "nosniff"
-            X-Frame-Options:
-              description: Proteção contra clickjacking
-              schema:
-                type: string
-                example: "DENY"
+  get:
+    tags: [Uploads]
+    summary: Servir arquivo de upload
+    description: Serve arquivos de upload de forma segura com validação de segurança
+    security: []
+    parameters:
+      - name: filename
+        in: path
+        required: true
+        schema:
+          type: string
+        description: "Caminho do arquivo (ex: products/1.jpeg)"
+        example: "products/1.jpeg"
+    responses:
+      "200":
+        description: Arquivo servido com sucesso
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+          image/gif:
+            schema:
+              type: string
+              format: binary
+        headers:
+          Cache-Control:
+            description: Cache por 1 hora
+            schema:
+              type: string
+              example: "public, max-age=3600"
+          X-Content-Type-Options:
+            description: Proteção contra MIME sniffing
+            schema:
+              type: string
+              example: "nosniff"
+          X-Frame-Options:
+            description: Proteção contra clickjacking
+            schema:
+              type: string
+              example: "DENY"
         "400":
           description: Nome de arquivo inválido ou formato não suportado
         "404":
@@ -2515,7 +2579,13 @@ paths:
     post:
       tags: [Pedidos]
       summary: Criar novo pedido
-      description: Cria um novo pedido (cliente)
+      description: |
+        Cria um novo pedido (cliente).
+        
+        **Funcionalidades automáticas:**
+        - **Resgate de pontos**: Se `points_to_redeem` for fornecido, os pontos são resgatados automaticamente (1 ponto = R$ 0,10 de desconto)
+        - **Ganho de pontos**: Após o pedido ser concluído, o usuário ganha pontos automaticamente
+        - **Validações**: Horário da loja, disponibilidade de ingredientes, CPF, etc.
       security:
         - bearerAuth: []
       requestBody:
@@ -3220,3 +3290,492 @@ paths:
                           type: string
                         value:
                           type: string
+
+  # Endpoints de Sistema de Fidelidade
+  /loyalty/balance/{user_id}:
+    get:
+      tags: [Fidelidade]
+      summary: Consultar saldo de pontos
+      description: |
+        Retorna o saldo detalhado de pontos do usuário com informações de expiração.
+        
+        **Informações retornadas:**
+        - Saldo atual de pontos
+        - Pontos acumulados totais
+        - Pontos gastos totais
+        - Data de expiração dos pontos
+        - Status de expiração
+        
+        **Permissões:**
+        - Usuário pode consultar seu próprio saldo
+        - Admin/Manager podem consultar qualquer saldo
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: ID do usuário
+          example: 1
+      responses:
+        "200":
+          description: Saldo obtido com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoyaltyBalance"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Usuário não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /loyalty/history/{user_id}:
+    get:
+      tags: [Fidelidade]
+      summary: Consultar histórico de pontos
+      description: |
+        Retorna o histórico completo de transações de pontos do usuário.
+        
+        **Informações retornadas:**
+        - Lista de todas as transações (ganhos e gastos)
+        - Data e hora de cada transação
+        - Motivo da transação
+        - Quantidade de pontos
+        - Tipo de transação (earned/spent/neutral)
+        - ID do pedido relacionado (se aplicável)
+        
+        **Permissões:**
+        - Usuário pode consultar seu próprio histórico
+        - Admin/Manager podem consultar qualquer histórico
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: ID do usuário
+          example: 1
+      responses:
+        "200":
+          description: Histórico obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LoyaltyHistoryItem"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Usuário não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /loyalty/add-points:
+    post:
+      tags: [Fidelidade]
+      summary: Adicionar pontos (Admin/Manager)
+      description: |
+        Adiciona pontos manualmente a um usuário (apenas admin/manager).
+        
+        **Campos obrigatórios:**
+        - `user_id`: ID do usuário que receberá os pontos
+        - `points`: Quantidade de pontos a adicionar (deve ser positivo)
+        - `reason`: Motivo da adição de pontos
+        
+        **Campos opcionais:**
+        - `order_id`: ID do pedido relacionado (se aplicável)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddPointsRequest"
+            examples:
+              bonus_promocional:
+                summary: Bônus promocional
+                value:
+                  user_id: 1
+                  points: 100
+                  reason: "Bônus promocional de boas-vindas"
+              compensacao_pedido:
+                summary: Compensação por pedido
+                value:
+                  user_id: 5
+                  points: 50
+                  reason: "Compensação por atraso no pedido"
+                  order_id: 123
+      responses:
+        "200":
+          description: Pontos adicionados com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado (apenas admin/manager)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /loyalty/spend-points:
+    post:
+      tags: [Fidelidade]
+      summary: Gastar pontos (Admin/Manager)
+      description: |
+        Gasta pontos manualmente de um usuário (apenas admin/manager).
+        
+        **Campos obrigatórios:**
+        - `user_id`: ID do usuário que terá os pontos gastos
+        - `points`: Quantidade de pontos a gastar (deve ser positivo)
+        - `reason`: Motivo do gasto de pontos
+        
+        **Campos opcionais:**
+        - `order_id`: ID do pedido relacionado (se aplicável)
+        
+        **Validações:**
+        - Verifica se o usuário tem saldo suficiente
+        - Pontos devem ser positivos
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpendPointsRequest"
+            examples:
+              penalidade_atraso:
+                summary: Penalidade por atraso
+                value:
+                  user_id: 1
+                  points: 50
+                  reason: "Penalidade por atraso no pagamento"
+              correcao_erro:
+                summary: Correção de erro
+                value:
+                  user_id: 3
+                  points: 25
+                  reason: "Correção de pontos adicionados por engano"
+                  order_id: 456
+      responses:
+        "200":
+          description: Pontos gastos com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Dados inválidos ou saldo insuficiente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado (apenas admin/manager)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /loyalty/expire-accounts:
+    post:
+      tags: [Fidelidade]
+      summary: Executar expiração de pontos
+      description: |
+        Executa o processo de expiração automática de pontos (apenas admin/manager).
+        
+        **Funcionalidade:**
+        - Expira pontos de contas inativas
+        - Remove pontos que passaram da data de expiração
+        - Registra a expiração no histórico
+        - Retorna o número de contas afetadas
+        
+        **Quando usar:**
+        - Execução manual do processo de expiração
+        - Pode ser chamado por cron jobs
+        - Útil para manutenção do sistema
+        
+        **Permissões:**
+        - Apenas admin/manager
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Processo de expiração executado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Processo de expiração executado. 5 contas expiradas."
+                  expired_accounts:
+                    type: integer
+                    example: 5
+                    description: "Número de contas que tiveram pontos expirados"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado (apenas admin/manager)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /loyalty/stats:
+    get:
+      tags: [Fidelidade]
+      summary: Estatísticas do sistema de fidelidade
+      description: |
+        Retorna estatísticas gerais do sistema de fidelidade (apenas admin/manager).
+        
+        **Informações retornadas:**
+        - Total de usuários com pontos
+        - Total de pontos em circulação
+        - Total de pontos expirados
+        - Média de pontos por usuário
+        
+        **Uso:**
+        - Dashboard administrativo
+        - Relatórios de fidelidade
+        - Análise de engajamento
+        
+        **Permissões:**
+        - Apenas admin/manager
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Estatísticas obtidas com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoyaltyStats"
+        "401":
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Acesso negado (apenas admin/manager)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    # Schemas para Sistema de Fidelidade
+    LoyaltyBalance:
+      type: object
+      properties:
+        accumulated_points:
+          type: integer
+          example: 1000
+          description: "Total de pontos acumulados"
+        spent_points:
+          type: integer
+          example: 200
+          description: "Total de pontos gastos"
+        current_balance:
+          type: integer
+          example: 800
+          description: "Saldo atual de pontos"
+        expiration_date:
+          type: string
+          format: date
+          example: "2024-03-15"
+          description: "Data de expiração dos pontos"
+        points_expired:
+          type: boolean
+          example: false
+          description: "Se os pontos já expiraram"
+        expired_points:
+          type: integer
+          example: 0
+          description: "Quantidade de pontos expirados"
+
+    LoyaltyHistoryItem:
+      type: object
+      properties:
+        points:
+          type: integer
+          example: 50
+          description: "Quantidade de pontos (positivo para ganho, negativo para gasto)"
+        reason:
+          type: string
+          example: "Pontos ganhos no pedido #123"
+          description: "Motivo da transação"
+        date:
+          type: string
+          format: date-time
+          example: "2024-01-15T14:30:00"
+          description: "Data e hora da transação"
+        order_id:
+          type: integer
+          example: 123
+          description: "ID do pedido relacionado (se aplicável)"
+        transaction_type:
+          type: string
+          enum: [earned, spent, neutral]
+          example: "earned"
+          description: "Tipo da transação"
+        expiration_date:
+          type: string
+          format: date
+          example: "2024-03-15"
+          description: "Data de expiração dos pontos (se aplicável)"
+
+    LoyaltyStats:
+      type: object
+      properties:
+        total_users_with_points:
+          type: integer
+          example: 150
+          description: "Total de usuários com pontos"
+        total_points_in_circulation:
+          type: integer
+          example: 25000
+          description: "Total de pontos em circulação"
+        total_points_expired:
+          type: integer
+          example: 5000
+          description: "Total de pontos expirados"
+        average_points_per_user:
+          type: number
+          format: float
+          example: 166.67
+          description: "Média de pontos por usuário"
+
+    AddPointsRequest:
+      type: object
+      required: [user_id, points, reason]
+      properties:
+        user_id:
+          type: integer
+          example: 1
+          description: "ID do usuário que receberá os pontos"
+          minimum: 1
+        points:
+          type: integer
+          example: 100
+          description: "Quantidade de pontos a adicionar (deve ser positivo)"
+          minimum: 1
+        reason:
+          type: string
+          example: "Bônus promocional"
+          description: "Motivo da adição de pontos"
+          minLength: 1
+        order_id:
+          type: integer
+          example: 123
+          description: "ID do pedido relacionado (opcional)"
+          minimum: 1
+
+    SpendPointsRequest:
+      type: object
+      required: [user_id, points, reason]
+      properties:
+        user_id:
+          type: integer
+          example: 1
+          description: "ID do usuário que terá os pontos gastos"
+          minimum: 1
+        points:
+          type: integer
+          example: 50
+          description: "Quantidade de pontos a gastar (deve ser positivo)"
+          minimum: 1
+        reason:
+          type: string
+          example: "Penalidade por atraso no pagamento"
+          description: "Motivo do gasto de pontos"
+          minLength: 1
+        order_id:
+          type: integer
+          example: 123
+          description: "ID do pedido relacionado (opcional)"
+          minimum: 1
+

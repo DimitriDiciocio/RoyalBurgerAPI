@@ -423,6 +423,10 @@ def get_user_ids_by_roles(roles):
         if conn: conn.close()
 
 def initiate_password_reset(email):
+    """
+    Inicia o processo de recuperação de senha.
+    Retorna (sucesso, mensagem) onde sucesso indica se o email existe.
+    """
     conn = None
     try:
         # Normaliza o email para minúsculas
@@ -435,43 +439,95 @@ def initiate_password_reset(email):
         cur.execute(sql_find_user, (email,))
         user_record = cur.fetchone()
 
-        if user_record:
-            user_id, full_name = user_record
+        if not user_record:
+            return (False, "Email não encontrado")
 
-            # Gera código de 6 dígitos
-            import random
-            reset_code = f"{random.randint(100000, 999999)}"
+        user_id, full_name = user_record
 
-            expires_at = datetime.now() + timedelta(minutes=15)  # Código expira em 15 minutos
+        # Gera código de 6 dígitos
+        import random
+        reset_code = f"{random.randint(100000, 999999)}"
 
-            # Remove códigos antigos do mesmo usuário
-            sql_cleanup = "DELETE FROM PASSWORD_RESET WHERE USER_ID = ?;"
-            cur.execute(sql_cleanup, (user_id,))
+        expires_at = datetime.now() + timedelta(minutes=15)  # Código expira em 15 minutos
 
-            # Salva o novo código
-            sql_save_code = "INSERT INTO PASSWORD_RESET (USER_ID, VERIFICATION_CODE, EXPIRES_AT) VALUES (?, ?, ?);"
-            cur.execute(sql_save_code, (user_id, reset_code, expires_at))
-            conn.commit()
+        # Remove códigos antigos do mesmo usuário
+        sql_cleanup = "DELETE FROM PASSWORD_RESET WHERE USER_ID = ?;"
+        cur.execute(sql_cleanup, (user_id,))
 
-            from .email_service import send_email
-            try:
-                send_email(
-                    to=email,
-                    subject="Royal Burger - Código de recuperação de senha",
-                    template="password_reset_code",
-                    user={"full_name": full_name},
-                    reset_code=reset_code,
-                )
-            except Exception as e:
-                print(f"Erro ao enviar e-mail de recuperação: {e}")
+        # Salva o novo código
+        sql_save_code = "INSERT INTO PASSWORD_RESET (USER_ID, VERIFICATION_CODE, EXPIRES_AT) VALUES (?, ?, ?);"
+        cur.execute(sql_save_code, (user_id, reset_code, expires_at))
+        conn.commit()
 
-        return True
+        from .email_service import send_email
+        try:
+            send_email(
+                to=email,
+                subject="Royal Burger - Código de recuperação de senha",
+                template="password_reset_code",
+                user={"full_name": full_name},
+                reset_code=reset_code,
+            )
+        except Exception as e:
+            print(f"Erro ao enviar e-mail de recuperação: {e}")
+
+        return (True, "Código enviado com sucesso")
 
     except fdb.Error as e:
         print(f"Erro no banco de dados ao iniciar a recuperação de senha: {e}")
         if conn: conn.rollback()
+        return (False, "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+def verify_reset_code(email, reset_code):
+    """
+    Verifica se o código de reset é válido.
+    Retorna (sucesso, mensagem).
+    """
+    conn = None
+    try:
+        # Normaliza o email para minúsculas
+        email = email.lower().strip()
         
-        return False
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Busca o usuário pelo email
+        sql_find_user = "SELECT ID FROM USERS WHERE EMAIL = ? AND IS_ACTIVE = TRUE;"
+        cur.execute(sql_find_user, (email,))
+        user_record = cur.fetchone()
+
+        if not user_record:
+            return (False, "Usuário não encontrado.")
+
+        user_id = user_record[0]
+
+        # Busca o código de reset
+        sql_find_code = """
+            SELECT EXPIRES_AT, USED_AT
+            FROM PASSWORD_RESET
+            WHERE USER_ID = ? AND VERIFICATION_CODE = ?;
+        """
+        cur.execute(sql_find_code, (user_id, reset_code))
+        code_record = cur.fetchone()
+
+        if not code_record:
+            return (False, "Código de recuperação inválido.")
+
+        expires_at, used_at = code_record
+
+        if used_at is not None:
+            return (False, "Este código de recuperação já foi utilizado.")
+
+        if datetime.now() > expires_at:
+            return (False, "Este código de recuperação expirou.")
+
+        return (True, "Código válido.")
+
+    except fdb.Error as e:
+        print(f"Erro no banco de dados ao verificar código: {e}")
+        return (False, "Erro interno do servidor")
     finally:
         if conn: conn.close()
 

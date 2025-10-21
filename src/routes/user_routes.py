@@ -75,15 +75,73 @@ def login_route():
 def request_password_reset_route():
     data = request.get_json()
     email = data.get('email')
-    # SMS removido: sempre e-mail
+    
     if not email:
         return jsonify({"error": "O campo 'email' é obrigatório"}), 400
-    user_service.initiate_password_reset(email)
-    return jsonify({"msg": "Se um usuário com este e-mail existir, um e-mail de recuperação foi enviado."}), 200
+    
+    # Verifica se o email existe no banco
+    success, message = user_service.initiate_password_reset(email)
+    if success:
+        return jsonify({
+            "msg": "Código de recuperação enviado! Verifique sua caixa de entrada e spam.",
+            "success": True
+        }), 200
+    else:
+        return jsonify({
+            "error": "E-mail não encontrado em nossa base de dados. Verifique se digitou corretamente ou cadastre-se.",
+            "error_code": "EMAIL_NOT_FOUND",
+            "suggestion": "Se você não tem uma conta, clique em 'Cadastrar' para criar uma nova."
+        }), 404
+
+
+@user_bp.route('/verify-reset-code', methods=['POST'])
+def verify_reset_code_route():
+    """Verifica se o código de reset é válido"""
+    data = request.get_json()
+    email = data.get('email')
+    reset_code = data.get('reset_code')
+    
+    if not email or not reset_code:
+        return jsonify({"error": "Email e código de recuperação são obrigatórios"}), 400
+    
+    # Valida formato do código (6 dígitos)
+    if not reset_code.isdigit() or len(reset_code) != 6:
+        return jsonify({"error": "Código deve ter exatamente 6 dígitos"}), 400
+    
+    success, message = user_service.verify_reset_code(email, reset_code)
+    if success:
+        return jsonify({
+            "msg": "Código válido! Você pode prosseguir para redefinir sua senha.",
+            "success": True
+        }), 200
+    else:
+        # Mensagens mais amigáveis baseadas no tipo de erro
+        if "não encontrado" in message.lower():
+            error_msg = "E-mail não encontrado. Verifique se digitou corretamente."
+            error_code = "EMAIL_NOT_FOUND"
+        elif "inválido" in message.lower():
+            error_msg = "Código inválido. Verifique se digitou os 6 dígitos corretamente."
+            error_code = "INVALID_CODE"
+        elif "já foi utilizado" in message.lower():
+            error_msg = "Este código já foi usado. Solicite um novo código de recuperação."
+            error_code = "CODE_ALREADY_USED"
+        elif "expirado" in message.lower():
+            error_msg = "Código expirado. Solicite um novo código de recuperação."
+            error_code = "CODE_EXPIRED"
+        else:
+            error_msg = "Erro ao verificar código. Tente novamente."
+            error_code = "VERIFICATION_ERROR"
+        
+        return jsonify({
+            "error": error_msg,
+            "error_code": error_code,
+            "suggestion": "Se o problema persistir, solicite um novo código."
+        }), 400
 
 
 @user_bp.route('/reset-password', methods=['POST'])
 def reset_password_route():
+    """Altera a senha usando email e código de reset"""
     data = request.get_json()
     email = data.get('email')
     reset_code = data.get('reset_code')
@@ -98,9 +156,36 @@ def reset_password_route():
     
     success, message = user_service.finalize_password_reset(email, reset_code, new_password)
     if success:
-        return jsonify({"msg": message}), 200
+        return jsonify({
+            "msg": "Senha redefinida com sucesso! Agora você pode fazer login com sua nova senha.",
+            "success": True
+        }), 200
     else:
-        return jsonify({"error": message}), 400
+        # Mensagens mais amigáveis baseadas no tipo de erro
+        if "não encontrado" in message.lower():
+            error_msg = "E-mail não encontrado. Verifique se digitou corretamente."
+            error_code = "EMAIL_NOT_FOUND"
+        elif "inválido" in message.lower():
+            error_msg = "Código inválido. Verifique se digitou os 6 dígitos corretamente."
+            error_code = "INVALID_CODE"
+        elif "já foi utilizado" in message.lower():
+            error_msg = "Este código já foi usado. Solicite um novo código de recuperação."
+            error_code = "CODE_ALREADY_USED"
+        elif "expirado" in message.lower():
+            error_msg = "Código expirado. Solicite um novo código de recuperação."
+            error_code = "CODE_EXPIRED"
+        elif "senha" in message.lower() and ("fraca" in message.lower() or "forte" in message.lower()):
+            error_msg = "A senha deve ter pelo menos 8 caracteres, incluindo letras maiúsculas, minúsculas, números e símbolos."
+            error_code = "WEAK_PASSWORD"
+        else:
+            error_msg = "Erro ao redefinir senha. Tente novamente."
+            error_code = "RESET_ERROR"
+        
+        return jsonify({
+            "error": error_msg,
+            "error_code": error_code,
+            "suggestion": "Se o problema persistir, solicite um novo código de recuperação."
+        }), 400
 
 
 @user_bp.route('/logout', methods=['POST'])

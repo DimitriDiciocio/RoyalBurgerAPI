@@ -64,6 +64,43 @@ def _get_image_hash(image_url):
         print(f"Erro ao gerar hash da imagem: {e}")
     return None
 
+def _get_product_availability_status(product_id, cur):
+    """Verifica o status de disponibilidade do produto baseado no estoque dos ingredientes"""
+    try:
+        # Busca ingredientes do produto
+        sql = """
+            SELECT i.IS_AVAILABLE, i.STOCK_STATUS, i.CURRENT_STOCK, i.MIN_STOCK_THRESHOLD
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ? AND i.IS_AVAILABLE = TRUE
+        """
+        cur.execute(sql, (product_id,))
+        ingredients = cur.fetchall()
+        
+        if not ingredients:
+            return "unavailable"  # Produto sem ingredientes
+        
+        has_unavailable = False
+        has_low_stock = False
+        
+        for is_available, stock_status, current_stock, min_threshold in ingredients:
+            if not is_available or stock_status == 'out_of_stock':
+                has_unavailable = True
+                break
+            elif stock_status == 'low' or (current_stock and min_threshold and current_stock <= min_threshold):
+                has_low_stock = True
+        
+        if has_unavailable:
+            return "unavailable"
+        elif has_low_stock:
+            return "low_stock"
+        else:
+            return "available"
+            
+    except Exception as e:
+        print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
+        return "unknown"
+
 def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False):  
     page = max(int(page or 1), 1)  
     page_size = max(int(page_size or 10), 1)  
@@ -108,6 +145,10 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             if row[7]:  # IMAGE_URL
                 item["image_url"] = row[7]
                 item["image_hash"] = _get_image_hash(row[7])
+            
+            # Adiciona status de disponibilidade baseado no estoque
+            item["availability_status"] = _get_product_availability_status(product_id, cur)
+            
             items.append(item)  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -149,6 +190,10 @@ def get_product_by_id(product_id):
             if row[7]:  # IMAGE_URL
                 product["image_url"] = row[7]
                 product["image_hash"] = _get_image_hash(row[7])
+            
+            # Adiciona status de disponibilidade baseado no estoque
+            product["availability_status"] = _get_product_availability_status(product_id, cur)
+            
             return product
         return None  
     except fdb.Error as e:  
