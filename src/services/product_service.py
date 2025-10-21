@@ -44,6 +44,26 @@ def create_product(product_data):
         if conn: conn.close()  
 
 
+def _get_image_hash(image_url):
+    """Gera hash da imagem baseado no arquivo"""
+    if not image_url:
+        return None
+    try:
+        import os
+        import hashlib
+        upload_dir = os.path.join(os.getcwd(), 'uploads', 'products')
+        filename = os.path.basename(image_url)
+        file_path = os.path.join(upload_dir, filename)
+        if os.path.exists(file_path):
+            # Gera hash baseado no conteúdo e data de modificação
+            file_mtime = os.path.getmtime(file_path)
+            file_size = os.path.getsize(file_path)
+            hash_input = f"{filename}_{file_mtime}_{file_size}"
+            return hashlib.md5(hash_input.encode()).hexdigest()[:8]
+    except Exception as e:
+        print(f"Erro ao gerar hash da imagem: {e}")
+    return None
+
 def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False):  
     page = max(int(page or 1), 1)  
     page_size = max(int(page_size or 10), 1)  
@@ -87,6 +107,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
                 item["image_url"] = row[7]
+                item["image_hash"] = _get_image_hash(row[7])
             items.append(item)  
         total_pages = (total + page_size - 1) // page_size  
         return {  
@@ -127,6 +148,7 @@ def get_product_by_id(product_id):
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
                 product["image_url"] = row[7]
+                product["image_hash"] = _get_image_hash(row[7])
             return product
         return None  
     except fdb.Error as e:  
@@ -335,6 +357,7 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
                 item["image_url"] = row[7]
+                item["image_hash"] = _get_image_hash(row[7])
             items.append(item)  
             
         total_pages = (total + page_size - 1) // page_size  

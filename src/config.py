@@ -7,8 +7,8 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'uma-chave-secreta-muito-dificil-de-adivinhar'  
     DEBUG = True  
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'uma-outra-chave-jwt-muito-segura'  
-    JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 7200))  
-    DATABASE_PATH = os.path.join(PROJECT_ROOT, 'database', 'royalburger.fdb')  
+    JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 14400))  
+    DATABASE_PATH = os.path.join(PROJECT_ROOT, 'database', 'royalburger.fdb')
     FIREBIRD_HOST = 'localhost'  
     FIREBIRD_PORT = 3050  
     FIREBIRD_USER = 'SYSDBA'  
