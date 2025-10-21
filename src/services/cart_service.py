@@ -93,7 +93,7 @@ def get_cart_items(cart_id):
                     cie.INGREDIENT_ID,
                     cie.QUANTITY,
                     i.NAME as INGREDIENT_NAME,
-                    i.PRICE as INGREDIENT_PRICE
+                    COALESCE(i.ADDITIONAL_PRICE, i.PRICE) as INGREDIENT_PRICE
                 FROM CART_ITEM_EXTRAS cie
                 JOIN INGREDIENTS i ON cie.INGREDIENT_ID = i.ID
                 WHERE cie.CART_ITEM_ID = ?
