@@ -5,7 +5,8 @@ import random
 import string
 
 from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service
-from .printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket
+from .printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket, format_order_for_kitchen_json
+from .. import socketio
 from ..config import Config
 from ..database import get_db_connection
 from ..utils import validators
@@ -171,25 +172,13 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
 
         new_order_data = {"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}
 
-        # Impressão automática (não bloqueante além do timeout configurado)
+        # Notificação para agente de impressão (WebSocket)
         try:
-            if Config.ENABLE_AUTOPRINT:
-                order_details = {
-                    "id": new_order_id,
-                    "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    "order_type": "Delivery",
-                    "notes": notes or "",
-                    "items": [
-                        {
-                            "quantity": it.get('quantity', 1),
-                            "product_name": f"Produto {it.get('product_id')}",
-                            "extras": it.get('extras', [])
-                        } for it in items
-                    ]
-                }
-                _ = print_kitchen_ticket(order_details)
+            kitchen_ticket_json = format_order_for_kitchen_json(new_order_id)
+            if kitchen_ticket_json:
+                socketio.emit('new_kitchen_order', kitchen_ticket_json)
         except Exception as e:
-            print(f"[WARN] Falha na impressão automática do pedido {new_order_id}: {e}")
+            print(f"[WARN] Falha ao emitir evento de cozinha do pedido {new_order_id}: {e}")
 
         return (new_order_data, None, None)
 
@@ -561,10 +550,18 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         # Confirma transação
         conn.commit()
         
+        # Notificação para agente de impressão (WebSocket)
+        try:
+            kitchen_ticket_json = format_order_for_kitchen_json(order_id)
+            if kitchen_ticket_json:
+                socketio.emit('new_kitchen_order', kitchen_ticket_json)
+        except Exception as e:
+            print(f"[WARN] Falha ao emitir evento de cozinha do pedido {order_id}: {e}")
+        
         # Busca dados completos do pedido criado
         order_data = get_order_details(order_id, user_id, ['customer'])
 
-        # Impressão automática (não bloqueante além do timeout configurado)
+        # Impressão local opcional (mantida para compatibilidade)
         try:
             if Config.ENABLE_AUTOPRINT and order_data:
                 _ = print_kitchen_ticket({
@@ -575,7 +572,7 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
                     "items": order_data.get('items', [])
                 })
         except Exception as e:
-            print(f"[WARN] Falha na impressão automática do pedido {order_id}: {e}")
+            print(f"[WARN] Falha na impressão automática local do pedido {order_id}: {e}")
         
         # Envia notificação
         try:

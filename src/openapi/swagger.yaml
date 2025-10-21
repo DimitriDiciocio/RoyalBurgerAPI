@@ -3356,6 +3356,43 @@ paths:
         "404":
           description: Pedido não encontrado
 
+  /orders/{order_id}/reprint:
+    post:
+      tags: [Pedidos]
+      summary: Reimprimir ticket de cozinha
+      description: Emite evento WebSocket 'new_kitchen_order' para reimpressão do ticket
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: order_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Evento de reimpressão emitido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: emitted
+                  order_id:
+                    type: integer
+        "404":
+          description: Pedido não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Não autenticado
+        "403":
+          description: Não autorizado
+
   # Endpoint de Saúde
   /health:
     get:

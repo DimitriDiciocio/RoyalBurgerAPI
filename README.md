@@ -191,6 +191,25 @@ socket.on("new_message", (data) => {
 });
 ```
 
+### Eventos da Cozinha
+
+- `new_kitchen_order` — Emitido quando um novo pedido é criado/confirmado. Payload:
+
+```
+{
+  "order_number": 1024,
+  "order_type": "Delivery",
+  "timestamp": "18/10/2025 16:45",
+  "notes": "Cliente pediu para caprichar no queijo.",
+  "items": [
+    {"quantity": 2, "name": "X-Burger Clássico", "extras": [{"type":"add","name":"Bacon","quantity":1}]},
+    {"quantity": 1, "name": "Batata Frita G"}
+  ]
+}
+```
+
+Reimpressão manual (admin/manager): `POST /api/orders/{order_id}/reprint`.
+
 ## 📊 Códigos de Status
 
 - **200** - Sucesso

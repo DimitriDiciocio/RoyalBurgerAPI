@@ -2,7 +2,8 @@ from flask import Blueprint, request, jsonify, Response, send_file
 from ..services import order_service, address_service, store_service  
 from ..services.auth_service import require_role  
 from flask_jwt_extended import jwt_required, get_jwt  
-from ..services.printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket
+from ..services.printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket, format_order_for_kitchen_json
+from .. import socketio
 
 order_bp = Blueprint('orders', __name__)  
 
@@ -145,6 +146,27 @@ def print_kitchen_ticket_route(order_id):
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@order_bp.route('/<int:order_id>/reprint', methods=['POST'])
+@require_role('admin', 'manager')
+def reprint_kitchen_ticket_event_route(order_id):
+    """
+    Emite o evento de reimpressão no WebSocket para o agente de impressão.
+    """
+    claims = get_jwt()
+    user_id = int(claims.get('sub'))
+    order = order_service.get_order_details(order_id, user_id, claims.get('roles', []))
+    if not order:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    try:
+        payload = format_order_for_kitchen_json(order_id)
+        if not payload:
+            return jsonify({"error": "Falha ao montar ticket"}), 500
+        socketio.emit('new_kitchen_order', payload)
+        return jsonify({"status": "emitted", "order_id": order_id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @order_bp.route('/<int:order_id>/kitchen-ticket.pdf', methods=['GET'])

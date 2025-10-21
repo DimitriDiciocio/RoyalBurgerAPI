@@ -15,6 +15,7 @@ except Exception:
     ImageWin = None
 
 from ..config import Config
+from ..database import get_db_connection
 
 
 class KitchenTicketPDF(FPDF):
@@ -348,3 +349,93 @@ def print_kitchen_ticket(order_data: dict) -> dict:
                 pass
     return {"status": "error", "job_id": None, "message": f"PRINT_BACKEND não suportado: {backend}"}
 
+
+def format_order_for_kitchen_json(order_id: int) -> dict:
+    """
+    Monta um JSON simples do pedido para impressão na cozinha via agente externo.
+    Formato:
+      {
+        "order_number": int,
+        "order_type": str,
+        "timestamp": "DD/MM/YYYY HH:MM",
+        "notes": str,
+        "items": [
+          {"quantity": int, "name": str, "extras": [{"type":"add","name":str,"quantity":int}...] }
+        ]
+      }
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Dados básicos do pedido
+        cur.execute("SELECT ID, CREATED_AT, COALESCE(NOTES, '') FROM ORDERS WHERE ID = ?;", (order_id,))
+        row = cur.fetchone()
+        if not row:
+            return {}
+        _id, created_at, notes = row[0], row[1], row[2] or ""
+
+        # Itens do pedido
+        cur.execute(
+            """
+            SELECT oi.ID, oi.QUANTITY, p.NAME
+            FROM ORDER_ITEMS oi
+            JOIN PRODUCTS p ON p.ID = oi.PRODUCT_ID
+            WHERE oi.ORDER_ID = ?
+            ORDER BY oi.ID
+            """,
+            (order_id,)
+        )
+        items = []
+        for item_row in cur.fetchall():
+            order_item_id, qty, product_name = item_row[0], int(item_row[1] or 1), item_row[2]
+
+            # Extras do item
+            cur2 = conn.cursor()
+            cur2.execute(
+                """
+                SELECT i.NAME, e.QUANTITY
+                FROM ORDER_ITEM_EXTRAS e
+                JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
+                WHERE e.ORDER_ITEM_ID = ?
+                ORDER BY i.NAME
+                """,
+                (order_item_id,)
+            )
+            extras = []
+            for ex in cur2.fetchall():
+                extras.append({
+                    "type": "add",
+                    "name": ex[0],
+                    "quantity": int(ex[1] or 1)
+                })
+
+            items.append({
+                "quantity": qty,
+                "name": product_name,
+                "extras": extras if extras else None
+            })
+
+        # Formata timestamp DD/MM/YYYY HH:MM
+        try:
+            ts = created_at.strftime('%d/%m/%Y %H:%M') if created_at else ''
+        except Exception:
+            ts = ''
+
+        return {
+            "order_number": order_id,
+            "order_type": "Delivery",  # padrão atual até termos origem/retirada
+            "timestamp": ts,
+            "notes": notes or "",
+            "items": items
+        }
+    except Exception as e:
+        print(f"Erro ao formatar pedido {order_id} para cozinha: {e}")
+        return {}
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
