@@ -471,6 +471,23 @@ CREATE TABLE USERS (
 CREATE UNIQUE INDEX "RDB$6" ON USERS (CPF);
 CREATE UNIQUE INDEX RDB$PRIMARY3 ON USERS (ID);
 
+-- STORE_HOURS definition
+-- Drop table
+-- DROP TABLE STORE_HOURS;
+
+CREATE TABLE STORE_HOURS (
+	DAY_OF_WEEK INTEGER NOT NULL,
+	OPENING_TIME TIME,
+	CLOSING_TIME TIME,
+	IS_OPEN BOOLEAN DEFAULT TRUE NOT NULL,
+	CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+	CONSTRAINT PK_STORE_HOURS PRIMARY KEY (DAY_OF_WEEK),
+	CONSTRAINT CHK_STORE_HOURS_DAY CHECK (DAY_OF_WEEK >= 0 AND DAY_OF_WEEK <= 6)
+);
+CREATE INDEX IDX_STORE_HOURS_DAY ON STORE_HOURS (DAY_OF_WEEK);
+CREATE INDEX IDX_STORE_HOURS_OPEN ON STORE_HOURS (IS_OPEN);
+
 -- =====================================================
 -- COMENTÁRIOS SOBRE AS TABELAS
 -- =====================================================
@@ -501,6 +518,7 @@ TABELAS DE FUNCIONALIDADES:
 - NOTIFICATIONS: Notificações do sistema
 - CHATS: Sistema de chat para pedidos
 - APP_SETTINGS: Configurações da aplicação
+- STORE_HOURS: Horários de funcionamento da loja
 
 FUNCIONALIDADES IMPLEMENTADAS:
 - Sistema de autenticação com JWT
@@ -515,4 +533,38 @@ FUNCIONALIDADES IMPLEMENTADAS:
 - Gestão financeira
 - Notificações
 - Ordenação de categorias (DISPLAY_ORDER)
+- Horários de funcionamento da loja
+*/
+
+-- =====================================================
+-- DADOS INICIAIS - HORÁRIOS DE FUNCIONAMENTO
+-- =====================================================
+
+-- Inserir horários padrão da loja (segunda a domingo)
+-- 0 = Domingo, 1 = Segunda, 2 = Terça, 3 = Quarta, 4 = Quinta, 5 = Sexta, 6 = Sábado
+
+INSERT INTO STORE_HOURS (DAY_OF_WEEK, OPENING_TIME, CLOSING_TIME, IS_OPEN) VALUES
+(0, '10:00:00', '22:00:00', TRUE),  -- Domingo
+(1, '10:00:00', '22:00:00', TRUE),  -- Segunda
+(2, '10:00:00', '22:00:00', TRUE),  -- Terça
+(3, '10:00:00', '22:00:00', TRUE),  -- Quarta
+(4, '10:00:00', '22:00:00', TRUE),  -- Quinta
+(5, '10:00:00', '23:00:00', TRUE),  -- Sexta
+(6, '10:00:00', '23:00:00', TRUE);  -- Sábado
+
+-- =====================================================
+-- COMENTÁRIOS SOBRE OS DADOS INICIAIS
+-- =====================================================
+
+/*
+HORÁRIOS PADRÃO:
+- Segunda a Quinta: 10:00 às 22:00
+- Sexta e Sábado: 10:00 às 23:00  
+- Domingo: 10:00 às 22:00
+
+Para modificar os horários, use:
+UPDATE STORE_HOURS SET OPENING_TIME = '09:00:00', CLOSING_TIME = '23:00:00' WHERE DAY_OF_WEEK = 1;
+
+Para fechar a loja em um dia específico:
+UPDATE STORE_HOURS SET IS_OPEN = FALSE WHERE DAY_OF_WEEK = 0; -- Fechar domingo
 */

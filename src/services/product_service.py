@@ -159,12 +159,9 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         # total  
         cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
-        # page  
-        cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID, p.IMAGE_URL, p.IS_ACTIVE, c.NAME as CATEGORY_NAME "  
-            f"FROM PRODUCTS p LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID WHERE {where_sql} ORDER BY p.NAME;",  
-            tuple(params)  
-        )  
+        # page - Query com sintaxe FIRST/SKIP do Firebird
+        query = f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE FROM PRODUCTS WHERE {where_sql} ORDER BY NAME"
+        cur.execute(query, tuple(params))  
         items = []  
         for row in cur.fetchall():
             product_id = row[0]
@@ -182,10 +179,18 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
                 item["image_url"] = row[7]
-                item["image_hash"] = _get_image_hash(row[7])
+                try:
+                    item["image_hash"] = _get_image_hash(row[7])
+                except Exception as e:
+                    print(f"Erro ao gerar hash da imagem: {e}")
+                    item["image_hash"] = None
             
             # Adiciona status de disponibilidade baseado no estoque
-            item["availability_status"] = _get_product_availability_status(product_id, cur)
+            try:
+                item["availability_status"] = _get_product_availability_status(product_id, cur)
+            except Exception as e:
+                print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
+                item["availability_status"] = "unknown"
 
             # Carrega ingredientes com regras (compacto para listagem)
             try:
@@ -205,7 +210,8 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                     "min_quantity": int(r[2]) if r[2] is not None else 0,
                     "max_quantity": int(r[3]) if r[3] is not None else 0
                 } for r in cur2.fetchall()]
-            except Exception:
+            except Exception as e:
+                print(f"Erro ao carregar ingredientes do produto {product_id}: {e}")
                 item["ingredients"] = []
             
             items.append(item)  
@@ -550,12 +556,9 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         
-        # Busca os produtos paginados
-        cur.execute(  
-            f"SELECT FIRST {page_size} SKIP {offset} p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID, p.IMAGE_URL, p.IS_ACTIVE, c.NAME as CATEGORY_NAME "  
-            f"FROM PRODUCTS p LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID WHERE {where_sql} ORDER BY p.NAME;",  
-            tuple(params)  
-        )  
+        # Busca os produtos paginados - Query com sintaxe FIRST/SKIP do Firebird
+        query = f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE FROM PRODUCTS WHERE {where_sql} ORDER BY NAME"
+        cur.execute(query, tuple(params))  
         
         items = []  
         for row in cur.fetchall():
@@ -574,7 +577,19 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
             # Adiciona URL da imagem do banco se existir
             if row[7]:  # IMAGE_URL
                 item["image_url"] = row[7]
-                item["image_hash"] = _get_image_hash(row[7])
+                try:
+                    item["image_hash"] = _get_image_hash(row[7])
+                except Exception as e:
+                    print(f"Erro ao gerar hash da imagem: {e}")
+                    item["image_hash"] = None
+            
+            # Adiciona status de disponibilidade baseado no estoque
+            try:
+                item["availability_status"] = _get_product_availability_status(product_id, cur)
+            except Exception as e:
+                print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
+                item["availability_status"] = "unknown"
+            
             # Inclui ingredientes (regras) resumidas
             try:
                 cur2 = conn.cursor()
@@ -588,7 +603,8 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                     "min_quantity": int(r[2]) if r[2] is not None else 0,
                     "max_quantity": int(r[3]) if r[3] is not None else 0
                 } for r in cur2.fetchall()]
-            except Exception:
+            except Exception as e:
+                print(f"Erro ao carregar ingredientes do produto {product_id}: {e}")
                 item["ingredients"] = []
             items.append(item)  
             

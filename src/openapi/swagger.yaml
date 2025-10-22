@@ -1045,6 +1045,54 @@ paths:
           description: Associação não encontrada
 
   /products:
+    get:
+      tags: [Produtos]
+      summary: Listar produtos (com filtros e paginação)
+      description: Lista produtos com filtros por nome e categoria e suporte a paginação
+      security: []
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+          description: Filtro por nome (contains, case-insensitive)
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+          description: Filtrar por categoria
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 10
+        - name: include_inactive
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Incluir produtos inativos
+      responses:
+        "200":
+          description: Lista de produtos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Product"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "500":
+          description: Erro interno
     post:
       tags: [Produtos]
       summary: Criar produto
@@ -1814,248 +1862,6 @@ paths:
           description: Endereço não encontrado
 
   # Endpoints de Produtos
-  /products:
-    get:
-      tags: [Produtos]
-      summary: Listar produtos (com filtros e paginação)
-      description: Lista produtos com filtros por nome e categoria e suporte a paginação
-      security: []
-      parameters:
-        - name: name
-          in: query
-          schema:
-            type: string
-          description: Filtro por nome (contains, case-insensitive)
-        - name: category_id
-          in: query
-          schema:
-            type: integer
-          description: Filtrar por categoria
-        - name: page
-          in: query
-          schema:
-            type: integer
-            default: 1
-        - name: page_size
-          in: query
-          schema:
-            type: integer
-            default: 10
-      responses:
-        "200":
-          description: Lista paginada de produtos
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Product"
-                  pagination:
-                    $ref: "#/components/schemas/Pagination"
-    post:
-      tags: [Produtos]
-      summary: Criar novo produto
-      description: Cria um novo produto (admin/manager). Suporta upload de imagem via multipart/form-data
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NewProduct"
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                name:
-                  type: string
-                  example: "Hambúrguer Especial"
-                description:
-                  type: string
-                  example: "Hambúrguer com ingredientes especiais"
-                price:
-                  type: number
-                  format: float
-                  example: 35.90
-                cost_price:
-                  type: number
-                  format: float
-                  example: 20.50
-                preparation_time_minutes:
-                  type: integer
-                  example: 15
-                category_id:
-                  type: integer
-                  example: 2
-                image:
-                  type: string
-                  format: binary
-                  description: Arquivo de imagem do produto (JPEG/PNG)
-      responses:
-        "201":
-          description: Produto criado com sucesso
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Product"
-        "400":
-          description: Dados inválidos (nome vazio, preço inválido, preço de custo inválido, tempo de preparo inválido, categoria inválida)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Não autenticado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: Acesso negado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: Nome do produto já existe
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Erro interno do servidor
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /products/{product_id}:
-    get:
-      tags: [Produtos]
-      summary: Obter produto por ID
-      description: Busca um produto específico pelo ID
-      security: []
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        "200":
-          description: Produto encontrado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Product"
-        "404":
-          description: Produto não encontrado
-    put:
-      tags: [Produtos]
-      summary: Atualizar produto
-      description: Atualiza um produto (admin/manager). Suporta upload de nova imagem via multipart/form-data
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NewProduct"
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                name:
-                  type: string
-                  example: "Hambúrguer Especial"
-                description:
-                  type: string
-                  example: "Hambúrguer com ingredientes especiais"
-                price:
-                  type: number
-                  format: float
-                  example: 35.90
-                cost_price:
-                  type: number
-                  format: float
-                  example: 20.50
-                preparation_time_minutes:
-                  type: integer
-                  example: 15
-                category_id:
-                  type: integer
-                  example: 2
-                image:
-                  type: string
-                  format: binary
-                  description: Nova imagem do produto (JPEG/PNG)
-      responses:
-        "200":
-          description: Produto atualizado com sucesso
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResponse"
-        "400":
-          description: Dados inválidos (nome vazio, preço inválido, preço de custo inválido, tempo de preparo inválido, categoria inválida, nenhum campo válido)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Produto ou categoria não encontrados
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: Nome do produto já existe
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Erro interno do servidor
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-    delete:
-      tags: [Produtos]
-      summary: Inativar produto
-      description: Inativa um produto (admin/manager)
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: product_id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        "200":
-          description: Produto inativado com sucesso
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResponse"
-        "404":
-          description: Produto não encontrado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
 
   /products/{product_id}/reactivate:
     post:
@@ -3202,7 +3008,7 @@ paths:
       summary: Criar novo pedido
       description: |
         Cria um novo pedido (cliente).
-        
+
         **Funcionalidades automáticas:**
         - **Resgate de pontos**: Se `points_to_redeem` for fornecido, os pontos são resgatados automaticamente (1 ponto = R$ 0,10 de desconto)
         - **Ganho de pontos**: Após o pedido ser concluído, o usuário ganha pontos automaticamente
@@ -3956,14 +3762,14 @@ paths:
       summary: Consultar saldo de pontos
       description: |
         Retorna o saldo detalhado de pontos do usuário com informações de expiração.
-        
+
         **Informações retornadas:**
         - Saldo atual de pontos
         - Pontos acumulados totais
         - Pontos gastos totais
         - Data de expiração dos pontos
         - Status de expiração
-        
+
         **Permissões:**
         - Usuário pode consultar seu próprio saldo
         - Admin/Manager podem consultar qualquer saldo
@@ -4010,7 +3816,7 @@ paths:
       summary: Consultar histórico de pontos
       description: |
         Retorna o histórico completo de transações de pontos do usuário.
-        
+
         **Informações retornadas:**
         - Lista de todas as transações (ganhos e gastos)
         - Data e hora de cada transação
@@ -4018,7 +3824,7 @@ paths:
         - Quantidade de pontos
         - Tipo de transação (earned/spent/neutral)
         - ID do pedido relacionado (se aplicável)
-        
+
         **Permissões:**
         - Usuário pode consultar seu próprio histórico
         - Admin/Manager podem consultar qualquer histórico
@@ -4067,12 +3873,12 @@ paths:
       summary: Adicionar pontos (Admin/Manager)
       description: |
         Adiciona pontos manualmente a um usuário (apenas admin/manager).
-        
+
         **Campos obrigatórios:**
         - `user_id`: ID do usuário que receberá os pontos
         - `points`: Quantidade de pontos a adicionar (deve ser positivo)
         - `reason`: Motivo da adição de pontos
-        
+
         **Campos opcionais:**
         - `order_id`: ID do pedido relacionado (se aplicável)
       security:
@@ -4135,15 +3941,15 @@ paths:
       summary: Gastar pontos (Admin/Manager)
       description: |
         Gasta pontos manualmente de um usuário (apenas admin/manager).
-        
+
         **Campos obrigatórios:**
         - `user_id`: ID do usuário que terá os pontos gastos
         - `points`: Quantidade de pontos a gastar (deve ser positivo)
         - `reason`: Motivo do gasto de pontos
-        
+
         **Campos opcionais:**
         - `order_id`: ID do pedido relacionado (se aplicável)
-        
+
         **Validações:**
         - Verifica se o usuário tem saldo suficiente
         - Pontos devem ser positivos
@@ -4207,18 +4013,18 @@ paths:
       summary: Executar expiração de pontos
       description: |
         Executa o processo de expiração automática de pontos (apenas admin/manager).
-        
+
         **Funcionalidade:**
         - Expira pontos de contas inativas
         - Remove pontos que passaram da data de expiração
         - Registra a expiração no histórico
         - Retorna o número de contas afetadas
-        
+
         **Quando usar:**
         - Execução manual do processo de expiração
         - Pode ser chamado por cron jobs
         - Útil para manutenção do sistema
-        
+
         **Permissões:**
         - Apenas admin/manager
       security:
@@ -4263,18 +4069,18 @@ paths:
       summary: Estatísticas do sistema de fidelidade
       description: |
         Retorna estatísticas gerais do sistema de fidelidade (apenas admin/manager).
-        
+
         **Informações retornadas:**
         - Total de usuários com pontos
         - Total de pontos em circulação
         - Total de pontos expirados
         - Média de pontos por usuário
-        
+
         **Uso:**
         - Dashboard administrativo
         - Relatórios de fidelidade
         - Análise de engajamento
-        
+
         **Permissões:**
         - Apenas admin/manager
       security:
@@ -4436,4 +4242,3 @@ paths:
           example: 123
           description: "ID do pedido relacionado (opcional)"
           minimum: 1
-

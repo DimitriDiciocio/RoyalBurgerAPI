@@ -45,10 +45,6 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
         conn = get_db_connection()
         cur = conn.cursor()
         
-
-        
-
-        
         required_ingredients = set()
         product_ids = {item['product_id'] for item in items}
         extra_ingredient_ids = set()
@@ -109,14 +105,7 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
             if unavailable_ingredient:
                 return (None, "INGREDIENT_UNAVAILABLE", f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
 
-        
-        
-        sql_get_id = "SELECT GEN_ID(GEN_ORDERS_ID, 1) FROM RDB$DATABASE;"
-        cur.execute(sql_get_id)
-        new_order_id = cur.fetchone()[0]
-
-        discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, new_order_id,
-                                                                     cur) if points_to_redeem > 0 else 0.0
+        # Calcula total dos itens e dos extras
 
         product_prices = {}
         order_total = 0
@@ -139,17 +128,33 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                     for extra in item['extras']:
                         order_total += extra_prices.get(extra['ingredient_id'], 0) * extra.get('quantity', 1)
 
-        if discount_amount > order_total:
-            return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
+        # Valida desconto de pontos (sem debitar ainda)
+        if points_to_redeem and points_to_redeem > 0:
+            expected_discount = points_to_redeem / 10.0
+            if expected_discount > order_total:
+                return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
 
         confirmation_code = _generate_confirmation_code()
+        # Cria o pedido usando IDENTITY e retorna o ID
         sql_order = """
-            INSERT INTO ORDERS (ID, USER_ID, ADDRESS_ID, STATUS, CONFIRMATION_CODE, NOTES, PAYMENT_METHOD, CHANGE_FOR_AMOUNT, CPF_ON_INVOICE, DISCOUNT_AMOUNT)
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?);
+            INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE)
+            VALUES (?, ?, 'pending', ?, ?, ?, ?) RETURNING ID;
         """
         cur.execute(sql_order, (
-        new_order_id, user_id, address_id, confirmation_code, notes, payment_method, change_for_amount, cpf_on_invoice,
-        discount_amount))
+            user_id,
+            address_id,
+            order_total,
+            payment_method,
+            notes,
+            confirmation_code
+        ))
+        new_order_id = cur.fetchone()[0]
+
+        # Debita pontos (se houver) e atualiza o total do pedido
+        if points_to_redeem and points_to_redeem > 0:
+            discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, new_order_id, cur)
+            new_total = max(0, float(order_total) - float(discount_amount))
+            cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, new_order_id))
 
         for item in items:
             product_id = item.get('product_id')
@@ -330,8 +335,7 @@ def get_order_details(order_id, user_id, user_role):
         
         sql_order = """
             SELECT ID, USER_ID, ADDRESS_ID, STATUS, CONFIRMATION_CODE, NOTES,
-                   PAYMENT_METHOD, CHANGE_FOR_AMOUNT, CPF_ON_INVOICE,
-                   DISCOUNT_AMOUNT, CREATED_AT
+                   PAYMENT_METHOD, TOTAL_AMOUNT, CREATED_AT
             FROM ORDERS WHERE ID = ?;
         """
         cur.execute(sql_order, (order_id,))
@@ -344,9 +348,8 @@ def get_order_details(order_id, user_id, user_role):
         order_details = {
             "id": order_row[0], "user_id": order_row[1], "address_id": order_row[2],
             "status": order_row[3], "confirmation_code": order_row[4], "notes": order_row[5],
-            "payment_method": order_row[6], "change_for_amount": order_row[7],
-            "cpf_on_invoice": order_row[8], "discount_amount": order_row[9],
-            "created_at": order_row[10].strftime('%Y-%m-%d %H:%M:%S')
+            "payment_method": order_row[6], "total_amount": float(order_row[7]) if order_row[7] is not None else 0.0,
+            "created_at": order_row[8].strftime('%Y-%m-%d %H:%M:%S') if order_row[8] else None
         }
 
         
@@ -501,39 +504,70 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         # Calcula total do carrinho
         total_amount = cart_data["total_amount"]
         
-        # Aplica desconto de pontos se fornecido
-        if points_to_redeem > 0:
-            # 1 ponto = R$ 0,10 de desconto
-            points_value = points_to_redeem / 10.0
-            total_amount = max(0, total_amount - points_value)
+        # Valida desconto de pontos (sem debitar ainda)
+        if points_to_redeem and points_to_redeem > 0:
+            expected_discount = points_to_redeem / 10.0
+            if expected_discount > total_amount:
+                return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
         
-        # Cria o pedido
+        # Cria o pedido (colunas compatíveis com o schema)
         sql_order = """
             INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, 
-                              NOTES, CONFIRMATION_CODE, CHANGE_FOR_AMOUNT, CPF_ON_INVOICE, POINTS_TO_REDEEM)
-            VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING ID;
+                                NOTES, CONFIRMATION_CODE)
+            VALUES (?, ?, 'pending', ?, ?, ?, ?) RETURNING ID;
         """
-        cur.execute(sql_order, (user_id, address_id, total_amount, payment_method, notes, 
-                               confirmation_code, change_for_amount, cpf_on_invoice, points_to_redeem))
+        cur.execute(sql_order, (user_id, address_id, total_amount, payment_method, notes, confirmation_code))
         order_id = cur.fetchone()[0]
+
+        # Debita pontos (se houver) e atualiza o total do pedido
+        if points_to_redeem and points_to_redeem > 0:
+            discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, order_id, cur)
+            new_total = max(0, float(total_amount) - float(discount_amount))
+            cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, order_id))
         
-        # Copia itens do carrinho para o pedido
+        # Preços dos produtos do carrinho
+        cart_product_ids = {it["product_id"] for it in cart_data["items"]}
+        product_prices = {}
+        if cart_product_ids:
+            placeholders = ', '.join(['?' for _ in cart_product_ids])
+            cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(cart_product_ids))
+            product_prices = {row[0]: row[1] for row in cur.fetchall()}
+
+        # Preços dos extras do carrinho
+        extra_ids = set()
+        for it in cart_data["items"]:
+            for ex in it["extras"]:
+                extra_ids.add(ex["ingredient_id"])
+        extra_prices = {}
+        if extra_ids:
+            placeholders = ', '.join(['?' for _ in extra_ids])
+            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
+            extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+
+        # Copia itens do carrinho para o pedido (com preços)
         for item in cart_data["items"]:
-            # Insere item principal
+            product_id = item["product_id"]
+            quantity = item["quantity"]
+            unit_price = product_prices.get(product_id, 0)
+
+            # Insere item principal com UNIT_PRICE
             sql_item = """
-                INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY)
-                VALUES (?, ?, ?) RETURNING ID;
+                INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE)
+                VALUES (?, ?, ?, ?) RETURNING ID;
             """
-            cur.execute(sql_item, (order_id, item["product_id"], item["quantity"]))
+            cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
             order_item_id = cur.fetchone()[0]
-            
-            # Insere extras do item
+
+            # Insere extras do item com UNIT_PRICE
             for extra in item["extras"]:
+                ex_id = extra["ingredient_id"]
+                ex_qty = extra["quantity"]
+                ex_price = extra_prices.get(ex_id, 0)
                 sql_extra = """
-                    INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY)
-                    VALUES (?, ?, ?);
+                    INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, UNIT_PRICE)
+                    VALUES (?, ?, ?, ?);
                 """
-                cur.execute(sql_extra, (order_item_id, extra["ingredient_id"], extra["quantity"]))
+                cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_price))
         
         # Limpa o carrinho do usuário
         cart_id = cart_data["cart_id"]
