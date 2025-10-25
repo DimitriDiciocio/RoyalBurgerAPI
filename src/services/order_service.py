@@ -12,187 +12,246 @@ from ..database import get_db_connection
 from ..utils import validators
 from datetime import datetime
 
+def _validate_order_data(user_id, address_id, items, payment_method):
+    """Valida dados básicos do pedido"""
+    if not user_id or not isinstance(user_id, int):
+        raise ValueError("user_id deve ser um inteiro válido")
+    
+    if not address_id or not isinstance(address_id, int):
+        raise ValueError("address_id deve ser um inteiro válido")
+    
+    if not items or not isinstance(items, list) or len(items) == 0:
+        raise ValueError("O pedido deve conter pelo menos um item")
+    
+    if not payment_method or not isinstance(payment_method, str):
+        raise ValueError("Método de pagamento é obrigatório")
+
+def _validate_cpf(cpf_on_invoice):
+    """Valida CPF se fornecido"""
+    if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
+        raise ValueError(f"O CPF informado '{cpf_on_invoice}' é inválido")
+
+def _validate_points_redemption(points_to_redeem, total_amount):
+    """Valida resgate de pontos"""
+    if points_to_redeem and points_to_redeem > 0:
+        expected_discount = points_to_redeem / 100.0
+        if expected_discount > total_amount:
+            raise ValueError("O valor do desconto não pode ser maior que o total do pedido")
+
+def _validate_ingredients_and_extras(items, cur):
+    """Valida ingredientes e extras do pedido"""
+    required_ingredients = set()
+    product_ids = {item['product_id'] for item in items}
+    extra_ingredient_ids = set()
+
+    for item in items:
+        if 'extras' in item and item['extras']:
+            for extra in item['extras']:
+                extra_ingredient_ids.add(extra['ingredient_id'])
+
+    # Busca regras de ingredientes por produto
+    product_rules = {}
+    if product_ids:
+        placeholders = ', '.join(['?' for _ in product_ids])
+        sql_rules = f"""
+            SELECT PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY
+            FROM PRODUCT_INGREDIENTS
+            WHERE PRODUCT_ID IN ({placeholders})
+        """
+        cur.execute(sql_rules, tuple(product_ids))
+        for row in cur.fetchall():
+            pid, ing_id, portions, min_q, max_q = row
+            if pid not in product_rules:
+                product_rules[pid] = {}
+            product_rules[pid][ing_id] = {
+                'portions': float(portions or 0),
+                'min_quantity': int(min_q or 0),
+                'max_quantity': int(max_q or 0)
+            }
+            required_ingredients.add(ing_id)
+
+    required_ingredients.update(extra_ingredient_ids)
+
+    # Valida extras conforme regras
+    for item in items:
+        pid = item['product_id']
+        extras = item.get('extras') or []
+        if not extras:
+            continue
+        rules_for_product = product_rules.get(pid, {})
+        for extra in extras:
+            ing_id = extra['ingredient_id']
+            qty = int(extra.get('quantity', 1))
+            rule = rules_for_product.get(ing_id)
+            if not rule:
+                raise ValueError(f"Ingrediente {ing_id} não é permitido para o produto {pid}")
+            if float(rule['portions']) != 0.0:
+                raise ValueError(f"Ingrediente {ing_id} faz parte da receita base e não pode ser extra")
+            min_q = int(rule['min_quantity'] or 0)
+            max_q = int(rule['max_quantity'] or 0)
+            if qty < min_q or (max_q > 0 and qty > max_q):
+                raise ValueError(f"Quantidade do extra {ing_id} fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
+
+    # Verifica disponibilidade de ingredientes
+    if required_ingredients:
+        placeholders = ', '.join(['?' for _ in required_ingredients])
+        sql_check_availability = f"SELECT NAME FROM INGREDIENTS WHERE ID IN ({placeholders}) AND IS_AVAILABLE = FALSE;"
+        cur.execute(sql_check_availability, tuple(required_ingredients))
+        unavailable_ingredient = cur.fetchone()
+        if unavailable_ingredient:
+            raise ValueError(f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
+
+def _calculate_order_total(items, cur):
+    """Calcula total do pedido"""
+    product_prices = {}
+    order_total = 0
+    product_ids = {item['product_id'] for item in items}
+    
+    if product_ids:
+        placeholders = ', '.join(['?' for _ in product_ids])
+        cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(product_ids))
+        product_prices = {row[0]: row[1] for row in cur.fetchall()}
+        
+        for item in items:
+            order_total += product_prices.get(item['product_id'], 0) * item.get('quantity', 1)
+
+    extra_prices = {}
+    extra_ingredient_ids = set()
+    for item in items:
+        if 'extras' in item and item['extras']:
+            for extra in item['extras']:
+                extra_ingredient_ids.add(extra['ingredient_id'])
+    
+    if extra_ingredient_ids:
+        placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+        cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ingredient_ids))
+        extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+        
+        for item in items:
+            if 'extras' in item and item['extras']:
+                for extra in item['extras']:
+                    order_total += extra_prices.get(extra['ingredient_id'], 0) * extra.get('quantity', 1)
+
+    return order_total
+
+def _add_order_items(order_id, items, cur):
+    """Adiciona itens ao pedido"""
+    product_prices = {}
+    product_ids = {item['product_id'] for item in items}
+    
+    if product_ids:
+        placeholders = ', '.join(['?' for _ in product_ids])
+        cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(product_ids))
+        product_prices = {row[0]: row[1] for row in cur.fetchall()}
+
+    extra_prices = {}
+    extra_ingredient_ids = set()
+    for item in items:
+        if 'extras' in item and item['extras']:
+            for extra in item['extras']:
+                extra_ingredient_ids.add(extra['ingredient_id'])
+    
+    if extra_ingredient_ids:
+        placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+        cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ingredient_ids))
+        extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+
+    for item in items:
+        product_id = item.get('product_id')
+        quantity = item.get('quantity')
+        unit_price = product_prices[product_id]
+
+        sql_item = "INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?) RETURNING ID;"
+        cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
+        new_order_item_id = cur.fetchone()[0]
+
+        if 'extras' in item and item['extras']:
+            for extra in item['extras']:
+                extra_id = extra['ingredient_id']
+                extra_qty = extra.get('quantity', 1)
+                extra_price = extra_prices[extra_id]
+                sql_extra = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?);"
+                cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_price))
+
+def _notify_kitchen(order_id):
+    """Notifica a cozinha sobre novo pedido"""
+    try:
+        kitchen_ticket_json = format_order_for_kitchen_json(order_id)
+        if kitchen_ticket_json:
+            socketio.emit('new_kitchen_order', kitchen_ticket_json)
+    except Exception as e:
+        print(f"[WARN] Falha ao emitir evento de cozinha do pedido {order_id}: {e}")
+
 
 def _generate_confirmation_code(length=8):
     """Gera um código de confirmação alfanumérico aleatório."""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
-def create_order(user_id, address_id, items, payment_method, change_for_amount=None, notes="", cpf_on_invoice=None,
-                 points_to_redeem=0):
-    """
-    Cria um novo pedido validando TUDO: horário da loja, disponibilidade de ingredientes, CPF, etc.
-    Retorna uma tupla: (order_data, error_code, error_message)
-    """
+def create_order(user_id, address_id, items, payment_method, change_for_amount=None, notes="", cpf_on_invoice=None, points_to_redeem=0):
+    """Cria um novo pedido validando TUDO"""
     
-    is_open, message = store_service.is_store_open()
-    if not is_open:
-        return (None, "STORE_CLOSED", message)
-
-    
-    if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
-        return (None, "INVALID_CPF", f"O CPF informado '{cpf_on_invoice}' é inválido.")
-
-    
-    if not items or len(items) == 0:
-        return (None, "EMPTY_ORDER", "O pedido deve conter pelo menos um item.")
-
-    if not payment_method:
-        return (None, "MISSING_PAYMENT_METHOD", "Método de pagamento é obrigatório.")
-
-    conn = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        # Validações básicas
+        _validate_order_data(user_id, address_id, items, payment_method)
+        _validate_cpf(cpf_on_invoice)
         
-        required_ingredients = set()
-        product_ids = {item['product_id'] for item in items}
-        extra_ingredient_ids = set()
+        # Verifica se a loja está aberta
+        is_open, message = store_service.is_store_open()
+        if not is_open:
+            return (None, "STORE_CLOSED", message)
 
-        for item in items:
-            if 'extras' in item and item['extras']:
-                for extra in item['extras']:
-                    extra_ingredient_ids.add(extra['ingredient_id'])
-
-        # Busca regras de ingredientes por produto (para validar extras)
-        product_rules = {}
-        if product_ids:
-            placeholders = ', '.join(['?' for _ in product_ids])
-            sql_rules = f"""
-                SELECT PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY
-                FROM PRODUCT_INGREDIENTS
-                WHERE PRODUCT_ID IN ({placeholders})
-            """
-            cur.execute(sql_rules, tuple(product_ids))
-            for row in cur.fetchall():
-                pid, ing_id, portions, min_q, max_q = row
-                if pid not in product_rules:
-                    product_rules[pid] = {}
-                product_rules[pid][ing_id] = {
-                    'portions': float(portions or 0),
-                    'min_quantity': int(min_q or 0),
-                    'max_quantity': int(max_q or 0)
-                }
-                required_ingredients.add(ing_id)
-
-        required_ingredients.update(extra_ingredient_ids)
-
-        # Validação de extras conforme regras (devem existir em PRODUCT_INGREDIENTS com PORTIONS=0 e respeitar min/max)
-        for item in items:
-            pid = item['product_id']
-            extras = item.get('extras') or []
-            if not extras:
-                continue
-            rules_for_product = product_rules.get(pid, {})
-            for extra in extras:
-                ing_id = extra['ingredient_id']
-                qty = int(extra.get('quantity', 1))
-                rule = rules_for_product.get(ing_id)
-                if not rule:
-                    return (None, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não é permitido para o produto {pid}")
-                if float(rule['portions']) != 0.0:
-                    return (None, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} faz parte da receita base e não pode ser extra")
-                min_q = int(rule['min_quantity'] or 0)
-                max_q = int(rule['max_quantity'] or 0)
-                if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (None, "EXTRA_OUT_OF_RANGE", f"Quantidade do extra {ing_id} fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
-
-        if required_ingredients:
-            placeholders = ', '.join(['?' for _ in required_ingredients])
-            sql_check_availability = f"SELECT NAME FROM INGREDIENTS WHERE ID IN ({placeholders}) AND IS_AVAILABLE = FALSE;"
-            cur.execute(sql_check_availability, tuple(required_ingredients))
-            unavailable_ingredient = cur.fetchone()
-            if unavailable_ingredient:
-                return (None, "INGREDIENT_UNAVAILABLE", f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
-
-        # Calcula total dos itens e dos extras
-
-        product_prices = {}
-        order_total = 0
-        if product_ids:
-            placeholders = ', '.join(['?' for _ in product_ids])
-            sql_prices = f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});"
-            cur.execute(sql_prices, tuple(product_ids))
-            product_prices = {row[0]: row[1] for row in cur.fetchall()}
-            for item in items:
-                order_total += product_prices.get(item['product_id'], 0) * item.get('quantity', 1)
-
-        extra_prices = {}
-        if extra_ingredient_ids:
-            placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
-            sql_extra_prices = f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) AS EXTRA_PRICE FROM INGREDIENTS WHERE ID IN ({placeholders});"
-            cur.execute(sql_extra_prices, tuple(extra_ingredient_ids))
-            extra_prices = {row[0]: row[1] for row in cur.fetchall()}
-            for item in items:
-                if 'extras' in item and item['extras']:
-                    for extra in item['extras']:
-                        order_total += extra_prices.get(extra['ingredient_id'], 0) * extra.get('quantity', 1)
-
-        # Valida desconto de pontos (sem debitar ainda)
-        if points_to_redeem and points_to_redeem > 0:
-            expected_discount = points_to_redeem / 10.0
-            if expected_discount > order_total:
-                return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
-
-        confirmation_code = _generate_confirmation_code()
-        # Cria o pedido usando IDENTITY e retorna o ID
-        sql_order = """
-            INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE)
-            VALUES (?, ?, 'pending', ?, ?, ?, ?) RETURNING ID;
-        """
-        cur.execute(sql_order, (
-            user_id,
-            address_id,
-            order_total,
-            payment_method,
-            notes,
-            confirmation_code
-        ))
-        new_order_id = cur.fetchone()[0]
-
-        # Debita pontos (se houver) e atualiza o total do pedido
-        if points_to_redeem and points_to_redeem > 0:
-            discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, new_order_id, cur)
-            new_total = max(0, float(order_total) - float(discount_amount))
-            cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, new_order_id))
-
-        for item in items:
-            product_id = item.get('product_id')
-            quantity = item.get('quantity')
-            unit_price = product_prices[product_id]
-
-            sql_item = "INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?) RETURNING ID;"
-            cur.execute(sql_item, (new_order_id, product_id, quantity, unit_price))
-            new_order_item_id = cur.fetchone()[0]
-
-            if 'extras' in item and item['extras']:
-                for extra in item['extras']:
-                    extra_id = extra['ingredient_id']
-                    extra_qty = extra.get('quantity', 1)
-                    extra_price = extra_prices[extra_id]
-                    sql_extra = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?);"
-                    cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_price))
-
-        conn.commit()
-
-        new_order_data = {"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}
-
-        # Notificação para agente de impressão (WebSocket)
+        conn = None
         try:
-            kitchen_ticket_json = format_order_for_kitchen_json(new_order_id)
-            if kitchen_ticket_json:
-                socketio.emit('new_kitchen_order', kitchen_ticket_json)
-        except Exception as e:
-            print(f"[WARN] Falha ao emitir evento de cozinha do pedido {new_order_id}: {e}")
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Validações de ingredientes e extras
+            _validate_ingredients_and_extras(items, cur)
+            
+            # Calcula total dos itens
+            order_total = _calculate_order_total(items, cur)
+            
+            # Valida resgate de pontos
+            _validate_points_redemption(points_to_redeem, order_total)
 
-        return (new_order_data, None, None)
+            # Cria o pedido
+            confirmation_code = _generate_confirmation_code()
+            sql_order = """
+                INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE)
+                VALUES (?, ?, 'pending', ?, ?, ?, ?) RETURNING ID;
+            """
+            cur.execute(sql_order, (user_id, address_id, order_total, payment_method, notes, confirmation_code))
+            new_order_id = cur.fetchone()[0]
 
-    except fdb.Error as e:
-        print(f"Erro ao criar pedido: {e}")
-        if conn: conn.rollback()
-        return (None, "DATABASE_ERROR", "Erro interno do servidor")
-    finally:
-        if conn: conn.close()
+            # Debita pontos se houver
+            if points_to_redeem and points_to_redeem > 0:
+                discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, new_order_id, cur)
+                new_total = max(0, float(order_total) - float(discount_amount))
+                cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, new_order_id))
+
+            # Adiciona itens ao pedido
+            _add_order_items(new_order_id, items, cur)
+            
+            conn.commit()
+            
+            # Notificação para cozinha
+            _notify_kitchen(new_order_id)
+            
+            return ({"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}, None, None)
+
+        except fdb.Error as e:
+            print(f"Erro ao criar pedido: {e}")
+            if conn: conn.rollback()
+            return (None, "DATABASE_ERROR", "Erro interno do servidor")
+        finally:
+            if conn: conn.close()
+            
+    except ValueError as e:
+        return (None, "VALIDATION_ERROR", str(e))
+    except Exception as e:
+        print(f"Erro inesperado ao criar pedido: {e}")
+        return (None, "UNKNOWN_ERROR", "Erro inesperado")
 
 def get_orders_by_user_id(user_id):
     """Busca o histórico de pedidos de um usuário específico."""
@@ -506,7 +565,8 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         
         # Valida desconto de pontos (sem debitar ainda)
         if points_to_redeem and points_to_redeem > 0:
-            expected_discount = points_to_redeem / 10.0
+            # 100 pontos = R$ 1,00 de desconto (conforme documentação)
+            expected_discount = points_to_redeem / 100.0
             if expected_discount > total_amount:
                 return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
         

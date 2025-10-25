@@ -1,6 +1,35 @@
 from ..database import get_db_connection
 import fdb
-from datetime import datetime
+
+def _validate_cart_id(cart_id):
+    """Valida se cart_id é um inteiro válido"""
+    if not isinstance(cart_id, int) or cart_id <= 0:
+        raise ValueError("cart_id deve ser um inteiro positivo")
+
+def _calculate_cart_totals(items):
+    """Calcula totais do carrinho de forma centralizada"""
+    total_items = sum(item["quantity"] for item in items)
+    subtotal = sum(item["item_subtotal"] for item in items)
+    
+    # Calcula taxas/fees e descontos
+    fees_percent = _get_setting_percent("CART_FEES_PERCENT", default=0.0)
+    taxes_percent = _get_setting_percent("CART_TAXES_PERCENT", default=0.0)
+    discount_percent = _get_setting_percent("CART_DISCOUNT_PERCENT", default=0.0)
+
+    fees = round(subtotal * (fees_percent / 100.0), 2)
+    taxes = round(subtotal * (taxes_percent / 100.0), 2)
+    discounts = round(subtotal * (discount_percent / 100.0), 2)
+    total = round(subtotal + fees + taxes - discounts, 2)
+    
+    return {
+        "total_items": total_items,
+        "subtotal": subtotal,
+        "fees": fees,
+        "taxes": taxes,
+        "discounts": discounts,
+        "total": total,
+        "is_empty": len(items) == 0
+    }
 
 def get_or_create_cart(user_id):
     """
@@ -56,6 +85,7 @@ def get_cart_items(cart_id):
     """
     conn = None
     try:
+        _validate_cart_id(cart_id)
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -65,7 +95,7 @@ def get_cart_items(cart_id):
                 ci.ID,
                 ci.PRODUCT_ID,
                 ci.QUANTITY,
-                ci.NOTES,
+                CAST(ci.NOTES AS VARCHAR(1000)) as NOTES,
                 p.NAME as PRODUCT_NAME,
                 p.PRICE as PRODUCT_PRICE,
                 p.DESCRIPTION as PRODUCT_DESCRIPTION,
@@ -142,6 +172,9 @@ def get_cart_items(cart_id):
     except fdb.Error as e:
         print(f"Erro ao buscar itens do carrinho: {e}")
         return []
+    except ValueError as e:
+        print(f"Erro de validação: {e}")
+        return []
     finally:
         if conn: conn.close()
 
@@ -188,16 +221,40 @@ def get_guest_cart_by_id(cart_id):
 
 def create_guest_cart():
     """
-    Cria um novo carrinho convidado (USER_ID = NULL)
+    Cria um novo carrinho convidado (USER_ID = NULL) ou reutiliza existente
     """
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO CARTS (USER_ID, IS_ACTIVE) VALUES (NULL, TRUE) RETURNING ID;")
-        cart_id = cur.fetchone()[0]
-        conn.commit()
-        return {"id": cart_id}
+        
+        # Verifica se já existe um carrinho de convidado ativo
+        cur.execute("SELECT ID FROM CARTS WHERE USER_ID IS NULL AND IS_ACTIVE = TRUE;")
+        existing_cart = cur.fetchone()
+        
+        if existing_cart:
+            # Reutiliza carrinho existente
+            return {"id": existing_cart[0]}
+        
+        # Se não existe, cria novo carrinho
+        # Usa uma abordagem que evita conflito de constraint
+        try:
+            cur.execute("INSERT INTO CARTS (USER_ID, IS_ACTIVE) VALUES (NULL, TRUE) RETURNING ID;")
+            cart_id = cur.fetchone()[0]
+            conn.commit()
+            return {"id": cart_id}
+        except fdb.Error as constraint_error:
+            # Se falhou por constraint, tenta buscar novamente (pode ter sido criado por outra thread)
+            if constraint_error.args[1] == -803:  # Violation of PRIMARY or UNIQUE KEY constraint
+                cur.execute("SELECT ID FROM CARTS WHERE USER_ID IS NULL AND IS_ACTIVE = TRUE;")
+                existing_cart = cur.fetchone()
+                if existing_cart:
+                    return {"id": existing_cart[0]}
+                else:
+                    raise constraint_error
+            else:
+                raise constraint_error
+        
     except fdb.Error as e:
         print(f"Erro ao criar carrinho convidado: {e}")
         if conn: conn.rollback()
@@ -210,17 +267,40 @@ def get_cart_summary(user_id):
     """
     Retorna o resumo completo do carrinho do usuário
     """
-    cart = get_or_create_cart(user_id)
-    if not cart:
-        return None
-    
-    items = get_cart_items(cart["id"])
+    try:
+        cart = get_or_create_cart(user_id)
+        if not cart:
+            return None
+        
+        items = get_cart_items(cart["id"])
+        if items is None:
+            return None
 
-    # Validação básica de disponibilidade (produto e extras disponíveis)
+        # Validação de disponibilidade
+        availability_alerts = _check_availability_alerts(items)
+        
+        # Calcula totais usando função centralizada
+        summary = _calculate_cart_totals(items)
+        summary["availability_alerts"] = availability_alerts
+        
+        return {
+            "cart": cart,
+            "items": items,
+            "summary": summary
+        }
+        
+    except Exception as e:
+        print(f"Erro ao calcular resumo do carrinho: {e}")
+        return None
+
+def _check_availability_alerts(items):
+    """Verifica alertas de disponibilidade de forma centralizada"""
     availability_alerts = []
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
         for item in items:
             # Disponibilidade de ingredientes base do produto
             cur.execute(
@@ -239,6 +319,7 @@ def get_cart_summary(user_id):
                         "ingredient_id": ing_id,
                         "issue": "ingredient_unavailable"
                     })
+            
             # Disponibilidade de extras
             for extra in item.get("extras", []):
                 cur.execute("SELECT IS_AVAILABLE FROM INGREDIENTS WHERE ID = ?", (extra["ingredient_id"],))
@@ -249,42 +330,12 @@ def get_cart_summary(user_id):
                         "ingredient_id": extra["ingredient_id"],
                         "issue": "extra_unavailable"
                     })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Erro ao verificar disponibilidade: {e}")
     finally:
-        try:
-            if conn: conn.close()
-        except Exception:
-            pass
+        if conn: conn.close()
     
-    # Calcula totais
-    total_items = sum(item["quantity"] for item in items)
-    subtotal = sum(item["item_subtotal"] for item in items)
-
-    # Calcula taxas/fees e descontos (simples; pode ser parametrizado em APP_SETTINGS)
-    fees_percent = _get_setting_percent("CART_FEES_PERCENT", default=0.0)
-    taxes_percent = _get_setting_percent("CART_TAXES_PERCENT", default=0.0)
-    discount_percent = _get_setting_percent("CART_DISCOUNT_PERCENT", default=0.0)
-
-    fees = round(subtotal * (fees_percent / 100.0), 2)
-    taxes = round(subtotal * (taxes_percent / 100.0), 2)
-    discounts = round(subtotal * (discount_percent / 100.0), 2)
-    total = round(subtotal + fees + taxes - discounts, 2)
-    
-    return {
-        "cart": cart,
-        "items": items,
-        "summary": {
-            "total_items": total_items,
-            "subtotal": subtotal,
-            "fees": fees,
-            "taxes": taxes,
-            "discounts": discounts,
-            "total": total,
-            "is_empty": len(items) == 0,
-            "availability_alerts": availability_alerts
-        }
-    }
+    return availability_alerts
 
 
 def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
@@ -310,6 +361,11 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
         if not product:
             return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado ou inativo")
         
+        # Verifica estoque suficiente para o produto
+        stock_check = _check_product_stock_availability(cur, product_id, quantity)
+        if not stock_check[0]:
+            return (False, "INSUFFICIENT_STOCK", stock_check[1])
+        
         # Verifica e valida extras conforme regras do produto (PORTIONS=0, min/max)
         rules = _get_product_rules(cur, product_id)
         if extras:
@@ -325,6 +381,11 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
                     return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+                
+                # Verifica estoque suficiente para extras
+                extra_stock_check = _check_ingredient_stock_availability(cur, ing_id, qty * quantity)
+                if not extra_stock_check[0]:
+                    return (False, "INSUFFICIENT_STOCK", f"Estoque insuficiente para extra: {extra_stock_check[1]}")
 
         # Verifica se já existe um item idêntico (mesmo produto, mesmos extras e mesmas notas)
         existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "")
@@ -384,6 +445,11 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
         if not product:
             return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado ou inativo")
 
+        # Verifica estoque suficiente para o produto
+        stock_check = _check_product_stock_availability(cur, product_id, quantity)
+        if not stock_check[0]:
+            return (False, "INSUFFICIENT_STOCK", stock_check[1])
+
         # Verifica e valida extras conforme regras do produto
         rules = _get_product_rules(cur, product_id)
         if extras:
@@ -399,6 +465,11 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
                     return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+                
+                # Verifica estoque suficiente para extras
+                extra_stock_check = _check_ingredient_stock_availability(cur, ing_id, qty * quantity)
+                if not extra_stock_check[0]:
+                    return (False, "INSUFFICIENT_STOCK", f"Estoque insuficiente para extra: {extra_stock_check[1]}")
 
         # Verifica item idêntico
         existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "")
@@ -461,7 +532,7 @@ def find_identical_cart_item(cart_id, product_id, extras, notes):
         cur = conn.cursor()
         
         # Busca itens do mesmo produto
-        sql = "SELECT ID, NOTES FROM CART_ITEMS WHERE CART_ID = ? AND PRODUCT_ID = ?;"
+        sql = "SELECT ID, CAST(NOTES AS VARCHAR(1000)) FROM CART_ITEMS WHERE CART_ID = ? AND PRODUCT_ID = ?;"
         cur.execute(sql, (cart_id, product_id))
         items = cur.fetchall()
         
@@ -661,6 +732,70 @@ def _get_product_rules(cur, product_id):
     return rules
 
 
+def _check_product_stock_availability(cur, product_id, quantity):
+    """
+    Verifica se há estoque suficiente para um produto.
+    Retorna (is_available, message)
+    """
+    try:
+        # Busca ingredientes do produto com suas porções
+        cur.execute("""
+            SELECT i.ID, i.NAME, pi.PORTIONS, i.CURRENT_STOCK, i.STOCK_UNIT
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ? AND i.IS_AVAILABLE = TRUE
+        """, (product_id,))
+        
+        ingredients = cur.fetchall()
+        if not ingredients:
+            return (True, "Produto sem ingredientes cadastrados")
+        
+        for ing_id, name, portions, current_stock, stock_unit in ingredients:
+            required_quantity = float(portions or 0) * quantity
+            current_stock = float(current_stock or 0)
+            
+            if current_stock < required_quantity:
+                return (False, f"Estoque insuficiente de '{name}'. Necessário: {required_quantity:.2f} {stock_unit}, Disponível: {current_stock:.2f} {stock_unit}")
+        
+        return (True, "Estoque disponível")
+        
+    except Exception as e:
+        print(f"Erro ao verificar estoque do produto: {e}")
+        return (False, "Erro ao verificar disponibilidade de estoque")
+
+
+def _check_ingredient_stock_availability(cur, ingredient_id, quantity):
+    """
+    Verifica se há estoque suficiente para um ingrediente específico.
+    Retorna (is_available, message)
+    """
+    try:
+        cur.execute("""
+            SELECT NAME, CURRENT_STOCK, STOCK_UNIT, IS_AVAILABLE
+            FROM INGREDIENTS
+            WHERE ID = ?
+        """, (ingredient_id,))
+        
+        result = cur.fetchone()
+        if not result:
+            return (False, "Ingrediente não encontrado")
+        
+        name, current_stock, stock_unit, is_available = result
+        
+        if not is_available:
+            return (False, f"Ingrediente '{name}' não está disponível")
+        
+        current_stock = float(current_stock or 0)
+        if current_stock < quantity:
+            return (False, f"Estoque insuficiente de '{name}'. Necessário: {quantity:.2f} {stock_unit}, Disponível: {current_stock:.2f} {stock_unit}")
+        
+        return (True, "Estoque disponível")
+        
+    except Exception as e:
+        print(f"Erro ao verificar estoque do ingrediente: {e}")
+        return (False, "Erro ao verificar disponibilidade de estoque")
+
+
 def remove_cart_item(user_id, cart_item_id):
     """
     Remove um item do carrinho
@@ -796,6 +931,47 @@ def get_cart_summary_by_cart_id(cart_id):
     if items is None:
         return None
 
+    # Validação básica de disponibilidade (produto e extras disponíveis)
+    availability_alerts = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        for item in items:
+            # Disponibilidade de ingredientes base do produto
+            cur.execute(
+                """
+                SELECT i.ID, i.IS_AVAILABLE
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
+                WHERE pi.PRODUCT_ID = ?
+                """,
+                (item["product_id"],)
+            )
+            for ing_id, is_av in cur.fetchall():
+                if not is_av:
+                    availability_alerts.append({
+                        "product_id": item["product_id"],
+                        "ingredient_id": ing_id,
+                        "issue": "ingredient_unavailable"
+                    })
+            # Disponibilidade de extras
+            for extra in item.get("extras", []):
+                cur.execute("SELECT IS_AVAILABLE FROM INGREDIENTS WHERE ID = ?", (extra["ingredient_id"],))
+                row = cur.fetchone()
+                if row and row[0] is False:
+                    availability_alerts.append({
+                        "product_id": item["product_id"],
+                        "ingredient_id": extra["ingredient_id"],
+                        "issue": "extra_unavailable"
+                    })
+    except Exception:
+        pass
+    finally:
+        try:
+            if conn: conn.close()
+        except Exception:
+            pass
+
     # Calcula totais
     total_items = sum(item["quantity"] for item in items)
     subtotal = sum(item["item_subtotal"] for item in items)
@@ -820,9 +996,90 @@ def get_cart_summary_by_cart_id(cart_id):
             "discounts": discounts,
             "total": total,
             "is_empty": len(items) == 0,
-            "availability_alerts": []
+            "availability_alerts": availability_alerts
         }
     }
+
+
+def validate_guest_cart_for_order(cart_id):
+    """
+    Valida se um carrinho de convidado pode ser convertido em pedido.
+    Verifica disponibilidade de produtos e ingredientes.
+    Retorna (is_valid, alerts, total_amount)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se o carrinho existe e está ativo
+        cur.execute("SELECT ID FROM CARTS WHERE ID = ? AND USER_ID IS NULL AND IS_ACTIVE = TRUE;", (cart_id,))
+        if not cur.fetchone():
+            return (False, ["Carrinho não encontrado ou inativo"], 0.0)
+        
+        # Busca itens do carrinho
+        items = get_cart_items(cart_id)
+        if not items:
+            return (False, ["Carrinho vazio"], 0.0)
+        
+        alerts = []
+        total_amount = 0.0
+        
+        for item in items:
+            product_id = item["product_id"]
+            quantity = item["quantity"]
+            
+            # Verifica se produto está ativo
+            cur.execute("SELECT IS_ACTIVE, PRICE FROM PRODUCTS WHERE ID = ?;", (product_id,))
+            product_row = cur.fetchone()
+            if not product_row or not product_row[0]:
+                alerts.append(f"Produto {item['product']['name']} não está mais disponível")
+                continue
+            
+            product_price = float(product_row[1]) if product_row[1] else 0.0
+            item_total = product_price * quantity
+            
+            # Verifica ingredientes base do produto
+            cur.execute(
+                """
+                SELECT i.ID, i.NAME, i.IS_AVAILABLE
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
+                WHERE pi.PRODUCT_ID = ?
+                """,
+                (product_id,)
+            )
+            for ing_id, ing_name, is_available in cur.fetchall():
+                if not is_available:
+                    alerts.append(f"Ingrediente '{ing_name}' do produto '{item['product']['name']}' está indisponível")
+            
+            # Verifica extras
+            for extra in item.get("extras", []):
+                extra_id = extra["ingredient_id"]
+                extra_qty = extra["quantity"]
+                
+                cur.execute("SELECT NAME, IS_AVAILABLE, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ?;", (extra_id,))
+                extra_row = cur.fetchone()
+                if not extra_row:
+                    alerts.append(f"Extra {extra_id} não encontrado")
+                    continue
+                
+                extra_name, is_available, extra_price = extra_row
+                if not is_available:
+                    alerts.append(f"Extra '{extra_name}' está indisponível")
+                else:
+                    item_total += float(extra_price) * extra_qty
+            
+            total_amount += item_total
+        
+        is_valid = len(alerts) == 0
+        return (is_valid, alerts, total_amount)
+        
+    except fdb.Error as e:
+        print(f"Erro ao validar carrinho de convidado: {e}")
+        return (False, ["Erro interno do servidor"], 0.0)
+    finally:
+        if conn: conn.close()
 
 
 def claim_guest_cart(guest_cart_id, user_id):
@@ -858,7 +1115,7 @@ def claim_guest_cart(guest_cart_id, user_id):
         user_cart_id = user_cart_row[0]
 
         # Copia itens do convidado para o carrinho do usuário (mescla por item idêntico)
-        cur.execute("SELECT ID, PRODUCT_ID, QUANTITY, NOTES FROM CART_ITEMS WHERE CART_ID = ?;", (guest_cart_id,))
+        cur.execute("SELECT ID, PRODUCT_ID, QUANTITY, CAST(NOTES AS VARCHAR(1000)) FROM CART_ITEMS WHERE CART_ID = ?;", (guest_cart_id,))
         guest_items = cur.fetchall()
         for item_id, product_id, quantity, notes in guest_items:
             # Busca extras do item convidado

@@ -1,6 +1,40 @@
 import fdb  
 from datetime import date  
-from ..database import get_db_connection  
+from ..database import get_db_connection
+
+def _validate_points(points):
+    """Valida se pontos é um valor válido"""
+    if not isinstance(points, (int, float)) or points < 0:
+        raise ValueError("Pontos devem ser um número não negativo")
+
+def _expire_points_if_needed(user_id, cur):
+    """Centraliza lógica de expiração de pontos"""
+    try:
+        cur.execute("""
+            SELECT ACCUMULATED_POINTS, SPENT_POINTS, POINTS_EXPIRATION_DATE
+            FROM LOYALTY_POINTS WHERE USER_ID = ?
+        """, (user_id,))
+        account = cur.fetchone()
+        
+        if not account:
+            return 0
+            
+        accumulated, spent, expiration_date = account
+        current_balance = accumulated - spent
+        
+        if expiration_date and expiration_date < date.today() and current_balance > 0:
+            points_to_expire = current_balance
+            cur.execute("UPDATE LOYALTY_POINTS SET SPENT_POINTS = ACCUMULATED_POINTS WHERE USER_ID = ?;", (user_id,))
+            cur.execute("""
+                INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, POINTS, REASON) 
+                VALUES (?, ?, 'Pontos expirados por inatividade');
+            """, (user_id, -points_to_expire))
+            return points_to_expire
+        
+        return 0
+    except Exception as e:
+        print(f"Erro ao verificar expiração de pontos: {e}")
+        return 0  
 
 def create_loyalty_account_if_not_exists(user_id, cur):  
     try:  
@@ -24,20 +58,29 @@ def create_loyalty_account_if_not_exists(user_id, cur):
         raise e  
 
 def earn_points_for_order(user_id, order_id, total_amount, cur):  
-    create_loyalty_account_if_not_exists(user_id, cur)  
-    points_to_earn = int(total_amount)  
-    sql_update_account = """
-        UPDATE LOYALTY_POINTS
-        SET 
-            ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
-            POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
-        WHERE USER_ID = ?;
-    """  
-    cur.execute(sql_update_account, (points_to_earn, user_id))  
-    sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"  
-    reason = f"Pontos ganhos no pedido #{order_id}"
-    cur.execute(sql_add_history, (user_id, order_id, points_to_earn, reason))  
-    print(f"{points_to_earn} pontos ganhos e validade renovada para o usuário {user_id}.")  
+    try:
+        _validate_points(total_amount)
+        create_loyalty_account_if_not_exists(user_id, cur)  
+        
+        # R$ 1,00 = 10 pontos Royal (conforme documentação)
+        points_to_earn = int(total_amount * 10)  
+        
+        sql_update_account = """
+            UPDATE LOYALTY_POINTS
+            SET 
+                ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
+                POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
+            WHERE USER_ID = ?;
+        """  
+        cur.execute(sql_update_account, (points_to_earn, user_id))  
+        
+        sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"  
+        reason = f"Pontos ganhos no pedido #{order_id}"
+        cur.execute(sql_add_history, (user_id, order_id, points_to_earn, reason))  
+        print(f"{points_to_earn} pontos ganhos e validade renovada para o usuário {user_id}.")  
+    except Exception as e:
+        print(f"Erro ao ganhar pontos: {e}")
+        raise e  
 
 def add_welcome_points(user_id, cur):
     """Adiciona 100 pontos de boas-vindas para novos clientes"""
@@ -73,20 +116,19 @@ def get_loyalty_balance(user_id):
         cur = conn.cursor()  
         create_loyalty_account_if_not_exists(user_id, cur)  
         conn.commit()  
+        
         sql_get = "SELECT ACCUMULATED_POINTS, SPENT_POINTS, POINTS_EXPIRATION_DATE FROM LOYALTY_POINTS WHERE USER_ID = ?;"  
         cur.execute(sql_get, (user_id,))  
         account = cur.fetchone()  
         accumulated, spent, expiration_date = account or (0, 0, None)  
-        print(f"Saldo de pontos: {accumulated}, {spent}, {expiration_date}")
-        current_balance = accumulated - spent  
-        if expiration_date and expiration_date < date.today() and current_balance > 0:  
-            points_to_expire = current_balance  
-            sql_expire = "UPDATE LOYALTY_POINTS SET SPENT_POINTS = ACCUMULATED_POINTS WHERE USER_ID = ?;"  
-            cur.execute(sql_expire, (user_id,))  
-            sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, POINTS, REASON) VALUES (?, ?, 'Pontos expirados por inatividade');"  
-            cur.execute(sql_add_history, (user_id, -points_to_expire))  
-            conn.commit()  
+        
+        # Verifica expiração
+        expired_points = _expire_points_if_needed(user_id, cur)
+        if expired_points > 0:
+            conn.commit()
             return {"accumulated_points": accumulated, "spent_points": accumulated, "current_balance": 0}  
+        
+        current_balance = accumulated - spent  
         return {"accumulated_points": accumulated, "spent_points": spent, "current_balance": current_balance}  
     except fdb.Error as e:  
         print(f"Erro ao buscar saldo de pontos: {e}")  
@@ -96,19 +138,29 @@ def get_loyalty_balance(user_id):
         if conn: conn.close()
 
 def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):  
-    balance_data = get_loyalty_balance(user_id)  
-    current_balance = balance_data.get("current_balance", 0)  
-    if current_balance < points_to_redeem:  
-        raise ValueError(
-            f"Saldo de pontos insuficiente. Saldo atual: {current_balance}, Pontos para resgate: {points_to_redeem}")  
-    sql_update_account = "UPDATE LOYALTY_POINTS SET SPENT_POINTS = SPENT_POINTS + ? WHERE USER_ID = ?;"  
-    cur.execute(sql_update_account, (points_to_redeem, user_id))  
-    sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"  
-    reason = f"Resgate de pontos no pedido #{order_id}"
-    cur.execute(sql_add_history, (user_id, order_id, -points_to_redeem, reason))  
-    discount_amount = points_to_redeem / 10.0  
-    print(f"{points_to_redeem} pontos resgatados pelo usuário {user_id} por R${discount_amount:.2f} de desconto.")  
-    return discount_amount  
+    try:
+        _validate_points(points_to_redeem)
+        
+        balance_data = get_loyalty_balance(user_id)  
+        current_balance = balance_data.get("current_balance", 0)  
+        
+        if current_balance < points_to_redeem:  
+            raise ValueError(f"Saldo de pontos insuficiente. Saldo atual: {current_balance}, Pontos para resgate: {points_to_redeem}")  
+        
+        sql_update_account = "UPDATE LOYALTY_POINTS SET SPENT_POINTS = SPENT_POINTS + ? WHERE USER_ID = ?;"  
+        cur.execute(sql_update_account, (points_to_redeem, user_id))  
+        
+        sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"  
+        reason = f"Resgate de pontos no pedido #{order_id}"
+        cur.execute(sql_add_history, (user_id, order_id, -points_to_redeem, reason))  
+        
+        # 100 pontos = R$ 1,00 de desconto (conforme documentação)
+        discount_amount = points_to_redeem / 100.0  
+        print(f"{points_to_redeem} pontos resgatados pelo usuário {user_id} por R${discount_amount:.2f} de desconto.")  
+        return discount_amount  
+    except Exception as e:
+        print(f"Erro ao resgatar pontos: {e}")
+        raise e  
 
 def get_loyalty_history(user_id):  
     conn = None  

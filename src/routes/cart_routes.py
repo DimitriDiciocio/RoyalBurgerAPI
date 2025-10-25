@@ -5,6 +5,31 @@ from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_req
 
 cart_bp = Blueprint('cart', __name__)
 
+def _validate_extras(extras):
+    """Valida extras de forma centralizada"""
+    if not isinstance(extras, list):
+        return False, "extras deve ser uma lista"
+    
+    for extra in extras:
+        if not isinstance(extra, dict):
+            return False, "Cada extra deve ser um objeto"
+        if not extra.get('ingredient_id'):
+            return False, "ingredient_id é obrigatório em cada extra"
+        extra_quantity = extra.get('quantity', 1)
+        if not isinstance(extra_quantity, int) or extra_quantity <= 0:
+            return False, "quantity do extra deve ser um número inteiro positivo"
+    
+    return True, None
+
+def _validate_guest_cart_id(guest_cart_id):
+    """Valida guest_cart_id"""
+    if guest_cart_id is not None:
+        try:
+            int(guest_cart_id)
+        except (ValueError, TypeError):
+            return False, "guest_cart_id deve ser um número inteiro válido"
+    return True, None
+
 @cart_bp.route('/me', methods=['GET'])
 @jwt_required()
 def get_cart_route():
@@ -45,40 +70,24 @@ def add_item_to_cart_route():
         extras = data.get('extras', [])
         notes = data.get('notes')
         
-        # Validações
+        # Validações básicas
         if not product_id:
             return jsonify({"error": "product_id é obrigatório"}), 400
         
         if not isinstance(quantity, int) or quantity <= 0:
             return jsonify({"error": "quantity deve ser um número inteiro positivo"}), 400
         
-        if not isinstance(extras, list):
-            return jsonify({"error": "extras deve ser uma lista"}), 400
-        
         # Valida extras
-        for extra in extras:
-            if not isinstance(extra, dict):
-                return jsonify({"error": "Cada extra deve ser um objeto"}), 400
-            
-            if not extra.get('ingredient_id'):
-                return jsonify({"error": "ingredient_id é obrigatório em cada extra"}), 400
-            
-            extra_quantity = extra.get('quantity', 1)
-            if not isinstance(extra_quantity, int) or extra_quantity <= 0:
-                return jsonify({"error": "quantity do extra deve ser um número inteiro positivo"}), 400
+        is_valid, error_msg = _validate_extras(extras)
+        if not is_valid:
+            return jsonify({"error": error_msg}), 400
         
         # Adiciona item ao carrinho
         success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes)
         
         if not success:
-            if error_code == "PRODUCT_NOT_FOUND":
-                return jsonify({"error": message}), 404
-            elif error_code == "CART_ERROR":
-                return jsonify({"error": message}), 500
-            elif error_code == "DATABASE_ERROR":
-                return jsonify({"error": message}), 500
-            else:
-                return jsonify({"error": "Erro ao adicionar item ao carrinho"}), 500
+            status_code = 404 if error_code == "PRODUCT_NOT_FOUND" else 500
+            return jsonify({"error": message}), status_code
         
         # Retorna o estado atualizado do carrinho
         cart_summary = cart_service.get_cart_summary(user_id)
@@ -100,6 +109,8 @@ def smart_add_item_route():
     Se autenticado: ignora guest_cart_id e adiciona no carrinho do usuário.
     Se não autenticado e guest_cart_id presente: adiciona no carrinho convidado.
     Se não autenticado e sem guest_cart_id: cria carrinho convidado e adiciona.
+    
+    Resposta sempre inclui cart_id para sincronização com localStorage.
     """
     try:
         data = request.get_json() or {}
@@ -110,20 +121,22 @@ def smart_add_item_route():
         notes = data.get('notes')
         guest_cart_id = data.get('guest_cart_id')
 
+        # Validações básicas
         if not product_id:
             return jsonify({"error": "product_id é obrigatório"}), 400
+        
         if not isinstance(quantity, int) or quantity <= 0:
             return jsonify({"error": "quantity deve ser um número inteiro positivo"}), 400
-        if not isinstance(extras, list):
-            return jsonify({"error": "extras deve ser uma lista"}), 400
-        for extra in extras:
-            if not isinstance(extra, dict):
-                return jsonify({"error": "Cada extra deve ser um objeto"}), 400
-            if not extra.get('ingredient_id'):
-                return jsonify({"error": "ingredient_id é obrigatório em cada extra"}), 400
-            extra_quantity = extra.get('quantity', 1)
-            if not isinstance(extra_quantity, int) or extra_quantity <= 0:
-                return jsonify({"error": "quantity do extra deve ser um número inteiro positivo"}), 400
+        
+        # Valida extras
+        is_valid, error_msg = _validate_extras(extras)
+        if not is_valid:
+            return jsonify({"error": error_msg}), 400
+        
+        # Valida guest_cart_id
+        is_valid, error_msg = _validate_guest_cart_id(guest_cart_id)
+        if not is_valid:
+            return jsonify({"error": error_msg}), 400
 
         # Tenta validar JWT de forma opcional
         user_id = None
@@ -136,22 +149,31 @@ def smart_add_item_route():
         if user_id:
             success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes)
             if not success:
-                if error_code == "PRODUCT_NOT_FOUND":
-                    return jsonify({"error": message}), 404
-                return jsonify({"error": message or "Erro ao adicionar item"}), 500
+                status_code = 404 if error_code == "PRODUCT_NOT_FOUND" else 500
+                return jsonify({"error": message or "Erro ao adicionar item"}), status_code
+            
             cart_summary = cart_service.get_cart_summary(user_id)
-            return jsonify({"message": message, "cart": cart_summary}), 201
+            return jsonify({
+                "message": message, 
+                "cart": cart_summary,
+                "cart_id": cart_summary["cart"]["id"],
+                "is_authenticated": True
+            }), 201
 
         # Convidado com guest_cart_id informado
         if guest_cart_id:
             success, error_code, message = cart_service.add_item_to_cart_by_cart_id(guest_cart_id, product_id, quantity, extras, notes)
             if not success:
-                if error_code in ("PRODUCT_NOT_FOUND", "CART_NOT_FOUND"):
-                    return jsonify({"error": message}), 404
-                return jsonify({"error": message or "Erro ao adicionar item"}), 500
-            # Opcionalmente retorna resumo
+                status_code = 404 if error_code in ("PRODUCT_NOT_FOUND", "CART_NOT_FOUND") else 500
+                return jsonify({"error": message or "Erro ao adicionar item"}), status_code
+            
             cart_summary = cart_service.get_cart_summary_by_cart_id(guest_cart_id)
-            return jsonify({"message": message, "cart": cart_summary}), 201
+            return jsonify({
+                "message": message, 
+                "cart": cart_summary,
+                "cart_id": guest_cart_id,
+                "is_authenticated": False
+            }), 201
 
         # Convidado sem guest_cart_id: cria carrinho e adiciona, retornando o novo ID
         guest_cart = cart_service.create_guest_cart()
@@ -162,7 +184,12 @@ def smart_add_item_route():
         if not success:
             return jsonify({"error": message or "Erro ao adicionar item"}), 500
         cart_summary = cart_service.get_cart_summary_by_cart_id(new_cart_id)
-        return jsonify({"message": message, "cart_id": new_cart_id, "cart": cart_summary}), 201
+        return jsonify({
+            "message": message, 
+            "cart_id": new_cart_id, 
+            "cart": cart_summary,
+            "is_authenticated": False
+        }), 201
     except Exception as e:
         print(f"Erro no smart add: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500
@@ -200,7 +227,12 @@ def smart_update_item_route(cart_item_id):
                 status = 404 if error_code in ("ITEM_NOT_FOUND",) else (400 if error_code == "INVALID_QUANTITY" else 500)
                 return jsonify({"error": message}), status
             cart_summary = cart_service.get_cart_summary(user_id)
-            return jsonify({"message": message, "cart": cart_summary}), 200
+            return jsonify({
+                "message": message, 
+                "cart": cart_summary,
+                "cart_id": cart_summary["cart"]["id"],
+                "is_authenticated": True
+            }), 200
 
         if not guest_cart_id:
             return jsonify({"error": "guest_cart_id é obrigatório para convidados"}), 400
@@ -209,7 +241,12 @@ def smart_update_item_route(cart_item_id):
             status = 404 if error_code in ("ITEM_NOT_FOUND",) else (400 if error_code == "INVALID_QUANTITY" else 500)
             return jsonify({"error": message}), status
         cart_summary = cart_service.get_cart_summary_by_cart_id(guest_cart_id)
-        return jsonify({"message": message, "cart": cart_summary}), 200
+        return jsonify({
+            "message": message, 
+            "cart": cart_summary,
+            "cart_id": guest_cart_id,
+            "is_authenticated": False
+        }), 200
     except Exception as e:
         print(f"Erro ao atualizar item (smart): {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500
@@ -237,7 +274,12 @@ def smart_remove_item_route(cart_item_id):
                 status = 404 if error_code == "ITEM_NOT_FOUND" else 500
                 return jsonify({"error": message}), status
             cart_summary = cart_service.get_cart_summary(user_id)
-            return jsonify({"message": message, "cart": cart_summary}), 200
+            return jsonify({
+                "message": message, 
+                "cart": cart_summary,
+                "cart_id": cart_summary["cart"]["id"],
+                "is_authenticated": True
+            }), 200
 
         if not guest_cart_id:
             return jsonify({"error": "guest_cart_id é obrigatório para convidados"}), 400
@@ -246,7 +288,12 @@ def smart_remove_item_route(cart_item_id):
             status = 404 if error_code == "ITEM_NOT_FOUND" else 500
             return jsonify({"error": message}), status
         cart_summary = cart_service.get_cart_summary_by_cart_id(guest_cart_id)
-        return jsonify({"message": message, "cart": cart_summary}), 200
+        return jsonify({
+            "message": message, 
+            "cart": cart_summary,
+            "cart_id": guest_cart_id,
+            "is_authenticated": False
+        }), 200
     except Exception as e:
         print(f"Erro ao remover item (smart): {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500
@@ -416,4 +463,162 @@ def validate_cart_route():
         }), 200
     except Exception as e:
         print(f"Erro ao validar carrinho: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@cart_bp.route('/guest/<int:cart_id>', methods=['GET'])
+def get_guest_cart_route(cart_id):
+    """
+    Busca carrinho de convidado por ID.
+    Útil para sincronizar dados do localStorage com o servidor.
+    """
+    try:
+        cart_summary = cart_service.get_cart_summary_by_cart_id(cart_id)
+        if not cart_summary:
+            return jsonify({"error": "Carrinho não encontrado"}), 404
+        
+        return jsonify({
+            "cart": cart_summary,
+            "cart_id": cart_id,
+            "is_authenticated": False
+        }), 200
+    except Exception as e:
+        print(f"Erro ao buscar carrinho de convidado: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@cart_bp.route('/guest/<int:cart_id>/validate', methods=['GET'])
+def validate_guest_cart_route(cart_id):
+    """
+    Valida carrinho de convidado: disponibilidade e regras básicas.
+    """
+    try:
+        cart_summary = cart_service.get_cart_summary_by_cart_id(cart_id)
+        if not cart_summary:
+            return jsonify({"error": "Carrinho não encontrado"}), 404
+        
+        return jsonify({
+            "availability_alerts": cart_summary["summary"].get("availability_alerts", [])
+        }), 200
+    except Exception as e:
+        print(f"Erro ao validar carrinho de convidado: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@cart_bp.route('/guest/<int:cart_id>/validate-for-order', methods=['GET'])
+def validate_guest_cart_for_order_route(cart_id):
+    """
+    Valida se carrinho de convidado pode ser convertido em pedido.
+    Verifica disponibilidade completa de produtos e ingredientes.
+    """
+    try:
+        is_valid, alerts, total_amount = cart_service.validate_guest_cart_for_order(cart_id)
+        
+        return jsonify({
+            "is_valid": is_valid,
+            "alerts": alerts,
+            "total_amount": total_amount,
+            "cart_id": cart_id
+        }), 200
+    except Exception as e:
+        print(f"Erro ao validar carrinho para pedido: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@cart_bp.route('/claim', methods=['POST'])
+@jwt_required()
+def claim_guest_cart_route():
+    """
+    Reivindica um carrinho de convidado para o usuário logado.
+    Útil quando o usuário faz login e tem itens no localStorage.
+    """
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json() or {}
+        guest_cart_id = data.get('guest_cart_id')
+        
+        if not guest_cart_id:
+            return jsonify({"error": "guest_cart_id é obrigatório"}), 400
+        
+        success, error_code, message = cart_service.claim_guest_cart(guest_cart_id, user_id)
+        
+        if not success:
+            if error_code == "CART_NOT_FOUND":
+                return jsonify({"error": message}), 404
+            elif error_code == "CONFLICT":
+                return jsonify({"error": message}), 409
+            else:
+                return jsonify({"error": message or "Erro ao reivindicar carrinho"}), 500
+        
+        # Retorna o carrinho atualizado do usuário
+        cart_summary = cart_service.get_cart_summary(user_id)
+        return jsonify({
+            "message": message,
+            "cart": cart_summary,
+            "cart_id": cart_summary["cart"]["id"],
+            "is_authenticated": True
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao reivindicar carrinho: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@cart_bp.route('/sync', methods=['POST'])
+@jwt_required()
+def sync_cart_route():
+    """
+    Sincroniza itens do localStorage com o carrinho do usuário logado.
+    Útil quando o usuário faz login e quer manter itens do localStorage.
+    """
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json() or {}
+        local_cart_items = data.get('items', [])
+        
+        if not local_cart_items:
+            return jsonify({"error": "Nenhum item para sincronizar"}), 400
+        
+        # Adiciona cada item do localStorage ao carrinho do usuário
+        synced_items = []
+        errors = []
+        
+        for item in local_cart_items:
+            product_id = item.get('product_id')
+            quantity = item.get('quantity', 1)
+            extras = item.get('extras', [])
+            notes = item.get('notes', '')
+            
+            if not product_id:
+                errors.append("Item sem product_id ignorado")
+                continue
+            
+            success, error_code, message = cart_service.add_item_to_cart(
+                user_id, product_id, quantity, extras, notes
+            )
+            
+            if success:
+                synced_items.append({
+                    "product_id": product_id,
+                    "quantity": quantity,
+                    "extras": extras,
+                    "notes": notes
+                })
+            else:
+                errors.append(f"Erro ao adicionar produto {product_id}: {message}")
+        
+        # Retorna o carrinho atualizado
+        cart_summary = cart_service.get_cart_summary(user_id)
+        
+        return jsonify({
+            "message": f"Sincronização concluída. {len(synced_items)} itens adicionados.",
+            "synced_items": synced_items,
+            "errors": errors,
+            "cart": cart_summary,
+            "cart_id": cart_summary["cart"]["id"],
+            "is_authenticated": True
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao sincronizar carrinho: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500

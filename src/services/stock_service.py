@@ -1,12 +1,19 @@
 import fdb
 from ..database import get_db_connection
 
+def _validate_ingredient_id(ingredient_id):
+    """Valida se ingredient_id é um inteiro válido"""
+    if not isinstance(ingredient_id, int) or ingredient_id <= 0:
+        raise ValueError("ingredient_id deve ser um inteiro positivo")
+
+def _validate_adjustment_amount(adjustment_amount):
+    """Valida se adjustment_amount é um número válido"""
+    if not isinstance(adjustment_amount, (int, float)):
+        raise ValueError("adjustment_amount deve ser um número")
+
 
 def deduct_stock_for_order(order_id):
-    """
-    Deduz o estoque dos ingredientes baseado nos produtos do pedido.
-    Retorna (sucesso, error_code, mensagem)
-    """
+    """Deduz o estoque dos ingredientes baseado nos produtos do pedido"""
     conn = None
     try:
         conn = get_db_connection()
@@ -23,99 +30,19 @@ def deduct_stock_for_order(order_id):
         if not order_items:
             return (True, None, "Pedido sem itens")
         
-        # Dicionário para acumular quantidades de ingredientes
-        ingredient_deductions = {}
-        
-        # Processa cada item do pedido
-        for product_id, quantity in order_items:
-            # Busca ingredientes do produto
-            cur.execute("""
-                SELECT INGREDIENT_ID, PORTIONS 
-                FROM PRODUCT_INGREDIENTS 
-                WHERE PRODUCT_ID = ?
-            """, (product_id,))
-            product_ingredients = cur.fetchall()
-            
-            # Adiciona ingredientes base do produto
-            for ingredient_id, portions in product_ingredients:
-                total_needed = float(portions or 0) * quantity
-                if ingredient_id in ingredient_deductions:
-                    ingredient_deductions[ingredient_id] += total_needed
-                else:
-                    ingredient_deductions[ingredient_id] = total_needed
-            
-            # Busca ingredientes extras do item
-            cur.execute("""
-                SELECT INGREDIENT_ID, QUANTITY 
-                FROM ORDER_ITEM_EXTRAS 
-                WHERE ORDER_ITEM_ID = (
-                    SELECT ID FROM ORDER_ITEMS 
-                    WHERE ORDER_ID = ? AND PRODUCT_ID = ?
-                )
-            """, (order_id, product_id))
-            extras = cur.fetchall()
-            
-            # Adiciona ingredientes extras
-            for ingredient_id, extra_quantity in extras:
-                total_extra = extra_quantity * quantity
-                if ingredient_id in ingredient_deductions:
-                    ingredient_deductions[ingredient_id] += total_extra
-                else:
-                    ingredient_deductions[ingredient_id] = total_extra
+        # Calcula deduções necessárias
+        ingredient_deductions = _calculate_ingredient_deductions(order_id, order_items, cur)
         
         # Executa as deduções de estoque
-        updated_ingredients = []
-        for ingredient_id, deduction_amount in ingredient_deductions.items():
-            # Busca estoque atual e limite mínimo
-            cur.execute("""
-                SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME
-                FROM INGREDIENTS 
-                WHERE ID = ?
-            """, (ingredient_id,))
-            result = cur.fetchone()
-            
-            if not result:
-                continue
-                
-            current_stock, min_threshold, current_status, ingredient_name = result
-            
-            # Verifica se há estoque suficiente
-            if current_stock < deduction_amount:
-                return (False, "INSUFFICIENT_STOCK", 
-                       f"Estoque insuficiente para {ingredient_name}. Disponível: {current_stock}, Necessário: {deduction_amount}")
-            
-            # Calcula novo estoque
-            new_stock = current_stock - deduction_amount
-            
-            # Determina novo status baseado no estoque
-            new_status = current_status
-            if new_stock <= min_threshold and current_status == 'ok':
-                new_status = 'low'
-            elif new_stock <= 0:
-                new_status = 'out_of_stock'
-            
-            # Atualiza o estoque
-            cur.execute("""
-                UPDATE INGREDIENTS 
-                SET CURRENT_STOCK = ?, STOCK_STATUS = ?
-                WHERE ID = ?
-            """, (new_stock, new_status, ingredient_id))
-            
-            updated_ingredients.append({
-                'ingredient_id': ingredient_id,
-                'ingredient_name': ingredient_name,
-                'old_stock': current_stock,
-                'new_stock': new_stock,
-                'deducted': deduction_amount,
-                'new_status': new_status
-            })
+        updated_ingredients = _execute_stock_deductions(ingredient_deductions, cur)
         
         conn.commit()
         
+        # Verifica se algum ingrediente ficou sem estoque
+        _check_and_deactivate_products(updated_ingredients, cur)
+        
         # Log das alterações
-        print(f"Estoque deduzido para pedido {order_id}:")
-        for item in updated_ingredients:
-            print(f"  {item['ingredient_name']}: {item['old_stock']} -> {item['new_stock']} (deduzido: {item['deducted']}, status: {item['new_status']})")
+        _log_stock_changes(order_id, updated_ingredients)
         
         return (True, None, f"Estoque deduzido para {len(updated_ingredients)} ingredientes")
         
@@ -123,8 +50,122 @@ def deduct_stock_for_order(order_id):
         if conn: conn.rollback()
         print(f"Erro ao deduzir estoque: {e}")
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    except ValueError as e:
+        print(f"Erro de validação: {e}")
+        return (False, "VALIDATION_ERROR", str(e))
     finally:
         if conn: conn.close()
+
+def _calculate_ingredient_deductions(order_id, order_items, cur):
+    """Calcula deduções necessárias de ingredientes"""
+    ingredient_deductions = {}
+    
+    for product_id, quantity in order_items:
+        # Busca ingredientes do produto
+        cur.execute("""
+            SELECT INGREDIENT_ID, PORTIONS 
+            FROM PRODUCT_INGREDIENTS 
+            WHERE PRODUCT_ID = ?
+        """, (product_id,))
+        product_ingredients = cur.fetchall()
+        
+        # Adiciona ingredientes base do produto
+        for ingredient_id, portions in product_ingredients:
+            total_needed = float(portions or 0) * quantity
+            if ingredient_id in ingredient_deductions:
+                ingredient_deductions[ingredient_id] += total_needed
+            else:
+                ingredient_deductions[ingredient_id] = total_needed
+        
+        # Busca ingredientes extras do item
+        cur.execute("""
+            SELECT INGREDIENT_ID, QUANTITY 
+            FROM ORDER_ITEM_EXTRAS 
+            WHERE ORDER_ITEM_ID = (
+                SELECT ID FROM ORDER_ITEMS 
+                WHERE ORDER_ID = ? AND PRODUCT_ID = ?
+            )
+        """, (order_id, product_id))
+        extras = cur.fetchall()
+        
+        # Adiciona ingredientes extras
+        for ingredient_id, extra_quantity in extras:
+            total_extra = extra_quantity * quantity
+            if ingredient_id in ingredient_deductions:
+                ingredient_deductions[ingredient_id] += total_extra
+            else:
+                ingredient_deductions[ingredient_id] = total_extra
+    
+    return ingredient_deductions
+
+def _execute_stock_deductions(ingredient_deductions, cur):
+    """Executa as deduções de estoque"""
+    updated_ingredients = []
+    
+    for ingredient_id, deduction_amount in ingredient_deductions.items():
+        # Busca estoque atual e limite mínimo
+        cur.execute("""
+            SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME
+            FROM INGREDIENTS 
+            WHERE ID = ?
+        """, (ingredient_id,))
+        result = cur.fetchone()
+        
+        if not result:
+            continue
+            
+        current_stock, min_threshold, current_status, ingredient_name = result
+        
+        # Verifica se há estoque suficiente
+        if current_stock < deduction_amount:
+            raise ValueError(f"Estoque insuficiente para {ingredient_name}. Disponível: {current_stock}, Necessário: {deduction_amount}")
+        
+        # Calcula novo estoque
+        new_stock = current_stock - deduction_amount
+        
+        # Determina novo status baseado no estoque
+        new_status = _determine_new_status(new_stock, min_threshold, current_status)
+        
+        # Atualiza o estoque
+        cur.execute("""
+            UPDATE INGREDIENTS 
+            SET CURRENT_STOCK = ?, STOCK_STATUS = ?
+            WHERE ID = ?
+        """, (new_stock, new_status, ingredient_id))
+        
+        updated_ingredients.append({
+            'ingredient_id': ingredient_id,
+            'ingredient_name': ingredient_name,
+            'old_stock': current_stock,
+            'new_stock': new_stock,
+            'deducted': deduction_amount,
+            'new_status': new_status
+        })
+    
+    return updated_ingredients
+
+def _determine_new_status(new_stock, min_threshold, current_status):
+    """Determina novo status baseado no estoque"""
+    if new_stock <= 0:
+        return 'out_of_stock'
+    elif new_stock <= min_threshold and current_status == 'ok':
+        return 'low'
+    else:
+        return current_status
+
+def _check_and_deactivate_products(updated_ingredients, cur):
+    """Verifica se algum ingrediente ficou sem estoque e desativa produtos"""
+    for item in updated_ingredients:
+        if item['new_status'] == 'out_of_stock':
+            deactivated_products = _auto_deactivate_products_for_ingredient(item['ingredient_id'], cur)
+            if deactivated_products:
+                print(f"  Produtos desativados automaticamente devido a estoque zerado de {item['ingredient_name']}: {[p['name'] for p in deactivated_products]}")
+
+def _log_stock_changes(order_id, updated_ingredients):
+    """Log das alterações de estoque"""
+    print(f"Estoque deduzido para pedido {order_id}:")
+    for item in updated_ingredients:
+        print(f"  {item['ingredient_name']}: {item['old_stock']} -> {item['new_stock']} (deduzido: {item['deducted']}, status: {item['new_status']})")
 
 
 def get_stock_alerts():
@@ -138,9 +179,9 @@ def get_stock_alerts():
         cur = conn.cursor()
         
         cur.execute("""
-            SELECT ID, NAME, CURRENT_STOCK, MIN_STOCK_THRESHOLD, UNIT, STOCK_STATUS
+            SELECT ID, NAME, CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS
             FROM INGREDIENTS 
-            WHERE STOCK_STATUS = 'low' AND IS_ACTIVE = TRUE
+            WHERE STOCK_STATUS = 'low'
             ORDER BY CURRENT_STOCK ASC
         """)
         
@@ -151,8 +192,7 @@ def get_stock_alerts():
                 'name': row[1],
                 'current_stock': row[2],
                 'min_threshold': row[3],
-                'unit': row[4],
-                'status': row[5]
+                'status': row[4]
             })
         
         return (alerts, None, None)
@@ -225,12 +265,12 @@ def confirm_out_of_stock(ingredient_id):
 
 
 def adjust_stock(ingredient_id, adjustment_amount):
-    """
-    Ajusta manualmente o estoque de um ingrediente.
-    Retorna (sucesso, produtos_reativados, error_code, mensagem)
-    """
+    """Ajusta manualmente o estoque de um ingrediente"""
     conn = None
     try:
+        _validate_ingredient_id(ingredient_id)
+        _validate_adjustment_amount(adjustment_amount)
+        
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -238,7 +278,7 @@ def adjust_stock(ingredient_id, adjustment_amount):
         cur.execute("""
             SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME
             FROM INGREDIENTS 
-            WHERE ID = ? AND IS_ACTIVE = TRUE
+            WHERE ID = ?
         """, (ingredient_id,))
         result = cur.fetchone()
         
@@ -248,16 +288,10 @@ def adjust_stock(ingredient_id, adjustment_amount):
         current_stock, min_threshold, current_status, ingredient_name = result
         
         # Calcula novo estoque
-        new_stock = max(0, current_stock + adjustment_amount)
+        new_stock = max(0, float(current_stock) + float(adjustment_amount))
         
         # Determina novo status
-        new_status = current_status
-        if new_stock > min_threshold and current_status in ['low', 'out_of_stock']:
-            new_status = 'ok'
-        elif new_stock <= min_threshold and new_stock > 0 and current_status == 'out_of_stock':
-            new_status = 'low'
-        elif new_stock <= 0:
-            new_status = 'out_of_stock'
+        new_status = _determine_new_status(new_stock, min_threshold, current_status)
         
         # Atualiza o estoque
         cur.execute("""
@@ -283,8 +317,43 @@ def adjust_stock(ingredient_id, adjustment_amount):
         if conn: conn.rollback()
         print(f"Erro ao ajustar estoque: {e}")
         return (False, [], "DATABASE_ERROR", "Erro interno do servidor")
+    except ValueError as e:
+        print(f"Erro de validação: {e}")
+        return (False, [], "VALIDATION_ERROR", str(e))
     finally:
         if conn: conn.close()
+
+
+def _auto_deactivate_products_for_ingredient(ingredient_id, cursor):
+    """
+    Desativa automaticamente produtos que dependem de um ingrediente que ficou sem estoque.
+    Retorna lista de produtos desativados.
+    """
+    try:
+        # Busca produtos ativos que usam este ingrediente
+        cursor.execute("""
+            SELECT DISTINCT P.ID, P.NAME
+            FROM PRODUCTS P
+            JOIN PRODUCT_INGREDIENTS PI ON P.ID = PI.PRODUCT_ID
+            WHERE PI.INGREDIENT_ID = ? AND P.IS_ACTIVE = TRUE
+        """, (ingredient_id,))
+        
+        affected_products = cursor.fetchall()
+        deactivated_products = []
+        
+        # Desativa produtos dependentes
+        for product_id, product_name in affected_products:
+            cursor.execute("UPDATE PRODUCTS SET IS_ACTIVE = FALSE WHERE ID = ?", (product_id,))
+            deactivated_products.append({
+                'id': product_id,
+                'name': product_name
+            })
+        
+        return deactivated_products
+        
+    except Exception as e:
+        print(f"Erro ao desativar produtos automaticamente: {e}")
+        return []
 
 
 def reactivate_products_for_ingredient(ingredient_id, cursor=None):
