@@ -5,8 +5,8 @@ from ..services.auth_service import require_role
 ingredient_bp = Blueprint('ingredients', __name__)  
 
 @ingredient_bp.route('/', methods=['GET'])  
-@require_role('admin', 'manager')  
 def list_ingredients_route():  
+    """Lista ingredientes - ROTA PÚBLICA para permitir visualização no cardápio"""
     status_filter = request.args.get('status')  
     name = request.args.get('name')  
     page = request.args.get('page', type=int, default=1)  

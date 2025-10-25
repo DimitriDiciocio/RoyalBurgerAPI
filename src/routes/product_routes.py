@@ -156,6 +156,14 @@ def update_product_route(product_id):
                 data['category_id'] = int(request.form.get('category_id'))
             except (ValueError, TypeError):
                 pass
+        if request.form.get('ingredients'):
+            try:
+                import json
+                data['ingredients'] = json.loads(request.form.get('ingredients'))
+                print(f"📦 Ingredientes recebidos do form: {len(data['ingredients'])} itens")
+            except (ValueError, TypeError, json.JSONDecodeError) as e:
+                print(f"❌ Erro ao fazer parse dos ingredientes: {e}")
+                return jsonify({"error": "Formato inválido para ingredientes"}), 400
     
     # Verifica se há arquivo de imagem ou se deve remover a imagem
     image_file = request.files.get('image')
