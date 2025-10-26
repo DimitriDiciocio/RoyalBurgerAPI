@@ -868,3 +868,181 @@ def apply_group_to_product(product_id, group_id, default_min_quantity=0, default
     finally:
         if conn:
             conn.close()
+
+
+def get_most_ordered_products(page=1, page_size=10):
+    """
+    Busca os produtos mais pedidos baseado no histórico de pedidos.
+    Retorna produtos ordenados por quantidade total de itens vendidos.
+    Utiliza paginação padrão do sistema.
+    """
+    page = max(int(page or 1), 1)
+    page_size = max(int(page_size or 10), 1)
+    offset = (page - 1) * page_size
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Conta total de produtos com vendas
+        cur.execute("""
+            SELECT COUNT(DISTINCT p.ID)
+            FROM PRODUCTS p
+            INNER JOIN ORDER_ITEMS oi ON p.ID = oi.PRODUCT_ID
+            INNER JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE p.IS_ACTIVE = TRUE 
+              AND o.STATUS = 'completed'
+        """)
+        total = cur.fetchone()[0] or 0
+        
+        # Query paginada que conta quantidades vendidas
+        cur.execute("""
+            SELECT 
+                p.ID,
+                p.NAME,
+                p.DESCRIPTION,
+                p.PRICE,
+                p.IMAGE_URL,
+                SUM(oi.QUANTITY) as total_sold
+            FROM PRODUCTS p
+            INNER JOIN ORDER_ITEMS oi ON p.ID = oi.PRODUCT_ID
+            INNER JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE p.IS_ACTIVE = TRUE 
+              AND o.STATUS = 'completed'
+            GROUP BY p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.IMAGE_URL
+            ORDER BY total_sold DESC
+            FETCH FIRST ? ROWS SKIP ?
+        """, (page_size, offset))
+        
+        items = []
+        for row in cur.fetchall():
+            items.append({
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "price": str(row[3]),
+                "image_url": row[4] if row[4] else None,
+                "total_sold": int(row[5]) if row[5] else 0
+            })
+            
+            # Adiciona hash da imagem se existir
+            if row[4]:
+                try:
+                    items[-1]["image_hash"] = _get_image_hash(row[4])
+                except Exception:
+                    items[-1]["image_hash"] = None
+        
+        total_pages = (total + page_size - 1) // page_size
+        
+        return {
+            "items": items,
+            "pagination": {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages
+            }
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar produtos mais pedidos: {e}")
+        return {
+            "items": [],
+            "pagination": {
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0
+            }
+        }
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_recently_added_products(page=1, page_size=10):
+    """
+    Busca os produtos mais recentemente adicionados ao catálogo.
+    Retorna produtos ordenados por data de criação (ID descendente).
+    Utiliza paginação padrão do sistema.
+    """
+    page = max(int(page or 1), 1)
+    page_size = max(int(page_size or 10), 1)
+    offset = (page - 1) * page_size
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Conta total de produtos ativos
+        cur.execute("""
+            SELECT COUNT(*) FROM PRODUCTS 
+            WHERE IS_ACTIVE = TRUE
+        """)
+        total = cur.fetchone()[0] or 0
+        
+        # Query paginada que busca produtos ativos ordenados por ID descendente
+        # Nota: Firebird não tem CREATED_AT em PRODUCTS por padrão, usa ID como proxy
+        cur.execute("""
+            SELECT 
+                p.ID,
+                p.NAME,
+                p.DESCRIPTION,
+                p.PRICE,
+                p.IMAGE_URL,
+                p.CATEGORY_ID,
+                c.NAME as CATEGORY_NAME
+            FROM PRODUCTS p
+            LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID
+            WHERE p.IS_ACTIVE = TRUE
+            ORDER BY p.ID DESC
+            FETCH FIRST ? ROWS SKIP ?
+        """, (page_size, offset))
+        
+        items = []
+        for row in cur.fetchall():
+            items.append({
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "price": str(row[3]),
+                "image_url": row[4] if row[4] else None,
+                "category_id": row[5],
+                "category_name": row[6] if row[6] else "Sem categoria"
+            })
+            
+            # Adiciona hash da imagem se existir
+            if row[4]:
+                try:
+                    items[-1]["image_hash"] = _get_image_hash(row[4])
+                except Exception:
+                    items[-1]["image_hash"] = None
+        
+        total_pages = (total + page_size - 1) // page_size
+        
+        return {
+            "items": items,
+            "pagination": {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages
+            }
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar produtos recentemente adicionados: {e}")
+        return {
+            "items": [],
+            "pagination": {
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0
+            }
+        }
+    finally:
+        if conn:
+            conn.close()

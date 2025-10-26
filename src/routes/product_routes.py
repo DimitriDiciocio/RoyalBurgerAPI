@@ -298,6 +298,24 @@ def search_products_route():
     return jsonify(result), 200
 
 
+@product_bp.route('/most-ordered', methods=['GET'])
+def get_most_ordered_products_route():
+    """Retorna os produtos mais pedidos baseado no histórico de pedidos completos."""
+    page = request.args.get('page', type=int, default=1)
+    page_size = request.args.get('page_size', type=int, default=10)
+    result = product_service.get_most_ordered_products(page=page, page_size=page_size)
+    return jsonify(result), 200
+
+
+@product_bp.route('/recently-added', methods=['GET'])
+def get_recently_added_products_route():
+    """Retorna os produtos mais recentemente adicionados ao catálogo."""
+    page = request.args.get('page', type=int, default=1)
+    page_size = request.args.get('page_size', type=int, default=10)
+    result = product_service.get_recently_added_products(page=page, page_size=page_size)
+    return jsonify(result), 200
+
+
 @product_bp.route('/<int:product_id>/apply-group', methods=['POST'])
 @require_role('admin', 'manager')
 def apply_group_to_product_route(product_id):
