@@ -1,71 +1,79 @@
-from flask import Blueprint, request, jsonify, g  
-from ..services import settings_service  
-from ..services.auth_service import require_role  
+from flask import Blueprint, request, jsonify
+from ..services import settings_service
+from ..services.auth_service import require_role
+from flask_jwt_extended import get_jwt
 
-settings_bp = Blueprint('settings', __name__)  
+settings_bp = Blueprint('settings', __name__)
 
-@settings_bp.route('/', methods=['GET'])  
-@require_role('admin')  
-def get_all_settings_route():  
-    conn = None  
-    try:  
-        from ..database import get_db_connection  
-        import fdb  
-        conn = get_db_connection()  
-        cur = conn.cursor()  
-        cur.execute("""
-            SELECT SETTING_KEY, SETTING_VALUE, DESCRIPTION, UPDATED_AT, UPDATED_BY
-            FROM APP_SETTINGS
-            ORDER BY SETTING_KEY
-        """)  
-        settings = []  
-        for row in cur.fetchall():  
-            settings.append({  
-                "key": row[0],
-                "value": row[1],
-                "description": row[2],
-                "updated_at": row[3].isoformat() if row[3] else None,
-                "updated_by": row[4]
-            })
-        return jsonify({"settings": settings}), 200  
-    except Exception as e:  
-        print(f"Erro ao buscar configurações: {e}")  
-        return jsonify({"error": "Erro interno do servidor"}), 500  
-    finally:  
-        if conn: conn.close()  
+@settings_bp.route('/', methods=['GET'])
+@require_role('admin')
+def get_all_settings_route():
+    """Retorna as configurações atuais"""
+    try:
+        settings = settings_service.get_all_settings()
+        if settings:
+            return jsonify({"settings": settings}), 200
+        return jsonify({"error": "Configurações não encontradas"}), 404
+    except Exception as e:
+        print(f"Erro ao buscar configurações: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
 
-@settings_bp.route('/', methods=['PUT'])  
-@require_role('admin')  
-def update_settings_route():  
-    data = request.get_json()  
-    if not data or 'settings' not in data:  
-        return jsonify({"error": "Corpo da requisição deve conter uma lista 'settings'"}), 400  
-    settings_list = data['settings']  
-    if not isinstance(settings_list, list):  
-        return jsonify({"error": "O campo 'settings' deve ser uma lista"}), 400  
-    user_id = g.current_user_id if hasattr(g, 'current_user_id') else None  
-    if not user_id:  
-        return jsonify({"error": "Usuário não autenticado"}), 401  
-    updated_settings = []  
-    errors = []  
-    for setting in settings_list:  
-        if not isinstance(setting, dict) or 'key' not in setting or 'value' not in setting:  
-            errors.append("Cada configuração deve ter 'key' e 'value'")  
-            continue  
-        key = setting['key']  
-        value = setting['value']  
-        success = settings_service.update_setting(key, value, user_id)  
-        if success:  
-            updated_settings.append({"key": key, "value": value})  
-        else:  
-            errors.append(f"Falha ao atualizar configuração '{key}'")  
-    if errors:  
+@settings_bp.route('/', methods=['POST'])
+@require_role('admin')
+def update_settings_route():
+    """Atualiza configurações (cria nova versão completa)"""
+    data = request.get_json()
+    
+    if not data:
+        return jsonify({"error": "Corpo da requisição não pode estar vazio"}), 400
+    
+    if not data:
+        return jsonify({"error": "Nenhuma configuração fornecida"}), 400
+    
+    claims = get_jwt()
+    user_id = int(claims.get('sub'))
+    
+    success = settings_service.update_settings(data, user_id)
+    
+    if success:
+        updated_fields = list(data.keys())
         return jsonify({
-            "msg": f"Atualizadas {len(updated_settings)} configurações",
-            "updated_settings": updated_settings,
-            "errors": errors
-        }), 207  
-    return jsonify({  
-        "msg": f"Todas as {len(updated_settings)} configurações foram atualizadas com sucesso",
-        "updated_settings": updated_settings
-    }), 200  
+            "msg": f"Configurações atualizadas com sucesso",
+            "updated_fields": updated_fields
+        }), 200
+    
+    return jsonify({"error": "Erro ao atualizar configurações"}), 500
+
+@settings_bp.route('/history', methods=['GET'])
+@require_role('admin')
+def get_settings_history_route():
+    """Retorna o histórico de configurações"""
+    try:
+        history = settings_service.get_settings_history()
+        return jsonify({"history": history}), 200
+    except Exception as e:
+        print(f"Erro ao buscar histórico: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@settings_bp.route('/rollback', methods=['POST'])
+@require_role('admin')
+def rollback_setting_route():
+    """Faz rollback para uma versão anterior"""
+    data = request.get_json()
+    
+    if not data or 'history_id' not in data:
+        return jsonify({"error": "Corpo da requisição deve conter 'history_id'"}), 400
+    
+    history_id = data['history_id']
+    if not isinstance(history_id, int):
+        return jsonify({"error": "O campo 'history_id' deve ser um número inteiro"}), 400
+    
+    claims = get_jwt()
+    user_id = int(claims.get('sub'))
+    
+    success = settings_service.rollback_setting(history_id, user_id)
+    
+    if success:
+        return jsonify({"msg": "Configuração restaurada com sucesso"}), 200
+    
+    return jsonify({"error": "Erro ao fazer rollback ou versão não encontrada"}), 500

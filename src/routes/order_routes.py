@@ -14,14 +14,14 @@ def create_order_route():
     if not is_open:  
         return jsonify({"error": message}), 409  
     claims = get_jwt()  
-    user_id = int(claims.get('sub'))  
-    data = request.get_json()  
-    address_id = data.get('address_id')  
-    items = data.get('items')  
-    payment_method = data.get('payment_method')  
-    notes = data.get('notes', '')  
-    change_for_amount = data.get('change_for_amount')  
-    cpf_on_invoice = data.get('cpf_on_invoice')  
+    user_id = int(claims.get('sub'))
+    data = request.get_json()
+    address_id = data.get('address_id')
+    items = data.get('items')
+    payment_method = data.get('payment_method')
+    notes = data.get('notes', '')
+    change_for_amount = data.get('change_for_amount')
+    cpf_on_invoice = data.get('cpf_on_invoice')
     points_to_redeem = data.get('points_to_redeem', 0)
     use_cart = data.get('use_cart', False)  # Nova opção para usar carrinho
     
