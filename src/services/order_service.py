@@ -4,7 +4,7 @@ import fdb
 import random
 import string
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service
 from .printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
 from ..config import Config
@@ -32,9 +32,13 @@ def _validate_cpf(cpf_on_invoice):
         raise ValueError(f"O CPF informado '{cpf_on_invoice}' é inválido")
 
 def _validate_points_redemption(points_to_redeem, total_amount):
-    """Valida resgate de pontos"""
+    """Valida resgate de pontos usando configurações"""
     if points_to_redeem and points_to_redeem > 0:
-        expected_discount = points_to_redeem / 100.0
+        # Obter taxa de conversão das configurações
+        settings = settings_service.get_all_settings()
+        conversion_rate = float(settings.get('taxa_conversao_clube', 0.01) or 0.01)
+        
+        expected_discount = points_to_redeem * conversion_rate
         if expected_discount > total_amount:
             raise ValueError("O valor do desconto não pode ser maior que o total do pedido")
 
@@ -565,8 +569,10 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         
         # Valida desconto de pontos (sem debitar ainda)
         if points_to_redeem and points_to_redeem > 0:
-            # 100 pontos = R$ 1,00 de desconto (conforme documentação)
-            expected_discount = points_to_redeem / 100.0
+            # Obter taxa de conversão das configurações
+            settings = settings_service.get_all_settings()
+            conversion_rate = float(settings.get('taxa_conversao_clube', 0.01) or 0.01)
+            expected_discount = points_to_redeem * conversion_rate
             if expected_discount > total_amount:
                 return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
         
@@ -758,3 +764,122 @@ def get_orders_with_filters(filters=None):
         return []
     finally:
         if conn: conn.close()
+
+def calculate_order_total_with_fees(items, points_to_redeem=0):
+    """
+    Calcula o total de um pedido SEM criar o pedido
+    Usa as configurações do sistema para taxa de entrega
+    Retorna breakdown completo
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Valida e calcula subtotal dos items
+        _validate_ingredients_and_extras(items, cur)
+        subtotal = _calculate_order_total(items, cur)
+        
+        # Busca taxa de entrega das configurações
+        settings = settings_service.get_all_settings()
+        delivery_fee = 0
+        if settings and settings.get('taxa_entrega'):
+            delivery_fee = float(settings.get('taxa_entrega'))
+        
+        # Calcular desconto por pontos
+        discount_amount = 0
+        if points_to_redeem and points_to_redeem > 0:
+            # Obter taxa de conversão das configurações
+            conversion_rate = float(settings.get('taxa_conversao_clube', 0.01) or 0.01)
+            discount_amount = points_to_redeem * conversion_rate
+            # Validar que o desconto não excede o total
+            if discount_amount > subtotal + delivery_fee:
+                discount_amount = subtotal + delivery_fee
+        
+        # Total final
+        total = subtotal + delivery_fee - discount_amount
+        
+        # Montar breakdown detalhado
+        breakdown = _build_order_breakdown(items, cur)
+        
+        return {
+            "subtotal": float(subtotal),
+            "delivery_fee": float(delivery_fee),
+            "discount_from_points": float(discount_amount),
+            "total": float(total),
+            "breakdown": breakdown
+        }
+        
+    except fdb.Error as e:
+        print(f"Erro ao calcular total: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def _build_order_breakdown(items, cur):
+    """Monta breakdown detalhado dos itens do pedido"""
+    product_prices = {}
+    extra_prices = {}
+    product_ids = {item['product_id'] for item in items}
+    
+    # Busca preços dos produtos
+    if product_ids:
+        placeholders = ', '.join(['?' for _ in product_ids])
+        cur.execute(f"SELECT ID, NAME, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(product_ids))
+        for row in cur.fetchall():
+            product_prices[row[0]] = {
+                'name': row[1],
+                'price': float(row[2])
+            }
+    
+    # Busca preços dos extras
+    extra_ingredient_ids = set()
+    for item in items:
+        if 'extras' in item and item['extras']:
+            for extra in item['extras']:
+                extra_ingredient_ids.add(extra['ingredient_id'])
+    
+    if extra_ingredient_ids:
+        placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+        cur.execute(f"SELECT ID, NAME, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ingredient_ids))
+        for row in cur.fetchall():
+            extra_prices[row[0]] = {
+                'name': row[1],
+                'price': float(row[2])
+            }
+    
+    # Monta breakdown
+    breakdown = []
+    for item in items:
+        product_id = item['product_id']
+        quantity = item.get('quantity', 1)
+        product_info = product_prices.get(product_id, {})
+        
+        item_total = product_info.get('price', 0) * quantity
+        extras_info = []
+        
+        if 'extras' in item and item['extras']:
+            for extra in item['extras']:
+                extra_id = extra['ingredient_id']
+                extra_qty = extra.get('quantity', 1)
+                extra_info = extra_prices.get(extra_id, {})
+                extra_total = extra_info.get('price', 0) * extra_qty
+                item_total += extra_total
+                
+                extras_info.append({
+                    'name': extra_info.get('name', 'Extra'),
+                    'quantity': extra_qty,
+                    'unit_price': extra_info.get('price', 0),
+                    'total': extra_total
+                })
+        
+        breakdown.append({
+            'product_name': product_info.get('name', 'Produto'),
+            'quantity': quantity,
+            'unit_price': product_info.get('price', 0),
+            'extras': extras_info,
+            'item_total': item_total
+        })
+    
+    return breakdown

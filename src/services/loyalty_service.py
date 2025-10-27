@@ -1,6 +1,16 @@
 import fdb  
 from datetime import date  
 from ..database import get_db_connection
+from . import settings_service
+
+def _get_loyalty_settings():
+    """Retorna configurações de pontos do sistema"""
+    settings = settings_service.get_all_settings()
+    return {
+        'conversion_rate': float(settings.get('taxa_conversao_clube', 0.01) or 0.01),
+        'expiration_days': int(settings.get('taxa_expiracao_pontos_clube', 60) or 60),
+        'welcome_points': 100  # Pontos de boas-vindas (mantido fixo ou pode configurar)
+    }
 
 def _validate_points(points):
     """Valida se pontos é um valor válido"""
@@ -62,17 +72,23 @@ def earn_points_for_order(user_id, order_id, total_amount, cur):
         _validate_points(total_amount)
         create_loyalty_account_if_not_exists(user_id, cur)  
         
-        # R$ 1,00 = 10 pontos Royal (conforme documentação)
-        points_to_earn = int(total_amount * 10)  
+        # Obter taxa de conversão das configurações
+        loyalty_config = _get_loyalty_settings()
+        conversion_rate = loyalty_config['conversion_rate']
+        expiration_days = loyalty_config['expiration_days']
+        
+        # Calcular pontos usando taxa configurável
+        # conversion_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
+        points_to_earn = int(total_amount / conversion_rate)
         
         sql_update_account = """
             UPDATE LOYALTY_POINTS
             SET 
                 ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
-                POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
+                POINTS_EXPIRATION_DATE = CURRENT_DATE + ?
             WHERE USER_ID = ?;
         """  
-        cur.execute(sql_update_account, (points_to_earn, user_id))  
+        cur.execute(sql_update_account, (points_to_earn, expiration_days, user_id))  
         
         sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"  
         reason = f"Pontos ganhos no pedido #{order_id}"
@@ -83,20 +99,23 @@ def earn_points_for_order(user_id, order_id, total_amount, cur):
         raise e  
 
 def add_welcome_points(user_id, cur):
-    """Adiciona 100 pontos de boas-vindas para novos clientes"""
+    """Adiciona pontos de boas-vindas configuráveis para novos clientes"""
     try:
         create_loyalty_account_if_not_exists(user_id, cur)
         
-        # Adiciona 100 pontos de boas-vindas
-        welcome_points = 100
+        # Obter configurações
+        loyalty_config = _get_loyalty_settings()
+        welcome_points = loyalty_config['welcome_points']
+        expiration_days = loyalty_config['expiration_days']
+        
         sql_update_account = """
             UPDATE LOYALTY_POINTS
             SET 
                 ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
-                POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
+                POINTS_EXPIRATION_DATE = CURRENT_DATE + ?
             WHERE USER_ID = ?;
         """
-        cur.execute(sql_update_account, (welcome_points, user_id))
+        cur.execute(sql_update_account, (welcome_points, expiration_days, user_id))
         
         # Adiciona histórico dos pontos de boas-vindas
         sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, POINTS, REASON) VALUES (?, ?, ?);"
@@ -154,8 +173,13 @@ def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):
         reason = f"Resgate de pontos no pedido #{order_id}"
         cur.execute(sql_add_history, (user_id, order_id, -points_to_redeem, reason))  
         
-        # 100 pontos = R$ 1,00 de desconto (conforme documentação)
-        discount_amount = points_to_redeem / 100.0  
+        # Obter taxa de resgate das configurações
+        loyalty_config = _get_loyalty_settings()
+        conversion_rate = loyalty_config['conversion_rate']
+        
+        # Calcular desconto usando taxa configurável
+        # conversion_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
+        discount_amount = points_to_redeem * conversion_rate
         print(f"{points_to_redeem} pontos resgatados pelo usuário {user_id} por R${discount_amount:.2f} de desconto.")  
         return discount_amount  
     except Exception as e:

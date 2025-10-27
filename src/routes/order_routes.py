@@ -75,6 +75,40 @@ def create_order_route():
     else:  
         return jsonify({"error": "Não foi possível criar o pedido."}), 500  
 
+@order_bp.route('/calculate-total', methods=['POST'])
+@require_role('customer')
+def calculate_order_total_route():
+    """Calcula o total do pedido sem criar o pedido"""
+    data = request.get_json()
+    
+    if not data or 'items' not in data:
+        return jsonify({"error": "items é obrigatório"}), 400
+    
+    items = data.get('items', [])
+    if not isinstance(items, list) or len(items) == 0:
+        return jsonify({"error": "A lista de items não pode estar vazia"}), 400
+    
+    points_to_redeem = data.get('points_to_redeem', 0)
+    
+    if not isinstance(points_to_redeem, (int, float)) or points_to_redeem < 0:
+        return jsonify({"error": "points_to_redeem deve ser um número não negativo"}), 400
+    
+    try:
+        result = order_service.calculate_order_total_with_fees(
+            items=items,
+            points_to_redeem=int(points_to_redeem)
+        )
+        
+        if result:
+            return jsonify(result), 200
+        else:
+            return jsonify({"error": "Erro ao calcular total do pedido"}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"Erro ao calcular total: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
 @order_bp.route('/', methods=['GET'])  
 @require_role('customer')  
 def get_my_orders_route():  
