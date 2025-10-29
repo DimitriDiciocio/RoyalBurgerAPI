@@ -2,9 +2,19 @@ from ..database import get_db_connection
 import fdb
 
 def _validate_cart_id(cart_id):
-    """Valida se cart_id é um inteiro válido"""
+    """Valida se cart_id é um inteiro válido e converte se necessário"""
+    # Converte para inteiro se for string
+    if isinstance(cart_id, str):
+        try:
+            cart_id = int(cart_id)
+        except (ValueError, TypeError):
+            raise ValueError("cart_id deve ser um número inteiro válido")
+    
+    # Valida se é inteiro positivo
     if not isinstance(cart_id, int) or cart_id <= 0:
         raise ValueError("cart_id deve ser um inteiro positivo")
+    
+    return cart_id
 
 def _calculate_cart_totals(items):
     """Calcula totais do carrinho de forma centralizada"""
@@ -59,16 +69,12 @@ def get_or_create_cart(user_id):
         cart_id = cur.fetchone()[0]
         conn.commit()
         
-        # Busca o carrinho criado
-        sql = "SELECT ID, USER_ID, CREATED_AT, UPDATED_AT FROM CARTS WHERE ID = ?;"
-        cur.execute(sql, (cart_id,))
-        row = cur.fetchone()
-        
+        # Retorna o carrinho criado (sem query adicional desnecessária)
         return {
-            "id": row[0],
-            "user_id": row[1],
-            "created_at": row[2],
-            "updated_at": row[3]
+            "id": cart_id,
+            "user_id": user_id,
+            "created_at": None,  # Será preenchido em próximo acesso se necessário
+            "updated_at": None
         }
         
     except fdb.Error as e:
@@ -85,7 +91,7 @@ def get_cart_items(cart_id):
     """
     conn = None
     try:
-        _validate_cart_id(cart_id)
+        cart_id = _validate_cart_id(cart_id)
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -123,31 +129,50 @@ def get_cart_items(cart_id):
                 SELECT 
                     cie.ID,
                     cie.INGREDIENT_ID,
-                    cie.QUANTITY,
-                    i.NAME as INGREDIENT_NAME,
-                    COALESCE(i.ADDITIONAL_PRICE, i.PRICE) as INGREDIENT_PRICE
+                    COALESCE(cie.DELTA, cie.QUANTITY) as DELTA,
+                    COALESCE(cie.UNIT_PRICE, COALESCE(i.ADDITIONAL_PRICE, i.PRICE)) as UNIT_PRICE,
+                    cie.TYPE,
+                    i.NAME as INGREDIENT_NAME
                 FROM CART_ITEM_EXTRAS cie
                 JOIN INGREDIENTS i ON cie.INGREDIENT_ID = i.ID
                 WHERE cie.CART_ITEM_ID = ?
-                ORDER BY i.NAME;
+                ORDER BY cie.TYPE, i.NAME;
             """
             cur.execute(extras_sql, (item_id,))
             extras = []
             extras_total = 0.0
+            base_modifications = []
+            base_mods_total = 0.0
             
             for extra_row in cur.fetchall():
-                extra = {
-                    "id": extra_row[0],
-                    "ingredient_id": extra_row[1],
-                    "quantity": extra_row[2],
-                    "ingredient_name": extra_row[3],
-                    "ingredient_price": float(extra_row[4]) if extra_row[4] else 0.0
-                }
-                extras.append(extra)
-                extras_total += extra["ingredient_price"] * extra["quantity"]
+                row_id = extra_row[0]
+                ingredient_id = extra_row[1]
+                delta = int(extra_row[2] or 0)
+                unit_price = float(extra_row[3] or 0.0)
+                row_type = (extra_row[4] or 'extra').lower()
+                ingredient_name = extra_row[5]
+
+                if row_type == 'extra':
+                    extras.append({
+                        "id": row_id,
+                        "ingredient_id": ingredient_id,
+                        "quantity": delta,
+                        "ingredient_name": ingredient_name,
+                        "ingredient_price": unit_price
+                    })
+                    if delta > 0:
+                        extras_total += unit_price * delta
+                else:  # base
+                    base_modifications.append({
+                        "ingredient_id": ingredient_id,
+                        "delta": delta,
+                        "ingredient_name": ingredient_name
+                    })
+                    if delta > 0:
+                        base_mods_total += unit_price * delta
             
             # Calcula subtotal do item
-            item_subtotal = (product_price + extras_total) * quantity
+            item_subtotal = (product_price + extras_total + base_mods_total) * quantity
             
             item = {
                 "id": item_id,
@@ -162,6 +187,8 @@ def get_cart_items(cart_id):
                     "image_url": product_image_url
                 },
                 "extras": extras,
+                "base_modifications": base_modifications,
+                "base_mods_total": base_mods_total,
                 "extras_total": extras_total,
                 "item_subtotal": item_subtotal
             }
@@ -338,12 +365,22 @@ def _check_availability_alerts(items):
     return availability_alerts
 
 
-def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
+def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, base_modifications=None):
     """
     Adiciona um item ao carrinho do usuário
     """
     conn = None
     try:
+        # Validações de limites de segurança
+        if quantity <= 0 or quantity > 999:
+            return (False, "INVALID_QUANTITY", "Quantidade deve estar entre 1 e 999")
+        
+        if extras and len(extras) > 50:
+            return (False, "TOO_MANY_EXTRAS", "Número máximo de extras por item: 50")
+        
+        if base_modifications and len(base_modifications) > 50:
+            return (False, "TOO_MANY_MODIFICATIONS", "Número máximo de modificações: 50")
+        
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -353,6 +390,12 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
             return (False, "CART_ERROR", "Erro ao acessar carrinho")
         
         cart_id = cart["id"]
+        
+        # Valida limite de itens no carrinho
+        cur.execute("SELECT COUNT(*) FROM CART_ITEMS WHERE CART_ID = ?;", (cart_id,))
+        item_count = cur.fetchone()[0]
+        if item_count >= 100:
+            return (False, "CART_FULL", "Carrinho cheio. Máximo de 100 itens diferentes")
         
         # Verifica se produto existe e está ativo
         sql = "SELECT ID, NAME, PRICE FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;"
@@ -374,21 +417,21 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
                 qty = int(extra.get("quantity", 1))
                 rule = rules.get(ing_id)
                 if not rule:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um ou mais extras não são permitidos para este produto")
                 if float(rule["portions"]) != 0.0:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
                 min_q = int(rule["min_quantity"] or 0)
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
                 
                 # Verifica estoque suficiente para extras
                 extra_stock_check = _check_ingredient_stock_availability(cur, ing_id, qty * quantity)
                 if not extra_stock_check[0]:
                     return (False, "INSUFFICIENT_STOCK", f"Estoque insuficiente para extra: {extra_stock_check[1]}")
 
-        # Verifica se já existe um item idêntico (mesmo produto, mesmos extras e mesmas notas)
-        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "")
+        # Verifica se já existe um item idêntico (produto, extras, notes e base_mods)
+        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "", base_modifications or [])
         
         if existing_item_id:
             # Incrementa quantidade do item existente
@@ -400,18 +443,44 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
             cur.execute(sql, (cart_id, product_id, quantity, notes))
             new_item_id = cur.fetchone()[0]
             
-            # Adiciona extras se fornecidos
+            # Adiciona extras se fornecidos (TYPE='extra')
             if extras:
                 for extra in extras:
                     ingredient_id = extra.get("ingredient_id")
-                    extra_quantity = extra.get("quantity", 1)
-                    
-                    # Verifica se ingrediente existe
-                    sql_check = "SELECT ID FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;"
-                    cur.execute(sql_check, (ingredient_id,))
-                    if cur.fetchone():
-                        sql_extra = "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);"
-                        cur.execute(sql_extra, (new_item_id, ingredient_id, extra_quantity))
+                    extra_quantity = int(extra.get("quantity", 1))
+                    if extra_quantity <= 0:
+                        continue
+                    # Verifica se ingrediente existe e obtém preço
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
+                    rowp = cur.fetchone()
+                    if rowp:
+                        unit_price = float(rowp[0] or 0.0)
+                        sql_extra = (
+                            "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) "
+                            "VALUES (?, ?, ?, 'extra', ?, ?);"
+                        )
+                        cur.execute(sql_extra, (new_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price))
+
+            # Adiciona modificações de base (TYPE='base')
+            if base_modifications:
+                rules = _get_product_rules(cur, product_id)
+                for bm in base_modifications:
+                    try:
+                        ing_id = int(bm.get("ingredient_id"))
+                        delta = int(bm.get("delta", 0))
+                    except (ValueError, TypeError, AttributeError):
+                        # Ignora modificações com formato inválido
+                        continue
+                    rule = rules.get(ing_id)
+                    if not rule or float(rule["portions"]) == 0.0 or delta == 0:
+                        continue
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ing_id,))
+                    rowp = cur.fetchone()
+                    unit_price = float(rowp[0] or 0.0) if rowp else 0.0
+                    cur.execute(
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                        (new_item_id, ing_id, delta, unit_price)
+                    )
         
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
@@ -424,14 +493,33 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None):
         if conn: conn.close()
 
 
-def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, notes=None):
+def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, notes=None, base_modifications=None):
     """
     Adiciona item ao carrinho identificado por cart_id (convidado)
     """
     conn = None
     try:
+        # Validações de limites de segurança
+        if quantity <= 0 or quantity > 999:
+            return (False, "INVALID_QUANTITY", "Quantidade deve estar entre 1 e 999")
+        
+        if extras and len(extras) > 50:
+            return (False, "TOO_MANY_EXTRAS", "Número máximo de extras por item: 50")
+        
+        if base_modifications and len(base_modifications) > 50:
+            return (False, "TOO_MANY_MODIFICATIONS", "Número máximo de modificações: 50")
+        
+        # Valida e converte cart_id
+        cart_id = _validate_cart_id(cart_id)
+        
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Valida limite de itens no carrinho
+        cur.execute("SELECT COUNT(*) FROM CART_ITEMS WHERE CART_ID = ?;", (cart_id,))
+        item_count = cur.fetchone()[0]
+        if item_count >= 100:
+            return (False, "CART_FULL", "Carrinho cheio. Máximo de 100 itens diferentes")
 
         # Verifica existência do carrinho convidado ativo
         cur.execute("SELECT ID FROM CARTS WHERE ID = ? AND USER_ID IS NULL AND IS_ACTIVE = TRUE;", (cart_id,))
@@ -458,21 +546,21 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 qty = int(extra.get("quantity", 1))
                 rule = rules.get(ing_id)
                 if not rule:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um ou mais extras não são permitidos para este produto")
                 if float(rule["portions"]) != 0.0:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
                 min_q = int(rule["min_quantity"] or 0)
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
                 
                 # Verifica estoque suficiente para extras
                 extra_stock_check = _check_ingredient_stock_availability(cur, ing_id, qty * quantity)
                 if not extra_stock_check[0]:
                     return (False, "INSUFFICIENT_STOCK", f"Estoque insuficiente para extra: {extra_stock_check[1]}")
 
-        # Verifica item idêntico
-        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "")
+        # Verifica item idêntico (inclui base_mods)
+        existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "", base_modifications or [])
 
         if existing_item_id:
             sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
@@ -485,12 +573,37 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
             if extras:
                 for extra in extras:
                     ingredient_id = extra.get("ingredient_id")
-                    extra_quantity = extra.get("quantity", 1)
-                    sql_check = "SELECT ID FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;"
-                    cur.execute(sql_check, (ingredient_id,))
-                    if cur.fetchone():
-                        sql_extra = "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);"
-                        cur.execute(sql_extra, (new_item_id, ingredient_id, extra_quantity))
+                    extra_quantity = int(extra.get("quantity", 1))
+                    if extra_quantity <= 0:
+                        continue
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
+                    rowp = cur.fetchone()
+                    if rowp:
+                        unit_price = float(rowp[0] or 0.0)
+                        cur.execute(
+                            "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);",
+                            (new_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price)
+                        )
+
+            if base_modifications:
+                rules = _get_product_rules(cur, product_id)
+                for bm in base_modifications:
+                    try:
+                        ing_id = int(bm.get("ingredient_id"))
+                        delta = int(bm.get("delta", 0))
+                    except (ValueError, TypeError, AttributeError):
+                        # Ignora modificações com formato inválido
+                        continue
+                    rule = rules.get(ing_id)
+                    if not rule or float(rule["portions"]) == 0.0 or delta == 0:
+                        continue
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ing_id,))
+                    rowp = cur.fetchone()
+                    unit_price = float(rowp[0] or 0.0) if rowp else 0.0
+                    cur.execute(
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                        (new_item_id, ing_id, delta, unit_price)
+                    )
 
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
@@ -522,7 +635,7 @@ def _get_setting_percent(key, default=0.0):
         if conn: conn.close()
 
 
-def find_identical_cart_item(cart_id, product_id, extras, notes):
+def find_identical_cart_item(cart_id, product_id, extras, notes, base_modifications=None):
     """
     Verifica se já existe um item idêntico no carrinho (mesmo produto e mesmos extras)
     """
@@ -535,25 +648,42 @@ def find_identical_cart_item(cart_id, product_id, extras, notes):
         sql = "SELECT ID, CAST(NOTES AS VARCHAR(1000)) FROM CART_ITEMS WHERE CART_ID = ? AND PRODUCT_ID = ?;"
         cur.execute(sql, (cart_id, product_id))
         items = cur.fetchall()
-        
+
         for item_id, existing_notes in items:
-            # Busca extras deste item
-            sql_extras = "SELECT INGREDIENT_ID, QUANTITY FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY INGREDIENT_ID;"
-            cur.execute(sql_extras, (item_id,))
-            existing_extras = cur.fetchall()
-            
-            # Compara extras
-            if len(existing_extras) == len(extras):
-                extras_match = True
-                for i, (ingredient_id, quantity) in enumerate(existing_extras):
-                    if (i >= len(extras) or 
-                        extras[i].get("ingredient_id") != ingredient_id or 
-                        extras[i].get("quantity", 1) != quantity):
-                        extras_match = False
-                        break
-                
-                if extras_match and (existing_notes or "") == (notes or ""):
-                    return item_id
+            # Busca todas as linhas (extras e base) e normaliza
+            cur.execute(
+                "SELECT INGREDIENT_ID, COALESCE(DELTA, QUANTITY) AS DELTA, TYPE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY TYPE, INGREDIENT_ID;",
+                (item_id,)
+            )
+            rows = cur.fetchall()
+            existing_extras = [(r[0], int(r[1])) for r in rows if (r[2] or 'extra').lower() == 'extra']
+            existing_base = [(r[0], int(r[1])) for r in rows if (r[2] or 'extra').lower() == 'base' and int(r[1]) != 0]
+
+            wanted_extras = []
+            for ex in (extras or []):
+                try:
+                    wanted_extras.append((int(ex.get("ingredient_id")), int(ex.get("quantity", 1))))
+                except (ValueError, TypeError, AttributeError):
+                    # Ignora extras com formato inválido
+                    continue
+            wanted_extras.sort()
+
+            wanted_base = []
+            for bm in (base_modifications or []):
+                try:
+                    d = int(bm.get("delta", 0))
+                    if d != 0:
+                        wanted_base.append((int(bm.get("ingredient_id")), d))
+                except (ValueError, TypeError, AttributeError):
+                    # Ignora modificações com formato inválido
+                    continue
+            wanted_base.sort()
+
+            extras_match = (existing_extras == wanted_extras)
+            base_match = (existing_base == wanted_base)
+
+            if extras_match and base_match and (existing_notes or "") == (notes or ""):
+                return item_id
         
         return None
         
@@ -564,7 +694,7 @@ def find_identical_cart_item(cart_id, product_id, extras, notes):
         if conn: conn.close()
 
 
-def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=None):
+def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=None, base_modifications=None):
     """
     Atualiza um item do carrinho
     """
@@ -590,7 +720,12 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
             sql = "UPDATE CART_ITEMS SET QUANTITY = ? WHERE ID = ?;"
             cur.execute(sql, (quantity, cart_item_id))
         
-        # Atualiza extras se fornecidos
+        # Atualiza notes se fornecido
+        if notes is not None:
+            sql = "UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;"
+            cur.execute(sql, (notes, cart_item_id))
+        
+        # Atualiza extras se fornecidos (independente de notes)
         if extras is not None:
             # Valida conforme regras do produto deste item
             cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
@@ -604,33 +739,58 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
                 qty = int(extra.get("quantity", 1))
                 rule = rules.get(ing_id)
                 if not rule:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um ou mais extras não são permitidos para este produto")
                 if float(rule["portions"]) != 0.0:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
                 min_q = int(rule["min_quantity"] or 0)
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
-        # Atualiza notes se fornecido
-        if notes is not None:
-            sql = "UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;"
-            cur.execute(sql, (notes, cart_item_id))
-            # Remove extras antigos
-            sql = "DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;"
-            cur.execute(sql, (cart_item_id,))
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
             
-            # Adiciona novos extras
+            # Remove e recria apenas linhas TYPE='extra'
+            cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'extra';", (cart_item_id,))
             for extra in extras:
                 ingredient_id = extra.get("ingredient_id")
-                extra_quantity = extra.get("quantity", 1)
-                
-                # Verifica se ingrediente existe
-                sql_check = "SELECT ID FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;"
-                cur.execute(sql_check, (ingredient_id,))
-                if cur.fetchone():
-                    sql_extra = "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);"
-                    cur.execute(sql_extra, (cart_item_id, ingredient_id, extra_quantity))
+                extra_quantity = int(extra.get("quantity", 1))
+                if extra_quantity <= 0:
+                    continue
+                cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
+                rowp = cur.fetchone()
+                if rowp:
+                    unit_price = float(rowp[0] or 0.0)
+                    cur.execute(
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);",
+                        (cart_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price)
+                    )
         
+        # Atualiza base_modifications se fornecido
+        if base_modifications is not None:
+            # Remove e recria TYPE='base'
+            cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'base';", (cart_item_id,))
+            # Precisamos do product_id para validar regras
+            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+            row = cur.fetchone()
+            if not row:
+                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+            product_id = row[0]
+            rules = _get_product_rules(cur, product_id)
+            for bm in base_modifications:
+                try:
+                    ing_id = int(bm.get("ingredient_id"))
+                    delta = int(bm.get("delta", 0))
+                except Exception:
+                    continue
+                rule = rules.get(ing_id)
+                if not rule or float(rule["portions"]) == 0.0 or delta == 0:
+                    continue
+                cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ing_id,))
+                rowp = cur.fetchone()
+                unit_price = float(rowp[0] or 0.0) if rowp else 0.0
+                cur.execute(
+                    "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                    (cart_item_id, ing_id, delta, unit_price)
+                )
+
         conn.commit()
         return (True, None, "Item atualizado com sucesso")
         
@@ -642,12 +802,15 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         if conn: conn.close()
 
 
-def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, notes=None):
+def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, notes=None, base_modifications=None):
     """
     Atualiza um item do carrinho para carrinho convidado (por cart_id)
     """
     conn = None
     try:
+        # Valida e converte cart_id
+        cart_id = _validate_cart_id(cart_id)
+        
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -666,6 +829,11 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
                 return (False, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
             cur.execute("UPDATE CART_ITEMS SET QUANTITY = ? WHERE ID = ?;", (quantity, cart_item_id))
 
+        # Atualiza notes se fornecido (independente de extras)
+        if notes is not None:
+            cur.execute("UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;", (notes, cart_item_id))
+
+        # Atualiza extras se fornecidos (independente de notes)
         if extras is not None:
             # Valida conforme regras do produto deste item
             cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
@@ -679,28 +847,55 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
                 qty = int(extra.get("quantity", 1))
                 rule = rules.get(ing_id)
                 if not rule:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} não permitido para o produto")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um ou mais extras não são permitidos para este produto")
                 if float(rule["portions"]) != 0.0:
-                    return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente {ing_id} é da receita base")
+                    return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
                 min_q = int(rule["min_quantity"] or 0)
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (False, "EXTRA_OUT_OF_RANGE", f"Extra {ing_id} fora do intervalo [{min_q}, {max_q or '∞'}]")
+                    return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
 
-            # Atualiza notes
-            if notes is not None:
-                cur.execute("UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;", (notes, cart_item_id))
-
-            # Remove extras antigos e adiciona novos
-            cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;", (cart_item_id,))
+            # Remove e recria apenas TYPE='extra'
+            cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'extra';", (cart_item_id,))
             for extra in extras:
                 ingredient_id = extra.get("ingredient_id")
-                extra_quantity = extra.get("quantity", 1)
-                sql_check = "SELECT ID FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;"
-                cur.execute(sql_check, (ingredient_id,))
-                if cur.fetchone():
-                    sql_extra = "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);"
-                    cur.execute(sql_extra, (cart_item_id, ingredient_id, extra_quantity))
+                extra_quantity = int(extra.get("quantity", 1))
+                if extra_quantity <= 0:
+                    continue
+                cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
+                rowp = cur.fetchone()
+                if rowp:
+                    unit_price = float(rowp[0] or 0.0)
+                    cur.execute(
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);",
+                        (cart_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price)
+                    )
+
+        # Atualiza base_modifications se fornecido
+        if base_modifications is not None:
+            cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'base';", (cart_item_id,))
+            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+            row = cur.fetchone()
+            if not row:
+                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+            product_id = row[0]
+            rules = _get_product_rules(cur, product_id)
+            for bm in base_modifications:
+                try:
+                    ing_id = int(bm.get("ingredient_id"))
+                    delta = int(bm.get("delta", 0))
+                except Exception:
+                    continue
+                rule = rules.get(ing_id)
+                if not rule or float(rule["portions"]) == 0.0 or delta == 0:
+                    continue
+                cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ing_id,))
+                rowp = cur.fetchone()
+                unit_price = float(rowp[0] or 0.0) if rowp else 0.0
+                cur.execute(
+                    "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                    (cart_item_id, ing_id, delta, unit_price)
+                )
 
         conn.commit()
         return (True, None, "Item atualizado com sucesso")
@@ -836,6 +1031,9 @@ def remove_cart_item_by_cart(cart_id, cart_item_id):
     """
     conn = None
     try:
+        # Valida e converte cart_id
+        cart_id = _validate_cart_id(cart_id)
+        
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -1009,6 +1207,9 @@ def validate_guest_cart_for_order(cart_id):
     """
     conn = None
     try:
+        # Valida e converte cart_id
+        cart_id = _validate_cart_id(cart_id)
+        
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -1090,6 +1291,9 @@ def claim_guest_cart(guest_cart_id, user_id):
     """
     conn = None
     try:
+        # Valida e converte guest_cart_id
+        guest_cart_id = _validate_cart_id(guest_cart_id)
+        
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -1118,13 +1322,25 @@ def claim_guest_cart(guest_cart_id, user_id):
         cur.execute("SELECT ID, PRODUCT_ID, QUANTITY, CAST(NOTES AS VARCHAR(1000)) FROM CART_ITEMS WHERE CART_ID = ?;", (guest_cart_id,))
         guest_items = cur.fetchall()
         for item_id, product_id, quantity, notes in guest_items:
-            # Busca extras do item convidado
-            cur.execute("SELECT INGREDIENT_ID, QUANTITY FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY INGREDIENT_ID;", (item_id,))
+            # Busca extras e base_modifications do item convidado (com TYPE, DELTA, UNIT_PRICE)
+            cur.execute(
+                "SELECT INGREDIENT_ID, COALESCE(DELTA, QUANTITY) AS DELTA, TYPE, UNIT_PRICE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY TYPE, INGREDIENT_ID;",
+                (item_id,)
+            )
             extras_rows = cur.fetchall()
-            extras = [{"ingredient_id": r[0], "quantity": r[1]} for r in extras_rows]
+            
+            # Separa extras e base_modifications
+            extras = []
+            base_modifications = []
+            for r in extras_rows:
+                row_type = (r[2] or 'extra').lower()
+                if row_type == 'extra':
+                    extras.append({"ingredient_id": r[0], "quantity": r[1]})
+                elif row_type == 'base':
+                    base_modifications.append({"ingredient_id": r[0], "delta": r[1]})
 
-            # Verifica item idêntico no carrinho do usuário
-            identical_id = find_identical_cart_item(user_cart_id, product_id, extras, notes or "")
+            # Verifica item idêntico no carrinho do usuário (inclui base_modifications)
+            identical_id = find_identical_cart_item(user_cart_id, product_id, extras, notes or "", base_modifications)
             if identical_id:
                 cur.execute("UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;", (quantity, identical_id))
             else:
@@ -1133,10 +1349,25 @@ def claim_guest_cart(guest_cart_id, user_id):
                     (user_cart_id, product_id, quantity, notes)
                 )
                 new_user_item_id = cur.fetchone()[0]
+                
+                # Insere extras (TYPE='extra')
                 for ex in extras:
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ?;", (ex["ingredient_id"],))
+                    price_row = cur.fetchone()
+                    unit_price = float(price_row[0] or 0.0) if price_row else 0.0
                     cur.execute(
-                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY) VALUES (?, ?, ?);",
-                        (new_user_item_id, ex["ingredient_id"], ex["quantity"])
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);",
+                        (new_user_item_id, ex["ingredient_id"], ex["quantity"], ex["quantity"], unit_price)
+                    )
+                
+                # Insere base_modifications (TYPE='base')
+                for bm in base_modifications:
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ?;", (bm["ingredient_id"],))
+                    price_row = cur.fetchone()
+                    unit_price = float(price_row[0] or 0.0) if price_row else 0.0
+                    cur.execute(
+                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                        (new_user_item_id, bm["ingredient_id"], bm["delta"], unit_price)
                     )
 
         # Desativa o carrinho convidado após mesclar

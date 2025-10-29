@@ -1,6 +1,5 @@
 from flask import Blueprint, request, jsonify
 from ..services import cart_service
-from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 
 cart_bp = Blueprint('cart', __name__)
@@ -69,6 +68,9 @@ def add_item_to_cart_route():
         quantity = data.get('quantity', 1)
         extras = data.get('extras', [])
         notes = data.get('notes')
+        base_modifications = data.get('base_modifications')
+        base_modifications = data.get('base_modifications')
+        base_modifications = data.get('base_modifications', [])
         
         # Validações básicas
         if not product_id:
@@ -83,7 +85,7 @@ def add_item_to_cart_route():
             return jsonify({"error": error_msg}), 400
         
         # Adiciona item ao carrinho
-        success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes)
+        success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes, base_modifications)
         
         if not success:
             status_code = 404 if error_code == "PRODUCT_NOT_FOUND" else 500
@@ -120,6 +122,7 @@ def smart_add_item_route():
         extras = data.get('extras', [])
         notes = data.get('notes')
         guest_cart_id = data.get('guest_cart_id')
+        base_modifications = data.get('base_modifications', [])
 
         # Validações básicas
         if not product_id:
@@ -147,7 +150,7 @@ def smart_add_item_route():
             user_id = None
 
         if user_id:
-            success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes)
+            success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes, base_modifications)
             if not success:
                 status_code = 404 if error_code == "PRODUCT_NOT_FOUND" else 500
                 return jsonify({"error": message or "Erro ao adicionar item"}), status_code
@@ -162,7 +165,7 @@ def smart_add_item_route():
 
         # Convidado com guest_cart_id informado
         if guest_cart_id:
-            success, error_code, message = cart_service.add_item_to_cart_by_cart_id(guest_cart_id, product_id, quantity, extras, notes)
+            success, error_code, message = cart_service.add_item_to_cart_by_cart_id(guest_cart_id, product_id, quantity, extras, notes, base_modifications)
             if not success:
                 status_code = 404 if error_code in ("PRODUCT_NOT_FOUND", "CART_NOT_FOUND") else 500
                 return jsonify({"error": message or "Erro ao adicionar item"}), status_code
@@ -180,7 +183,7 @@ def smart_add_item_route():
         if not guest_cart:
             return jsonify({"error": "Não foi possível criar carrinho"}), 500
         new_cart_id = guest_cart["id"]
-        success, error_code, message = cart_service.add_item_to_cart_by_cart_id(new_cart_id, product_id, quantity, extras, notes)
+        success, error_code, message = cart_service.add_item_to_cart_by_cart_id(new_cart_id, product_id, quantity, extras, notes, base_modifications)
         if not success:
             return jsonify({"error": message or "Erro ao adicionar item"}), 500
         cart_summary = cart_service.get_cart_summary_by_cart_id(new_cart_id)
@@ -205,13 +208,16 @@ def smart_update_item_route(cart_item_id):
         quantity = data.get('quantity')
         extras = data.get('extras')
         notes = data.get('notes')
+        base_modifications = data.get('base_modifications')
+        base_modifications = data.get('base_modifications')
+        base_modifications = data.get('base_modifications')
         guest_cart_id = data.get('guest_cart_id')
 
         if quantity is not None and (not isinstance(quantity, int) or quantity <= 0):
             return jsonify({"error": "quantity deve ser um número inteiro positivo"}), 400
         if extras is not None and not isinstance(extras, list):
             return jsonify({"error": "extras deve ser uma lista"}), 400
-        if quantity is None and extras is None and notes is None:
+        if quantity is None and extras is None and notes is None and base_modifications is None:
             return jsonify({"error": "Nada para atualizar"}), 400
 
         user_id = None
@@ -222,7 +228,7 @@ def smart_update_item_route(cart_item_id):
             user_id = None
 
         if user_id:
-            success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras, notes)
+            success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras, notes, base_modifications)
             if not success:
                 status = 404 if error_code in ("ITEM_NOT_FOUND",) else (400 if error_code == "INVALID_QUANTITY" else 500)
                 return jsonify({"error": message}), status
@@ -236,7 +242,7 @@ def smart_update_item_route(cart_item_id):
 
         if not guest_cart_id:
             return jsonify({"error": "guest_cart_id é obrigatório para convidados"}), 400
-        success, error_code, message = cart_service.update_cart_item_by_cart(guest_cart_id, cart_item_id, quantity, extras, notes)
+        success, error_code, message = cart_service.update_cart_item_by_cart(guest_cart_id, cart_item_id, quantity, extras, notes, base_modifications)
         if not success:
             status = 404 if error_code in ("ITEM_NOT_FOUND",) else (400 if error_code == "INVALID_QUANTITY" else 500)
             return jsonify({"error": message}), status
@@ -313,6 +319,7 @@ def update_cart_item_route(cart_item_id):
         quantity = data.get('quantity')
         extras = data.get('extras')
         notes = data.get('notes')
+        base_modifications = data.get('base_modifications')
         
         # Validações
         if quantity is not None and (not isinstance(quantity, int) or quantity <= 0):
@@ -335,11 +342,11 @@ def update_cart_item_route(cart_item_id):
                     return jsonify({"error": "quantity do extra deve ser um número inteiro positivo"}), 400
         
         # Verifica se pelo menos um campo foi fornecido
-        if quantity is None and extras is None:
-            return jsonify({"error": "Pelo menos um campo (quantity ou extras) deve ser fornecido"}), 400
+        if quantity is None and extras is None and base_modifications is None and notes is None:
+            return jsonify({"error": "Pelo menos um campo (quantity, extras, notes ou base_modifications) deve ser fornecido"}), 400
         
         # Atualiza item do carrinho
-        success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras, notes)
+        success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras, notes, base_modifications)
         
         if not success:
             if error_code == "ITEM_NOT_FOUND":
