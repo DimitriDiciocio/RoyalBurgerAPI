@@ -106,7 +106,7 @@ def _validate_ingredients_and_extras(items, cur):
             raise ValueError(f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
 
 def _calculate_order_total(items, cur):
-    """Calcula total do pedido"""
+    """Calcula total do pedido incluindo extras e base_modifications"""
     product_prices = {}
     order_total = 0
     product_ids = {item['product_id'] for item in items}
@@ -119,6 +119,7 @@ def _calculate_order_total(items, cur):
         for item in items:
             order_total += product_prices.get(item['product_id'], 0) * item.get('quantity', 1)
 
+    # Preços dos extras
     extra_prices = {}
     extra_ingredient_ids = set()
     for item in items:
@@ -135,6 +136,28 @@ def _calculate_order_total(items, cur):
             if 'extras' in item and item['extras']:
                 for extra in item['extras']:
                     order_total += extra_prices.get(extra['ingredient_id'], 0) * extra.get('quantity', 1)
+    
+    # Preços das base_modifications (apenas deltas positivos contribuem para preço)
+    base_mod_prices = {}
+    base_mod_ingredient_ids = set()
+    for item in items:
+        if 'base_modifications' in item and item['base_modifications']:
+            for bm in item['base_modifications']:
+                delta = bm.get('delta', 0)
+                if delta > 0:  # Apenas deltas positivos adicionam ao preço
+                    base_mod_ingredient_ids.add(bm['ingredient_id'])
+    
+    if base_mod_ingredient_ids:
+        placeholders = ', '.join(['?' for _ in base_mod_ingredient_ids])
+        cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ingredient_ids))
+        base_mod_prices = {row[0]: row[1] for row in cur.fetchall()}
+        
+        for item in items:
+            if 'base_modifications' in item and item['base_modifications']:
+                for bm in item['base_modifications']:
+                    delta = bm.get('delta', 0)
+                    if delta > 0:  # Apenas deltas positivos contribuem para o preço
+                        order_total += base_mod_prices.get(bm['ingredient_id'], 0) * delta
 
     return order_total
 
@@ -169,13 +192,27 @@ def _add_order_items(order_id, items, cur):
         cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
         new_order_item_id = cur.fetchone()[0]
 
+        # Insere extras (TYPE='extra')
         if 'extras' in item and item['extras']:
             for extra in item['extras']:
                 extra_id = extra['ingredient_id']
                 extra_qty = extra.get('quantity', 1)
                 extra_price = extra_prices[extra_id]
-                sql_extra = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?);"
-                cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_price))
+                sql_extra = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);"
+                cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_qty, extra_price))
+        
+        # Insere base_modifications (TYPE='base')
+        if 'base_modifications' in item and item['base_modifications']:
+            for bm in item['base_modifications']:
+                bm_id = bm['ingredient_id']
+                bm_delta = bm.get('delta', 0)
+                if bm_delta != 0:
+                    # Busca preço para ingredientes de base modificados
+                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ?;", (bm_id,))
+                    bm_price_row = cur.fetchone()
+                    bm_price = float(bm_price_row[0] or 0.0) if bm_price_row else 0.0
+                    sql_base_mod = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);"
+                    cur.execute(sql_base_mod, (new_order_item_id, bm_id, bm_delta, bm_price))
 
 def _notify_kitchen(order_id):
     """Notifica a cozinha sobre novo pedido"""
@@ -437,25 +474,35 @@ def get_order_details(order_id, user_id, user_role):
                 "unit_price": item_row[2],
                 "product_name": item_row[3],
                 "product_description": item_row[4],
-                "extras": []
+                "extras": [],
+                "base_modifications": []
             }
-            # Busca extras do item
+            # Busca extras e base_modifications do item
             cur2 = conn.cursor()
             cur2.execute(
                 """
-                SELECT e.INGREDIENT_ID, i.NAME, e.QUANTITY
+                SELECT e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
                 FROM ORDER_ITEM_EXTRAS e
                 JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
                 WHERE e.ORDER_ITEM_ID = ?
+                ORDER BY e.TYPE, i.NAME
                 """,
                 (order_item_id,)
             )
             for ex in cur2.fetchall():
-                item_dict["extras"].append({
-                    "ingredient_id": ex[0],
-                    "name": ex[1],
-                    "quantity": ex[2]
-                })
+                row_type = (ex[3] or 'extra').lower()
+                if row_type == 'extra':
+                    item_dict["extras"].append({
+                        "ingredient_id": ex[0],
+                        "name": ex[1],
+                        "quantity": ex[2]
+                    })
+                elif row_type == 'base':
+                    item_dict["base_modifications"].append({
+                        "ingredient_id": ex[0],
+                        "name": ex[1],
+                        "delta": int(ex[4])
+                    })
             order_items.append(item_dict)
 
         
@@ -601,14 +648,24 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
 
         # Preços dos extras do carrinho
         extra_ids = set()
+        base_mod_ids = set()
         for it in cart_data["items"]:
-            for ex in it["extras"]:
+            for ex in it.get("extras", []):
                 extra_ids.add(ex["ingredient_id"])
+            for bm in it.get("base_modifications", []):
+                base_mod_ids.add(bm["ingredient_id"])
+        
         extra_prices = {}
         if extra_ids:
             placeholders = ', '.join(['?' for _ in extra_ids])
             cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
             extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+        
+        base_mod_prices = {}
+        if base_mod_ids:
+            placeholders = ', '.join(['?' for _ in base_mod_ids])
+            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ids))
+            base_mod_prices = {row[0]: row[1] for row in cur.fetchall()}
 
         # Copia itens do carrinho para o pedido (com preços)
         for item in cart_data["items"]:
@@ -624,16 +681,28 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
             cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
             order_item_id = cur.fetchone()[0]
 
-            # Insere extras do item com UNIT_PRICE
-            for extra in item["extras"]:
+            # Insere extras do item (TYPE='extra')
+            for extra in item.get("extras", []):
                 ex_id = extra["ingredient_id"]
-                ex_qty = extra["quantity"]
+                ex_qty = extra.get("quantity", 1)
                 ex_price = extra_prices.get(ex_id, 0)
                 sql_extra = """
-                    INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, UNIT_PRICE)
-                    VALUES (?, ?, ?, ?);
+                    INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
+                    VALUES (?, ?, ?, 'extra', ?, ?);
                 """
-                cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_price))
+                cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_qty, ex_price))
+            
+            # Insere base_modifications do item (TYPE='base')
+            for bm in item.get("base_modifications", []):
+                bm_id = bm["ingredient_id"]
+                bm_delta = bm.get("delta", 0)
+                if bm_delta != 0:
+                    bm_price = base_mod_prices.get(bm_id, 0)
+                    sql_base_mod = """
+                        INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
+                        VALUES (?, ?, 0, 'base', ?, ?);
+                    """
+                    cur.execute(sql_base_mod, (order_item_id, bm_id, bm_delta, bm_price))
         
         # Limpa o carrinho do usuário
         cart_id = cart_data["cart_id"]

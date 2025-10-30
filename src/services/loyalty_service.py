@@ -1,13 +1,18 @@
 import fdb  
-from datetime import date  
+from datetime import date, timedelta
 from ..database import get_db_connection
 from . import settings_service
 
 def _get_loyalty_settings():
     """Retorna configurações de pontos do sistema"""
     settings = settings_service.get_all_settings()
+    conversion_rate = float(settings.get('taxa_conversao_clube', 0.01) or 0.01)
+    # Valida taxa de conversão para evitar divisão por zero
+    if conversion_rate <= 0:
+        conversion_rate = 0.01  # Fallback seguro
+    
     return {
-        'conversion_rate': float(settings.get('taxa_conversao_clube', 0.01) or 0.01),
+        'conversion_rate': conversion_rate,
         'expiration_days': int(settings.get('taxa_expiracao_pontos_clube', 60) or 60),
         'welcome_points': 100  # Pontos de boas-vindas (mantido fixo ou pode configurar)
     }
@@ -16,6 +21,23 @@ def _validate_points(points):
     """Valida se pontos é um valor válido"""
     if not isinstance(points, (int, float)) or points < 0:
         raise ValueError("Pontos devem ser um número não negativo")
+
+def _calculate_expiration_date(expiration_days):
+    """Calcula data de expiração a partir de hoje + dias (compatível com Firebird)"""
+    return date.today() + timedelta(days=expiration_days)
+
+def _get_current_balance_from_cursor(user_id, cur):
+    """Busca saldo atual usando cursor existente (para uso dentro de transações)"""
+    cur.execute("""
+        SELECT ACCUMULATED_POINTS, SPENT_POINTS 
+        FROM LOYALTY_POINTS 
+        WHERE USER_ID = ?
+    """, (user_id,))
+    account = cur.fetchone()
+    if not account:
+        return 0
+    accumulated, spent = account
+    return max(0, accumulated - spent)
 
 def _expire_points_if_needed(user_id, cur):
     """Centraliza lógica de expiração de pontos"""
@@ -42,7 +64,7 @@ def _expire_points_if_needed(user_id, cur):
             return points_to_expire
         
         return 0
-    except Exception as e:
+    except (fdb.Error, ValueError, TypeError) as e:
         print(f"Erro ao verificar expiração de pontos: {e}")
         return 0  
 
@@ -69,7 +91,10 @@ def create_loyalty_account_if_not_exists(user_id, cur):
 
 def earn_points_for_order(user_id, order_id, total_amount, cur):  
     try:
-        _validate_points(total_amount)
+        # Valida que total_amount é positivo antes de calcular pontos
+        if not isinstance(total_amount, (int, float)) or total_amount < 0:
+            raise ValueError("total_amount deve ser um número não negativo")
+        
         create_loyalty_account_if_not_exists(user_id, cur)  
         
         # Obter taxa de conversão das configurações
@@ -81,22 +106,25 @@ def earn_points_for_order(user_id, order_id, total_amount, cur):
         # conversion_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
         points_to_earn = int(total_amount / conversion_rate)
         
+        # Calcula data de expiração (Firebird não suporta CURRENT_DATE + ?)
+        expiration_date = _calculate_expiration_date(expiration_days)
+        
         sql_update_account = """
             UPDATE LOYALTY_POINTS
             SET 
                 ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
-                POINTS_EXPIRATION_DATE = CURRENT_DATE + ?
+                POINTS_EXPIRATION_DATE = ?
             WHERE USER_ID = ?;
         """  
-        cur.execute(sql_update_account, (points_to_earn, expiration_days, user_id))  
+        cur.execute(sql_update_account, (points_to_earn, expiration_date, user_id))  
         
         sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"  
         reason = f"Pontos ganhos no pedido #{order_id}"
         cur.execute(sql_add_history, (user_id, order_id, points_to_earn, reason))  
         print(f"{points_to_earn} pontos ganhos e validade renovada para o usuário {user_id}.")  
-    except Exception as e:
+    except (fdb.Error, ValueError, TypeError) as e:
         print(f"Erro ao ganhar pontos: {e}")
-        raise e  
+        raise  
 
 def add_welcome_points(user_id, cur):
     """Adiciona pontos de boas-vindas configuráveis para novos clientes"""
@@ -108,14 +136,17 @@ def add_welcome_points(user_id, cur):
         welcome_points = loyalty_config['welcome_points']
         expiration_days = loyalty_config['expiration_days']
         
+        # Calcula data de expiração (Firebird não suporta CURRENT_DATE + ?)
+        expiration_date = _calculate_expiration_date(expiration_days)
+        
         sql_update_account = """
             UPDATE LOYALTY_POINTS
             SET 
                 ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
-                POINTS_EXPIRATION_DATE = CURRENT_DATE + ?
+                POINTS_EXPIRATION_DATE = ?
             WHERE USER_ID = ?;
         """
-        cur.execute(sql_update_account, (welcome_points, expiration_days, user_id))
+        cur.execute(sql_update_account, (welcome_points, expiration_date, user_id))
         
         # Adiciona histórico dos pontos de boas-vindas
         sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, POINTS, REASON) VALUES (?, ?, ?);"
@@ -145,6 +176,7 @@ def get_loyalty_balance(user_id):
         expired_points = _expire_points_if_needed(user_id, cur)
         if expired_points > 0:
             conn.commit()
+            # Corrigido: após expiração, spent_points deve ser igual a accumulated
             return {"accumulated_points": accumulated, "spent_points": accumulated, "current_balance": 0}  
         
         current_balance = accumulated - spent  
@@ -160,8 +192,8 @@ def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):
     try:
         _validate_points(points_to_redeem)
         
-        balance_data = get_loyalty_balance(user_id)  
-        current_balance = balance_data.get("current_balance", 0)  
+        # Usa cursor existente para evitar abertura de nova conexão dentro de transação
+        current_balance = _get_current_balance_from_cursor(user_id, cur)
         
         if current_balance < points_to_redeem:  
             raise ValueError(f"Saldo de pontos insuficiente. Saldo atual: {current_balance}, Pontos para resgate: {points_to_redeem}")  
@@ -182,9 +214,9 @@ def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):
         discount_amount = points_to_redeem * conversion_rate
         print(f"{points_to_redeem} pontos resgatados pelo usuário {user_id} por R${discount_amount:.2f} de desconto.")  
         return discount_amount  
-    except Exception as e:
+    except (fdb.Error, ValueError, TypeError) as e:
         print(f"Erro ao resgatar pontos: {e}")
-        raise e  
+        raise  
 
 def get_loyalty_history(user_id):  
     conn = None  
@@ -231,15 +263,18 @@ def add_points_manually(user_id, points, reason, order_id=None):
         # Cria conta se não existir
         create_loyalty_account_if_not_exists(user_id, cur)
         
+        # Calcula data de expiração (60 dias a partir de hoje)
+        expiration_date = _calculate_expiration_date(60)
+        
         # Atualiza pontos acumulados
         sql_update = """
             UPDATE LOYALTY_POINTS
             SET 
                 ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
-                POINTS_EXPIRATION_DATE = CURRENT_DATE + 60
+                POINTS_EXPIRATION_DATE = ?
             WHERE USER_ID = ?;
         """
-        cur.execute(sql_update, (points, user_id))
+        cur.execute(sql_update, (points, expiration_date, user_id))
         
         # Adiciona ao histórico
         sql_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"
@@ -262,9 +297,11 @@ def spend_points_manually(user_id, points, reason, order_id=None):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Verifica saldo
-        balance_data = get_loyalty_balance(user_id)
-        current_balance = balance_data.get("current_balance", 0)
+        # Cria conta se não existir antes de verificar saldo
+        create_loyalty_account_if_not_exists(user_id, cur)
+        
+        # Verifica saldo usando cursor (evita nova conexão)
+        current_balance = _get_current_balance_from_cursor(user_id, cur)
         
         if current_balance < points:
             raise ValueError(f"Saldo insuficiente. Saldo atual: {current_balance}, Pontos para gastar: {points}")

@@ -1103,13 +1103,20 @@ def get_cart_for_order(user_id):
         order_item = {
             "product_id": item["product_id"],
             "quantity": item["quantity"],
-            "extras": []
+            "extras": [],
+            "base_modifications": []
         }
         
         for extra in item["extras"]:
             order_item["extras"].append({
                 "ingredient_id": extra["ingredient_id"],
                 "quantity": extra["quantity"]
+            })
+        
+        for base_mod in item.get("base_modifications", []):
+            order_item["base_modifications"].append({
+                "ingredient_id": base_mod["ingredient_id"],
+                "delta": base_mod["delta"]
             })
         
         order_items.append(order_item)

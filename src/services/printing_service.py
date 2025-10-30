@@ -391,25 +391,43 @@ def format_order_for_kitchen_json(order_id: int) -> dict:
         for item_row in cur.fetchall():
             order_item_id, qty, product_name = item_row[0], int(item_row[1] or 1), item_row[2]
 
-            # Extras do item
+            # Extras e modificações de base do item
             cur2 = conn.cursor()
             cur2.execute(
                 """
-                SELECT i.NAME, e.QUANTITY
+                SELECT i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
                 FROM ORDER_ITEM_EXTRAS e
                 JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
                 WHERE e.ORDER_ITEM_ID = ?
-                ORDER BY i.NAME
+                ORDER BY e.TYPE, i.NAME
                 """,
                 (order_item_id,)
             )
             extras = []
             for ex in cur2.fetchall():
-                extras.append({
-                    "type": "add",
-                    "name": ex[0],
-                    "quantity": int(ex[1] or 1)
-                })
+                row_type = (ex[2] or 'extra').lower()
+                if row_type == 'extra':
+                    # Extra adicional
+                    extras.append({
+                        "type": "add",
+                        "name": ex[0],
+                        "quantity": int(ex[1] or 1)
+                    })
+                elif row_type == 'base':
+                    # Modificação da receita base
+                    delta = int(ex[3] or 0)
+                    if delta > 0:
+                        extras.append({
+                            "type": "add",
+                            "name": f"{ex[0]} +{delta}",
+                            "quantity": delta
+                        })
+                    elif delta < 0:
+                        extras.append({
+                            "type": "remove",
+                            "name": ex[0],
+                            "quantity": abs(delta)
+                        })
 
             items.append({
                 "quantity": qty,
