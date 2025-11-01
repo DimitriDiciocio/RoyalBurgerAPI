@@ -6,13 +6,24 @@ from . import settings_service
 def _get_loyalty_settings():
     """Retorna configurações de pontos do sistema"""
     settings = settings_service.get_all_settings()
-    conversion_rate = float(settings.get('taxa_conversao_clube', 0.01) or 0.01)
-    # Valida taxa de conversão para evitar divisão por zero
-    if conversion_rate <= 0:
-        conversion_rate = 0.01  # Fallback seguro
+    
+    # Proteção contra settings None
+    if not settings:
+        settings = {}
+    
+    # Taxa para GANHAR pontos (valor de 1 ponto em reais)
+    gain_rate = float(settings.get('taxa_conversao_ganho_clube', 0.01) or 0.01)
+    if gain_rate <= 0:
+        gain_rate = 0.01  # Fallback seguro
+    
+    # Taxa para RESGATAR pontos (valor de 1 ponto em reais ao resgatar)
+    redemption_rate = float(settings.get('taxa_conversao_resgate_clube', 0.01) or 0.01)
+    if redemption_rate <= 0:
+        redemption_rate = 0.01  # Fallback seguro
     
     return {
-        'conversion_rate': conversion_rate,
+        'gain_rate': gain_rate,  # Taxa de ganho de pontos
+        'redemption_rate': redemption_rate,  # Taxa de resgate de pontos
         'expiration_days': int(settings.get('taxa_expiracao_pontos_clube', 60) or 60),
         'welcome_points': 100  # Pontos de boas-vindas (mantido fixo ou pode configurar)
     }
@@ -90,6 +101,12 @@ def create_loyalty_account_if_not_exists(user_id, cur):
         raise e  
 
 def earn_points_for_order(user_id, order_id, total_amount, cur):  
+    """
+    Calcula e credita pontos baseado no valor da compra.
+    
+    Nota: Esta função calcula pontos sobre o total final do pedido após descontos.
+    Use earn_points_for_order_with_details para cálculo mais preciso com subtotal e desconto proporcional.
+    """
     try:
         # Valida que total_amount é positivo antes de calcular pontos
         if not isinstance(total_amount, (int, float)) or total_amount < 0:
@@ -97,14 +114,14 @@ def earn_points_for_order(user_id, order_id, total_amount, cur):
         
         create_loyalty_account_if_not_exists(user_id, cur)  
         
-        # Obter taxa de conversão das configurações
+        # Obter taxas de conversão das configurações
         loyalty_config = _get_loyalty_settings()
-        conversion_rate = loyalty_config['conversion_rate']
+        gain_rate = loyalty_config['gain_rate']  # Taxa para GANHAR pontos
         expiration_days = loyalty_config['expiration_days']
         
         # Calcular pontos usando taxa configurável
-        # conversion_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
-        points_to_earn = int(total_amount / conversion_rate)
+        # gain_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
+        points_to_earn = int(total_amount / gain_rate)
         
         # Calcula data de expiração (Firebird não suporta CURRENT_DATE + ?)
         expiration_date = _calculate_expiration_date(expiration_days)
@@ -122,6 +139,79 @@ def earn_points_for_order(user_id, order_id, total_amount, cur):
         reason = f"Pontos ganhos no pedido #{order_id}"
         cur.execute(sql_add_history, (user_id, order_id, points_to_earn, reason))  
         print(f"{points_to_earn} pontos ganhos e validade renovada para o usuário {user_id}.")  
+    except (fdb.Error, ValueError, TypeError) as e:
+        print(f"Erro ao ganhar pontos: {e}")
+        raise
+
+def earn_points_for_order_with_details(user_id, order_id, subtotal, discount_amount, delivery_fee, cur):
+    """
+    Calcula e credita pontos de forma mais precisa, considerando subtotal e desconto proporcional.
+    
+    Args:
+        user_id: ID do usuário
+        order_id: ID do pedido
+        subtotal: Valor dos produtos (sem taxa de entrega)
+        discount_amount: Valor do desconto aplicado (de pontos)
+        delivery_fee: Taxa de entrega (0 se pickup)
+        cur: Cursor do banco de dados
+    
+    Returns:
+        int: Pontos ganhos
+    """
+    try:
+        create_loyalty_account_if_not_exists(user_id, cur)
+        
+        # Obter taxas de conversão das configurações
+        loyalty_config = _get_loyalty_settings()
+        gain_rate = loyalty_config['gain_rate']  # Taxa para GANHAR pontos
+        expiration_days = loyalty_config['expiration_days']
+        
+        # Calcula desconto proporcional ao subtotal
+        # Desconto distribuído proporcionalmente entre subtotal e taxa de entrega
+        total_before_discount = subtotal + delivery_fee
+        
+        if discount_amount > 0 and total_before_discount > 0:
+            # Proporção do subtotal no total
+            subtotal_ratio = subtotal / total_before_discount
+            # Desconto proporcional aplicado ao subtotal
+            discount_proportional_subtotal = discount_amount * subtotal_ratio
+        else:
+            discount_proportional_subtotal = 0
+        
+        # Base para cálculo de pontos (subtotal após desconto proporcional)
+        base_for_points = max(0, subtotal - discount_proportional_subtotal)
+        
+        # Calcular pontos ganhos
+        points_to_earn = int(base_for_points / gain_rate)
+        
+        # Não creditar pontos se for 0 ou negativo
+        if points_to_earn <= 0:
+            print(f"Pedido #{order_id}: Nenhum ponto a ser creditado (base: R$ {base_for_points:.2f})")
+            return 0
+        
+        # Calcula data de expiração (Firebird não suporta CURRENT_DATE + ?)
+        expiration_date = _calculate_expiration_date(expiration_days)
+        
+        # Atualiza saldo de pontos
+        sql_update_account = """
+            UPDATE LOYALTY_POINTS
+            SET 
+                ACCUMULATED_POINTS = ACCUMULATED_POINTS + ?,
+                POINTS_EXPIRATION_DATE = ?
+            WHERE USER_ID = ?;
+        """  
+        cur.execute(sql_update_account, (points_to_earn, expiration_date, user_id))  
+        
+        # Registra no histórico
+        sql_add_history = "INSERT INTO LOYALTY_POINTS_HISTORY (USER_ID, ORDER_ID, POINTS, REASON) VALUES (?, ?, ?, ?);"
+        reason = f"Pontos ganhos no pedido #{order_id}"
+        cur.execute(sql_add_history, (user_id, order_id, points_to_earn, reason))
+        
+        print(f"Pedido #{order_id}: {points_to_earn} pontos creditados para usuário {user_id}")
+        print(f"  Detalhes: Subtotal R$ {subtotal:.2f} - Desconto proporcional R$ {discount_proportional_subtotal:.2f} = Base R$ {base_for_points:.2f}")
+        
+        return points_to_earn
+        
     except (fdb.Error, ValueError, TypeError) as e:
         print(f"Erro ao ganhar pontos: {e}")
         raise  
@@ -183,10 +273,12 @@ def get_loyalty_balance(user_id):
         return {"accumulated_points": accumulated, "spent_points": spent, "current_balance": current_balance}  
     except fdb.Error as e:  
         print(f"Erro ao buscar saldo de pontos: {e}")  
-        if conn: conn.rollback()  
+        if conn:
+            conn.rollback()  
         return None  
     finally:  
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
 def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):  
     try:
@@ -207,11 +299,11 @@ def redeem_points_for_discount(user_id, points_to_redeem, order_id, cur):
         
         # Obter taxa de resgate das configurações
         loyalty_config = _get_loyalty_settings()
-        conversion_rate = loyalty_config['conversion_rate']
+        redemption_rate = loyalty_config['redemption_rate']  # Taxa para RESGATAR pontos
         
         # Calcular desconto usando taxa configurável
-        # conversion_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
-        discount_amount = points_to_redeem * conversion_rate
+        # redemption_rate é o valor de 1 ponto em reais (ex: 0.01 = 1 ponto vale R$ 0,01)
+        discount_amount = points_to_redeem * redemption_rate
         print(f"{points_to_redeem} pontos resgatados pelo usuário {user_id} por R${discount_amount:.2f} de desconto.")  
         return discount_amount  
     except (fdb.Error, ValueError, TypeError) as e:
@@ -251,7 +343,8 @@ def get_loyalty_history(user_id):
         print(f"Erro ao buscar histórico de pontos: {e}")  
         return []  
     finally:  
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
 def add_points_manually(user_id, points, reason, order_id=None):
     """Adiciona pontos manualmente (para admin)"""
@@ -285,10 +378,12 @@ def add_points_manually(user_id, points, reason, order_id=None):
         return True
     except fdb.Error as e:
         print(f"Erro ao adicionar pontos manualmente: {e}")
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         return False
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
 def spend_points_manually(user_id, points, reason, order_id=None):
     """Gasta pontos manualmente (para admin)"""
@@ -319,10 +414,12 @@ def spend_points_manually(user_id, points, reason, order_id=None):
         return True
     except fdb.Error as e:
         print(f"Erro ao gastar pontos manualmente: {e}")
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         return False
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
 def get_loyalty_balance_detailed(user_id):
     """Retorna saldo detalhado com informações de expiração"""
@@ -377,10 +474,12 @@ def get_loyalty_balance_detailed(user_id):
         }
     except fdb.Error as e:
         print(f"Erro ao buscar saldo detalhado: {e}")
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         return None
     finally:
-        if conn: conn.close()  
+        if conn:
+            conn.close()  
 
 def expire_inactive_accounts():  
     conn = None  
@@ -406,10 +505,12 @@ def expire_inactive_accounts():
         return len(expired_accounts)  
     except fdb.Error as e:  
         print(f"Erro durante o processo de expiração de pontos: {e}")  
-        if conn: conn.rollback()  
+        if conn:
+            conn.rollback()  
         return -1  
     finally:  
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
 def get_loyalty_statistics():
     """Retorna estatísticas do sistema de fidelidade"""
@@ -479,4 +580,5 @@ def get_loyalty_statistics():
             "error": f"Erro inesperado: {str(e)}"
         }
     finally:
-        if conn: conn.close()  
+        if conn:
+            conn.close()  

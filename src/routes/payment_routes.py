@@ -53,7 +53,7 @@ def get_payment_methods():
     except Exception as e:
         print(f"Erro ao buscar métodos de pagamento: {e}")
         return jsonify({
-            "delivery_fee": 5.50,  # Valor padrão em caso de erro
+            "delivery_fee": 0.0,  # Valor padrão seguro em caso de erro
             "payment_methods": [
                 {
                     "id": "credit_card",

@@ -60,7 +60,9 @@ def create_app():
     from .routes.customer_routes import customer_bp  
     app.register_blueprint(customer_bp, url_prefix='/api/customers')  
     from .routes.user_routes import user_bp  
-    app.register_blueprint(user_bp, url_prefix='/api/users')  
+    app.register_blueprint(user_bp, url_prefix='/api/users')
+    from .routes.store_routes import store_bp
+    app.register_blueprint(store_bp, url_prefix='/api/store')  
     from .routes.product_routes import product_bp  
     app.register_blueprint(product_bp, url_prefix='/api/products')  
     from .routes.order_routes import order_bp  

@@ -21,23 +21,11 @@ def _calculate_cart_totals(items):
     total_items = sum(item["quantity"] for item in items)
     subtotal = sum(item["item_subtotal"] for item in items)
     
-    # Calcula taxas/fees e descontos
-    fees_percent = _get_setting_percent("CART_FEES_PERCENT", default=0.0)
-    taxes_percent = _get_setting_percent("CART_TAXES_PERCENT", default=0.0)
-    discount_percent = _get_setting_percent("CART_DISCOUNT_PERCENT", default=0.0)
-
-    fees = round(subtotal * (fees_percent / 100.0), 2)
-    taxes = round(subtotal * (taxes_percent / 100.0), 2)
-    discounts = round(subtotal * (discount_percent / 100.0), 2)
-    total = round(subtotal + fees + taxes - discounts, 2)
-    
+    # Retorna apenas subtotal - taxas e descontos são aplicados no pedido
     return {
         "total_items": total_items,
         "subtotal": subtotal,
-        "fees": fees,
-        "taxes": taxes,
-        "discounts": discounts,
-        "total": total,
+        "total": subtotal,
         "is_empty": len(items) == 0
     }
 
@@ -615,26 +603,6 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
         if conn: conn.close()
 
 
-def _get_setting_percent(key, default=0.0):
-    """Busca percentuais em APP_SETTINGS (0..100). Retorna float."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT SETTING_VALUE FROM APP_SETTINGS WHERE SETTING_KEY = ?", (key,))
-        row = cur.fetchone()
-        if not row or row[0] is None:
-            return default
-        try:
-            return float(row[0])
-        except Exception:
-            return default
-    except Exception:
-        return default
-    finally:
-        if conn: conn.close()
-
-
 def find_identical_cart_item(cart_id, product_id, extras, notes, base_modifications=None):
     """
     Verifica se já existe um item idêntico no carrinho (mesmo produto e mesmos extras)
@@ -1181,25 +1149,13 @@ def get_cart_summary_by_cart_id(cart_id):
     total_items = sum(item["quantity"] for item in items)
     subtotal = sum(item["item_subtotal"] for item in items)
 
-    fees_percent = _get_setting_percent("CART_FEES_PERCENT", default=0.0)
-    taxes_percent = _get_setting_percent("CART_TAXES_PERCENT", default=0.0)
-    discount_percent = _get_setting_percent("CART_DISCOUNT_PERCENT", default=0.0)
-
-    fees = round(subtotal * (fees_percent / 100.0), 2)
-    taxes = round(subtotal * (taxes_percent / 100.0), 2)
-    discounts = round(subtotal * (discount_percent / 100.0), 2)
-    total = round(subtotal + fees + taxes - discounts, 2)
-
     return {
         "cart": {"id": cart_id, "user_id": None},
         "items": items,
         "summary": {
             "total_items": total_items,
             "subtotal": subtotal,
-            "fees": fees,
-            "taxes": taxes,
-            "discounts": discounts,
-            "total": total,
+            "total": subtotal,
             "is_empty": len(items) == 0,
             "availability_alerts": availability_alerts
         }

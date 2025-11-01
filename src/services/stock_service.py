@@ -1,4 +1,5 @@
 import fdb
+from decimal import Decimal
 from ..database import get_db_connection
 
 def _validate_ingredient_id(ingredient_id):
@@ -71,9 +72,13 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
         
         # Adiciona ingredientes base do produto
         for ingredient_id, portions in product_ingredients:
-            total_needed = float(portions or 0) * quantity
+            # Converte para Decimal para manter precisão e compatibilidade com o banco
+            portions_decimal = Decimal(str(portions or 0))
+            quantity_decimal = Decimal(str(quantity))
+            total_needed = portions_decimal * quantity_decimal
             if ingredient_id in ingredient_deductions:
-                ingredient_deductions[ingredient_id] += total_needed
+                # Garante que a adição mantenha o tipo Decimal
+                ingredient_deductions[ingredient_id] = Decimal(str(ingredient_deductions[ingredient_id])) + total_needed
             else:
                 ingredient_deductions[ingredient_id] = total_needed
         
@@ -90,9 +95,13 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
         
         # Adiciona ingredientes extras
         for ingredient_id, extra_quantity in extras:
-            total_extra = extra_quantity * quantity
+            # Converte para Decimal para manter precisão e compatibilidade com o banco
+            extra_qty_decimal = Decimal(str(extra_quantity))
+            quantity_decimal = Decimal(str(quantity))
+            total_extra = extra_qty_decimal * quantity_decimal
             if ingredient_id in ingredient_deductions:
-                ingredient_deductions[ingredient_id] += total_extra
+                # Garante que a adição mantenha o tipo Decimal
+                ingredient_deductions[ingredient_id] = Decimal(str(ingredient_deductions[ingredient_id])) + total_extra
             else:
                 ingredient_deductions[ingredient_id] = total_extra
     
@@ -116,12 +125,21 @@ def _execute_stock_deductions(ingredient_deductions, cur):
             
         current_stock, min_threshold, current_status, ingredient_name = result
         
-        # Verifica se há estoque suficiente
-        if current_stock < deduction_amount:
-            raise ValueError(f"Estoque insuficiente para {ingredient_name}. Disponível: {current_stock}, Necessário: {deduction_amount}")
+        # Garante que deduction_amount é Decimal para compatibilidade com current_stock
+        # Converte explicitamente para Decimal, lidando com qualquer tipo numérico
+        if isinstance(deduction_amount, Decimal):
+            deduction_decimal = deduction_amount
+        elif isinstance(deduction_amount, (int, float)):
+            deduction_decimal = Decimal(str(deduction_amount))
+        else:
+            deduction_decimal = Decimal(str(deduction_amount))
         
-        # Calcula novo estoque
-        new_stock = current_stock - deduction_amount
+        # Verifica se há estoque suficiente
+        if current_stock < deduction_decimal:
+            raise ValueError(f"Estoque insuficiente para {ingredient_name}. Disponível: {current_stock}, Necessário: {deduction_decimal}")
+        
+        # Calcula novo estoque (ambos Decimal agora)
+        new_stock = current_stock - deduction_decimal
         
         # Determina novo status baseado no estoque
         new_status = _determine_new_status(new_stock, min_threshold, current_status)
@@ -138,7 +156,7 @@ def _execute_stock_deductions(ingredient_deductions, cur):
             'ingredient_name': ingredient_name,
             'old_stock': current_stock,
             'new_stock': new_stock,
-            'deducted': deduction_amount,
+            'deducted': deduction_decimal,
             'new_status': new_status
         })
     

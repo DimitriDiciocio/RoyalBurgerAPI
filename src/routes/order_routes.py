@@ -1,8 +1,8 @@
-from flask import Blueprint, request, jsonify, Response, send_file  
+from flask import Blueprint, request, jsonify, Response
 from ..services import order_service, address_service, store_service  
 from ..services.auth_service import require_role  
 from flask_jwt_extended import jwt_required, get_jwt  
-from ..services.printing_service import generate_kitchen_ticket_pdf, print_pdf_bytes, print_kitchen_ticket, format_order_for_kitchen_json
+from ..services.printing_service import generate_kitchen_ticket_pdf, print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
 
 order_bp = Blueprint('orders', __name__)  
@@ -13,9 +13,24 @@ def create_order_route():
     is_open, message = store_service.is_store_open()  
     if not is_open:  
         return jsonify({"error": message}), 409  
-    claims = get_jwt()  
-    user_id = int(claims.get('sub'))
+    claims = get_jwt()
+    
+    # Valida e extrai user_id de forma segura
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
+    
     data = request.get_json()
+    
+    # Valida order_type (delivery ou pickup)
+    order_type = data.get('order_type', 'delivery')
+    if order_type not in ['delivery', 'pickup']:
+        return jsonify({"error": "order_type deve ser 'delivery' ou 'pickup'"}), 400
+    
     address_id = data.get('address_id')
     items = data.get('items')
     payment_method = data.get('payment_method')
@@ -26,54 +41,64 @@ def create_order_route():
     use_cart = data.get('use_cart', False)  # Nova opção para usar carrinho
     
     # Validações básicas
-    if not all([address_id, payment_method]):  
-        return jsonify({"error": "address_id e payment_method são obrigatórios"}), 400
+    if not payment_method:
+        return jsonify({"error": "payment_method é obrigatório"}), 400
+    
+    # address_id só obrigatório para delivery
+    if order_type == 'delivery' and not address_id:
+        return jsonify({"error": "address_id é obrigatório para pedidos de entrega"}), 400
     
     # Se não usar carrinho, items é obrigatório
     if not use_cart and not items:
         return jsonify({"error": "items é obrigatório quando use_cart é false"}), 400
     
-    # Verifica endereço
-    address = address_service.get_address_by_id(address_id)  
-    if not address or address.get('user_id') != user_id:  
-        return jsonify({"error": "Endereço inválido ou não pertence a este usuário"}), 403
+    # Verifica endereço apenas se for delivery
+    if order_type == 'delivery':
+        address = address_service.get_address_by_id(address_id)  
+        if not address or address.get('user_id') != user_id:  
+            return jsonify({"error": "Endereço inválido ou não pertence a este usuário"}), 403
     
     # Escolhe o método de criação baseado na opção
     if use_cart:
         # Cria pedido a partir do carrinho
         new_order, error_code, error_message = order_service.create_order_from_cart(
             user_id,
-            address_id,
+            address_id if order_type == 'delivery' else None,
             payment_method,
             change_for_amount,
             notes,
             cpf_on_invoice,
-            points_to_redeem
+            points_to_redeem,
+            order_type
         )
     else:
         # Cria pedido tradicional
         new_order, error_code, error_message = order_service.create_order(  
             user_id,
-            address_id,
+            address_id if order_type == 'delivery' else None,
             items,
             payment_method,
             change_for_amount,
             notes,
             cpf_on_invoice,
-            points_to_redeem
+            points_to_redeem,
+            order_type
         )
     if new_order:  
         return jsonify(new_order), 201  
+    
+    # Tratamento de erros específicos
     if error_code == "STORE_CLOSED":  
         return jsonify({"error": error_message}), 409  
-    elif error_code in ["INVALID_CPF", "EMPTY_ORDER", "MISSING_PAYMENT_METHOD", "INVALID_DISCOUNT", "EMPTY_CART"]:  
+    elif error_code in ["INVALID_CPF", "EMPTY_ORDER", "MISSING_PAYMENT_METHOD", "INVALID_DISCOUNT", "EMPTY_CART", "VALIDATION_ERROR", "INVALID_ADDRESS"]:  
         return jsonify({"error": error_message}), 400  
     elif error_code == "INGREDIENT_UNAVAILABLE":  
         return jsonify({"error": error_message}), 422  
     elif error_code == "DATABASE_ERROR":  
         return jsonify({"error": error_message}), 500  
-    else:  
-        return jsonify({"error": "Não foi possível criar o pedido."}), 500  
+    
+    # Erro desconhecido - não expõe detalhes sensíveis
+    return jsonify({"error": "Não foi possível criar o pedido. Tente novamente."}), 500  
 
 @order_bp.route('/calculate-total', methods=['POST'])
 @require_role('customer')
@@ -88,26 +113,36 @@ def calculate_order_total_route():
     if not isinstance(items, list) or len(items) == 0:
         return jsonify({"error": "A lista de items não pode estar vazia"}), 400
     
+    order_type = data.get('order_type', 'delivery')
+    if order_type not in ['delivery', 'pickup']:
+        return jsonify({"error": "order_type deve ser 'delivery' ou 'pickup'"}), 400
+    
     points_to_redeem = data.get('points_to_redeem', 0)
     
-    if not isinstance(points_to_redeem, (int, float)) or points_to_redeem < 0:
-        return jsonify({"error": "points_to_redeem deve ser um número não negativo"}), 400
+    # Valida pontos como inteiro não negativo
+    if not isinstance(points_to_redeem, (int, float)):
+        return jsonify({"error": "points_to_redeem deve ser um número"}), 400
+    if points_to_redeem < 0:
+        return jsonify({"error": "points_to_redeem não pode ser negativo"}), 400
+    points_to_redeem = int(points_to_redeem)
     
     try:
         result = order_service.calculate_order_total_with_fees(
             items=items,
-            points_to_redeem=int(points_to_redeem)
+            points_to_redeem=points_to_redeem,
+            order_type=order_type
         )
         
         if result:
             return jsonify(result), 200
-        else:
-            return jsonify({"error": "Erro ao calcular total do pedido"}), 500
+        return jsonify({"error": "Erro ao calcular total do pedido"}), 500
     except ValueError as e:
+        # Erro de validação - mensagem segura para o cliente
         return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        print(f"Erro ao calcular total: {e}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
+    except Exception:
+        # Log erro sem expor detalhes sensíveis
+        # TODO: Implementar logging adequado (ex: logger.error) em produção
+        return jsonify({"error": "Erro ao processar solicitação"}), 500
 
 @order_bp.route('/', methods=['GET'])  
 @require_role('customer')  

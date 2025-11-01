@@ -5,6 +5,36 @@ from flask_jwt_extended import get_jwt
 
 settings_bp = Blueprint('settings', __name__)
 
+@settings_bp.route('/public', methods=['GET'])
+def get_public_settings_route():
+    """Retorna configurações públicas (sem autenticação) - taxas, prazos e info da empresa"""
+    try:
+        settings = settings_service.get_all_settings()
+        if not settings:
+            return jsonify({"error": "Configurações não encontradas"}), 404
+        
+        # Retorna apenas informações públicas
+        return jsonify({
+            "delivery_fee": settings.get('taxa_entrega'),
+            "estimated_delivery_time": {
+                "initiation_minutes": settings.get('prazo_iniciacao'),
+                "preparation_minutes": settings.get('prazo_preparo'),
+                "dispatch_minutes": settings.get('prazo_envio'),
+                "delivery_minutes": settings.get('prazo_entrega')
+            },
+            "company_info": {
+                "nome_fantasia": settings.get('nome_fantasia'),
+                "razao_social": settings.get('razao_social'),
+                "cnpj": settings.get('cnpj'),
+                "endereco": settings.get('endereco'),
+                "telefone": settings.get('telefone'),
+                "email": settings.get('email')
+            }
+        }), 200
+    except Exception as e:
+        print(f"Erro ao buscar configurações públicas: {e}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
 @settings_bp.route('/', methods=['GET'])
 @require_role('admin')
 def get_all_settings_route():
@@ -27,9 +57,6 @@ def update_settings_route():
     if not data:
         return jsonify({"error": "Corpo da requisição não pode estar vazio"}), 400
     
-    if not data:
-        return jsonify({"error": "Nenhuma configuração fornecida"}), 400
-    
     claims = get_jwt()
     user_id = int(claims.get('sub'))
     
@@ -38,7 +65,7 @@ def update_settings_route():
     if success:
         updated_fields = list(data.keys())
         return jsonify({
-            "msg": f"Configurações atualizadas com sucesso",
+            "msg": "Configurações atualizadas com sucesso",
             "updated_fields": updated_fields
         }), 200
     
