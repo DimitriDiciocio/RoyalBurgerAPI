@@ -18,17 +18,15 @@ def create_table_route():
         return jsonify({"error": "Erro ao processar JSON"}), 400
 
     name = data.get('name')
-    x_position = data.get('x_position', 0)
-    y_position = data.get('y_position', 0)
+    if not name:
+        return jsonify({"error": "Campo 'name' é obrigatório"}), 400
 
-    table, error_code, message = table_service.create_table(name, x_position, y_position)
+    table, error_code, message = table_service.create_table(name)
     if table:
         return jsonify(table), 201
     if error_code == 'INVALID_NAME':
         return jsonify({"error": message}), 400
     if error_code == 'TABLE_NAME_EXISTS':
-        return jsonify({"error": message}), 409
-    if error_code == 'POSITION_OVERLAP':
         return jsonify({"error": message}), 409
     if error_code == 'DATABASE_ERROR':
         return jsonify({"error": message}), 500
@@ -64,7 +62,7 @@ def get_table_route(table_id):
 @table_bp.route('/<int:table_id>', methods=['PUT'])
 @require_role('admin', 'manager')
 def update_table_route(table_id):
-    """Atualiza dados de uma mesa"""
+    """Atualiza dados de uma mesa (nome ou status)"""
     try:
         data = request.get_json()
         if data is None:
@@ -74,19 +72,17 @@ def update_table_route(table_id):
 
     name = data.get('name')
     status = data.get('status')
-    x_position = data.get('x_position')
-    y_position = data.get('y_position')
 
     success, error_code, message = table_service.update_table(
-        table_id, name=name, status=status, x_position=x_position, y_position=y_position
+        table_id, name=name, status=status
     )
     if success:
         return jsonify({"msg": message}), 200
-    if error_code in ['INVALID_NAME', 'INVALID_STATUS', 'INVALID_X_POSITION', 'INVALID_Y_POSITION', 'NO_VALID_FIELDS']:
+    if error_code in ['INVALID_NAME', 'INVALID_STATUS', 'NO_VALID_FIELDS']:
         return jsonify({"error": message}), 400
     if error_code == 'TABLE_NOT_FOUND':
         return jsonify({"error": message}), 404
-    if error_code in ['TABLE_NAME_EXISTS', 'POSITION_OVERLAP']:
+    if error_code == 'TABLE_NAME_EXISTS':
         return jsonify({"error": message}), 409
     if error_code == 'DATABASE_ERROR':
         return jsonify({"error": message}), 500
@@ -103,31 +99,4 @@ def delete_table_route(table_id):
     return jsonify({"error": "Mesa não encontrada, está ocupada ou falha ao excluir"}), 404
 
 
-@table_bp.route('/layout', methods=['PUT'])
-@require_role('admin', 'manager')
-def update_layout_route():
-    """Atualiza o layout de todas as mesas (posições X e Y)"""
-    try:
-        data = request.get_json()
-        if data is None:
-            return jsonify({"error": "JSON inválido ou vazio"}), 400
-        
-        layout_data = data.get('layout')
-        if not layout_data:
-            return jsonify({"error": "Campo 'layout' é obrigatório"}), 400
-    except Exception:
-        return jsonify({"error": "Erro ao processar JSON"}), 400
-
-    success, error_code, message = table_service.update_layout(layout_data)
-    if success:
-        return jsonify({"msg": message}), 200
-    if error_code in ['INVALID_DATA', 'INVALID_ITEM', 'MISSING_TABLE_ID', 'MISSING_POSITION', 'INVALID_TYPE']:
-        return jsonify({"error": message}), 400
-    if error_code == 'TABLE_NOT_FOUND':
-        return jsonify({"error": message}), 404
-    if error_code == 'POSITION_OVERLAP':
-        return jsonify({"error": message}), 409
-    if error_code == 'DATABASE_ERROR':
-        return jsonify({"error": message}), 500
-    return jsonify({"error": "Falha ao atualizar layout"}), 500
 

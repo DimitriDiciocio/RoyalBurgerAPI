@@ -158,12 +158,6 @@ components:
           type: string
           enum: [available, occupied, cleaning, reserved]
           example: "available"
-        x_position:
-          type: integer
-          example: 100
-        y_position:
-          type: integer
-          example: 200
         current_order_id:
           type: integer
           nullable: true
@@ -182,14 +176,7 @@ components:
         name:
           type: string
           example: "Mesa 10"
-        x_position:
-          type: integer
-          default: 0
-          example: 50
-        y_position:
-          type: integer
-          default: 0
-          example: 100
+          description: Nome único da mesa (ex: "Mesa 01", "Balcão 03")
 
     TableUpdateRequest:
       type: object
@@ -197,36 +184,12 @@ components:
         name:
           type: string
           example: "Mesa 10"
+          description: Novo nome da mesa (deve ser único)
         status:
           type: string
           enum: [available, occupied, cleaning, reserved]
           example: "available"
-        x_position:
-          type: integer
-          example: 150
-        y_position:
-          type: integer
-          example: 250
-
-    LayoutUpdateRequest:
-      type: object
-      required: [layout]
-      properties:
-        layout:
-          type: array
-          items:
-            type: object
-            required: [table_id, x, y]
-            properties:
-              table_id:
-                type: integer
-                example: 1
-              x:
-                type: integer
-                example: 100
-              y:
-                type: integer
-                example: 200
+          description: Novo status da mesa
 
     OpenTableRequest:
       type: object
@@ -1224,11 +1187,10 @@ paths:
       description: |
         Cria uma nova mesa no restaurante (admin/manager).
         
-        **Sistema de Posicionamento:**
-        - As mesas são posicionadas usando coordenadas X e Y (em pixels ou unidades do layout visual)
-        - Por padrão, o sistema **previne sobreposição** - não é possível criar duas mesas na mesma posição
-        - Cada mesa deve ter coordenadas únicas no layout
-        - A validação de sobreposição é feita automaticamente ao criar ou atualizar mesas
+        **Sistema Simplificado de Lista:**
+        - As mesas são gerenciadas como uma lista nomeada, sem layout visual
+        - Cada mesa deve ter um nome único
+        - O sistema garante que não existam duas mesas com o mesmo nome
       security:
         - bearerAuth: []
       requestBody:
@@ -1251,7 +1213,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
-          description: Nome de mesa já existe ou posição já está ocupada
+          description: Nome de mesa já existe
           content:
             application/json:
               schema:
@@ -1269,6 +1231,7 @@ paths:
       summary: Obter status de todas as mesas
       description: |
         Retorna o status de todas as mesas em tempo real (usado pelo painel do atendente).
+        Retorna apenas os campos essenciais: ID, NAME, STATUS, CURRENT_ORDER_ID.
         Inclui informações sobre mesas ocupadas e pedidos ativos.
       security:
         - bearerAuth: []
@@ -1280,7 +1243,22 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/Table"
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                      example: 1
+                    name:
+                      type: string
+                      example: "Mesa 01"
+                    status:
+                      type: string
+                      enum: [available, occupied, cleaning, reserved]
+                      example: "occupied"
+                    current_order_id:
+                      type: integer
+                      nullable: true
+                      example: 123
 
   /tables/{table_id}:
     get:
@@ -1311,7 +1289,10 @@ paths:
     put:
       tags: [Mesas]
       summary: Atualizar mesa
-      description: Atualiza dados de uma mesa (admin/manager)
+      description: |
+        Atualiza dados de uma mesa (admin/manager).
+        Permite alterar o nome e/ou status da mesa.
+        O nome deve ser único no sistema.
       security:
         - bearerAuth: []
       parameters:
@@ -1378,59 +1359,6 @@ paths:
                 $ref: "#/components/schemas/MessageResponse"
         "404":
           description: Mesa não encontrada ou está ocupada
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /tables/layout:
-    put:
-      tags: [Mesas]
-      summary: Atualizar layout das mesas
-      description: |
-        Atualiza as posições (X e Y) de múltiplas mesas no layout do salão.
-        O frontend envia uma lista de mesas com suas novas posições.
-        Requer papel de admin ou manager.
-        
-        **Validação de Posições:**
-        - O sistema valida automaticamente para evitar sobreposição
-        - Não é possível posicionar duas mesas na mesma coordenada (X, Y)
-        - Se houver conflito, a operação falhará com erro 409
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/LayoutUpdateRequest"
-      responses:
-        "200":
-          description: Layout atualizado com sucesso
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResponse"
-        "400":
-          description: Dados inválidos (layout vazio, mesa não encontrada, etc.)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Uma ou mais mesas não encontradas
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: Sobreposição de posições detectada
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Erro interno do servidor
           content:
             application/json:
               schema:
