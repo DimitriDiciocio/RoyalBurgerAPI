@@ -122,16 +122,19 @@ def _validate_ingredients_and_extras(items, cur):
 def _calculate_order_total(items, cur):
     """Calcula total do pedido incluindo extras e base_modifications"""
     product_prices = {}
-    order_total = 0
+    order_total = 0.0  # Inicia como float
     product_ids = {item['product_id'] for item in items}
     
     if product_ids:
         placeholders = ', '.join(['?' for _ in product_ids])
         cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(product_ids))
-        product_prices = {row[0]: row[1] for row in cur.fetchall()}
+        # Converte Decimal para float ao extrair do banco
+        product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
         
         for item in items:
-            order_total += product_prices.get(item['product_id'], 0) * item.get('quantity', 1)
+            price = product_prices.get(item['product_id'], 0.0)
+            quantity = item.get('quantity', 1)
+            order_total += float(price) * int(quantity)
 
     # Preços dos extras
     extra_prices = {}
@@ -144,12 +147,15 @@ def _calculate_order_total(items, cur):
     if extra_ingredient_ids:
         placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
         cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ingredient_ids))
-        extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+        # Converte Decimal para float ao extrair do banco
+        extra_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
         
         for item in items:
             if 'extras' in item and item['extras']:
                 for extra in item['extras']:
-                    order_total += extra_prices.get(extra['ingredient_id'], 0) * extra.get('quantity', 1)
+                    price = extra_prices.get(extra['ingredient_id'], 0.0)
+                    quantity = extra.get('quantity', 1)
+                    order_total += float(price) * int(quantity)
     
     # Preços das base_modifications (apenas deltas positivos contribuem para preço)
     base_mod_prices = {}
@@ -164,16 +170,18 @@ def _calculate_order_total(items, cur):
     if base_mod_ingredient_ids:
         placeholders = ', '.join(['?' for _ in base_mod_ingredient_ids])
         cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ingredient_ids))
-        base_mod_prices = {row[0]: row[1] for row in cur.fetchall()}
+        # Converte Decimal para float ao extrair do banco
+        base_mod_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
         
         for item in items:
             if 'base_modifications' in item and item['base_modifications']:
                 for bm in item['base_modifications']:
                     delta = bm.get('delta', 0)
                     if delta > 0:  # Apenas deltas positivos contribuem para o preço
-                        order_total += base_mod_prices.get(bm['ingredient_id'], 0) * delta
+                        price = base_mod_prices.get(bm['ingredient_id'], 0.0)
+                        order_total += float(price) * int(delta)
 
-    return order_total
+    return float(order_total)
 
 def _add_order_items(order_id, items, cur):
     """Adiciona itens ao pedido"""
@@ -183,7 +191,8 @@ def _add_order_items(order_id, items, cur):
     if product_ids:
         placeholders = ', '.join(['?' for _ in product_ids])
         cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(product_ids))
-        product_prices = {row[0]: row[1] for row in cur.fetchall()}
+        # Converte Decimal para float ao extrair do banco
+        product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
 
     extra_prices = {}
     extra_ingredient_ids = set()
@@ -195,7 +204,8 @@ def _add_order_items(order_id, items, cur):
     if extra_ingredient_ids:
         placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
         cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ingredient_ids))
-        extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+        # Converte Decimal para float ao extrair do banco
+        extra_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
 
     for item in items:
         product_id = item.get('product_id')
@@ -204,6 +214,9 @@ def _add_order_items(order_id, items, cur):
         unit_price = product_prices.get(product_id)
         if unit_price is None:
             raise ValueError(f"Produto {product_id} não encontrado ou preço indisponível")
+        
+        # Garante que o preço é float
+        unit_price = float(unit_price)
 
         sql_item = "INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?) RETURNING ID;"
         cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
@@ -218,6 +231,10 @@ def _add_order_items(order_id, items, cur):
                 extra_price = extra_prices.get(extra_id)
                 if extra_price is None:
                     raise ValueError(f"Ingrediente {extra_id} não encontrado ou preço indisponível")
+                
+                # Garante que o preço é float
+                extra_price = float(extra_price)
+                
                 sql_extra = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);"
                 cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_qty, extra_price))
         
@@ -380,13 +397,14 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             
             # Calcula total dos itens
             subtotal = _calculate_order_total(items, cur)
+            subtotal = float(subtotal)  # Garante que é float
             
             # Adiciona taxa de entrega se for delivery
-            delivery_fee = 0
+            delivery_fee = 0.0
             if order_type == ORDER_TYPE_DELIVERY and settings.get('taxa_entrega'):
-                delivery_fee = float(settings.get('taxa_entrega'))
+                delivery_fee = float(settings.get('taxa_entrega') or 0)
             
-            order_total = subtotal + delivery_fee
+            order_total = float(subtotal) + float(delivery_fee)
             
             # Valida resgate de pontos
             _validate_points_redemption(points_to_redeem, order_total)
@@ -411,20 +429,25 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             """
             final_address_id = address_id if order_type == ORDER_TYPE_DELIVERY else None
             # Calcula o troco: amount_paid - order_total (ou None se não for dinheiro)
+            # Garante que todos os valores são float para evitar erro Decimal + float
+            order_total_float = float(order_total)
             change_amount = None
             if paid_amount is not None:
-                change_amount = paid_amount - order_total
-            cur.execute(sql_order, (user_id, final_address_id, order_total, payment_method, notes, confirmation_code, order_type, change_amount))
+                paid_amount_float = float(paid_amount)
+                change_amount = paid_amount_float - order_total_float
+            cur.execute(sql_order, (user_id, final_address_id, order_total_float, payment_method, notes, confirmation_code, order_type, change_amount))
             new_order_id = cur.fetchone()[0]
 
             # Debita pontos se houver
             if points_to_redeem and points_to_redeem > 0:
                 discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, new_order_id, cur)
-                new_total = max(0, float(order_total) - float(discount_amount))
+                discount_amount = float(discount_amount or 0)  # Garante float
+                new_total = max(0.0, order_total_float - discount_amount)
                 cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, new_order_id))
                 # Recalcula o troco com o novo total após desconto
                 if paid_amount is not None:
-                    new_change_amount = paid_amount - new_total
+                    paid_amount_float = float(paid_amount)
+                    new_change_amount = paid_amount_float - new_total
                     cur.execute("UPDATE ORDERS SET CHANGE_FOR_AMOUNT = ? WHERE ID = ?;", (new_change_amount, new_order_id))
 
             # Adiciona itens ao pedido
@@ -855,44 +878,85 @@ def get_order_details(order_id, user_id, user_role):
         if conn:
             conn.close()
 
-def cancel_order_by_customer(order_id, user_id):
+def cancel_order(order_id, user_id, is_manager=False):
     """
-    Permite que um cliente cancele seu próprio pedido, sob condições específicas.
-    Retorna uma tupla: (sucesso, mensagem).
+    Permite que um cliente ou gerente cancele um pedido.
+    
+    - Cliente: só pode cancelar seus próprios pedidos com status 'pending'
+    - Gerente: pode cancelar qualquer pedido (exceto os já concluídos ou cancelados)
+    
+    Args:
+        order_id: ID do pedido
+        user_id: ID do usuário que está cancelando
+        is_manager: True se o usuário é gerente ou admin
+    
+    Returns:
+        Tupla (sucesso, mensagem).
     """
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        sql_find = "SELECT USER_ID, STATUS FROM ORDERS WHERE ID = ?;"
+        sql_find = "SELECT USER_ID, STATUS, ORDER_TYPE FROM ORDERS WHERE ID = ?;"
         cur.execute(sql_find, (order_id,))
         order_record = cur.fetchone()
 
         if not order_record:
             return (False, "Pedido não encontrado.")
 
-        owner_id, status = order_record
+        owner_id, status, order_type = order_record
 
-        # Verificação de autorização: apenas o dono pode cancelar
-        if owner_id != user_id:
-            return (False, "Você não tem permissão para cancelar este pedido.")
+        # Verifica se o pedido já está cancelado ou concluído
+        if status == 'cancelled':
+            return (False, "O pedido já está cancelado.")
+        
+        if status in ['completed', 'delivered']:
+            return (False, f"Não é possível cancelar um pedido que já foi concluído (status: '{status}').")
 
-        # Validação de status: apenas pedidos pendentes podem ser cancelados pelo cliente
-        if status != 'pending':
-            return (False, f"Não é possível cancelar um pedido que já está com o status '{status}'.")
+        # Verificação de autorização
+        if not is_manager:
+            # Cliente: apenas o dono pode cancelar
+            if owner_id != user_id:
+                return (False, "Você não tem permissão para cancelar este pedido.")
+            
+            # Cliente: apenas pedidos pendentes podem ser cancelados
+            if status != 'pending':
+                return (False, f"Não é possível cancelar um pedido que já está com o status '{status}'. Apenas pedidos pendentes podem ser cancelados.")
+        
+        # Para gerentes, verifica se o pedido pode ser cancelado
+        # Gerentes não podem cancelar pedidos que já foram entregues ou concluídos
+        # Mas podem cancelar pedidos em outros status (preparing, confirmed, etc.)
+        
+        # Se for pedido on-site (active_table), libera a mesa antes de cancelar
+        if order_type == ORDER_TYPE_ON_SITE and status == ORDER_STATUS_ACTIVE_TABLE:
+            # Busca o TABLE_ID
+            cur.execute("SELECT TABLE_ID FROM ORDERS WHERE ID = ?;", (order_id,))
+            table_result = cur.fetchone()
+            if table_result and table_result[0]:
+                table_id = table_result[0]
+                # Libera a mesa
+                table_service.set_table_available(table_id)
 
-        sql_update = "UPDATE ORDERS SET STATUS = 'cancelled' WHERE ID = ?;"
+        # Cancela o pedido
+        sql_update = "UPDATE ORDERS SET STATUS = 'cancelled', UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = ?;"
         cur.execute(sql_update, (order_id,))
         conn.commit()
 
         # Envia notificações de cancelamento
         try:
-            message = f"Seu pedido #{order_id} foi cancelado com sucesso!"
+            # Se o cancelamento foi feito por gerente, notifica o cliente
+            target_user_id = owner_id if is_manager else user_id
+            
+            if is_manager:
+                message = f"Seu pedido #{order_id} foi cancelado pelo gerente."
+            else:
+                message = f"Seu pedido #{order_id} foi cancelado com sucesso!"
+            
             link = f"/my-orders/{order_id}"
-            notification_service.create_notification(user_id, message, link)
+            notification_service.create_notification(target_user_id, message, link)
 
-            customer = user_service.get_user_by_id(user_id)
+            customer = user_service.get_user_by_id(target_user_id)
             if customer:
                 email_service.send_email(
                     to=customer['email'],
@@ -905,7 +969,10 @@ def cancel_order_by_customer(order_id, user_id):
         except Exception as e:
             logger.warning(f"Falha ao enviar notificação de cancelamento para o pedido {order_id}: {e}", exc_info=True)
 
-        return (True, "Pedido cancelado com sucesso.")
+        if is_manager:
+            return (True, f"Pedido #{order_id} cancelado pelo gerente com sucesso.")
+        else:
+            return (True, "Pedido cancelado com sucesso.")
 
     except fdb.Error as e:
         logger.error(f"Erro ao cancelar pedido {order_id}: {e}", exc_info=True)
@@ -915,6 +982,15 @@ def cancel_order_by_customer(order_id, user_id):
     finally:
         if conn:
             conn.close()
+
+
+def cancel_order_by_customer(order_id, user_id):
+    """
+    Função de compatibilidade para manter o código antigo funcionando.
+    Permite que um cliente cancele seu próprio pedido.
+    Retorna uma tupla: (sucesso, mensagem).
+    """
+    return cancel_order(order_id, user_id, is_manager=False)
 
 
 def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
@@ -967,14 +1043,14 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             settings = {}
         
         # Calcula total do carrinho
-        total_amount = cart_data["total_amount"]
+        total_amount = float(cart_data["total_amount"] or 0)  # Garante float
         
         # Adiciona taxa de entrega se for delivery
-        delivery_fee = 0
+        delivery_fee = 0.0
         if order_type == ORDER_TYPE_DELIVERY and settings.get('taxa_entrega'):
-            delivery_fee = float(settings.get('taxa_entrega'))
+            delivery_fee = float(settings.get('taxa_entrega') or 0)
         
-        total_with_delivery = total_amount + delivery_fee
+        total_with_delivery = float(total_amount) + float(delivery_fee)
         
         # Valida desconto de pontos (sem debitar ainda)
         if points_to_redeem and points_to_redeem > 0:
@@ -1003,20 +1079,26 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         """
         final_address_id = address_id if order_type == ORDER_TYPE_DELIVERY else None
         # Calcula o troco: amount_paid - total_with_delivery (ou None se não for dinheiro)
+        # Garante que todos os valores são float
+        total_with_delivery_float = float(total_with_delivery)
         change_amount = None
         if paid_amount is not None:
-            change_amount = paid_amount - total_with_delivery
-        cur.execute(sql_order, (user_id, final_address_id, total_with_delivery, payment_method, notes, confirmation_code, order_type, change_amount))
+            paid_amount_float = float(paid_amount)
+            change_amount = paid_amount_float - total_with_delivery_float
+        cur.execute(sql_order, (user_id, final_address_id, total_with_delivery_float, payment_method, notes, confirmation_code, order_type, change_amount))
         order_id = cur.fetchone()[0]
 
         # Debita pontos (se houver) e atualiza o total do pedido
         if points_to_redeem > 0:
             discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, order_id, cur)
-            new_total = max(0, float(total_with_delivery) - float(discount_amount))
+            discount_amount = float(discount_amount or 0)  # Garante float
+            total_with_delivery_float = float(total_with_delivery)
+            new_total = max(0.0, total_with_delivery_float - discount_amount)
             cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, order_id))
             # Recalcula o troco com o novo total após desconto
             if paid_amount is not None:
-                new_change_amount = paid_amount - new_total
+                paid_amount_float = float(paid_amount)
+                new_change_amount = paid_amount_float - new_total
                 cur.execute("UPDATE ORDERS SET CHANGE_FOR_AMOUNT = ? WHERE ID = ?;", (new_change_amount, order_id))
         
         # Preços dos produtos do carrinho
@@ -1025,7 +1107,8 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if cart_product_ids:
             placeholders = ', '.join(['?' for _ in cart_product_ids])
             cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(cart_product_ids))
-            product_prices = {row[0]: row[1] for row in cur.fetchall()}
+            # Converte Decimal para float ao extrair do banco
+            product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
 
         # Preços dos extras do carrinho
         extra_ids = set()
@@ -1040,13 +1123,15 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if extra_ids:
             placeholders = ', '.join(['?' for _ in extra_ids])
             cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
-            extra_prices = {row[0]: row[1] for row in cur.fetchall()}
+            # Converte Decimal para float ao extrair do banco
+            extra_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
         
         base_mod_prices = {}
         if base_mod_ids:
             placeholders = ', '.join(['?' for _ in base_mod_ids])
             cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ids))
-            base_mod_prices = {row[0]: row[1] for row in cur.fetchall()}
+            # Converte Decimal para float ao extrair do banco
+            base_mod_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
 
         # Copia itens do carrinho para o pedido (com preços)
         for item in cart_data["items"]:
@@ -1058,11 +1143,14 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                 raise ValueError(f"Produto {product_id} não encontrado ou preço indisponível")
 
             # Insere item principal com UNIT_PRICE
+            # Garante que unit_price é float
+            unit_price_float = float(unit_price)
+            
             sql_item = """
                 INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE)
                 VALUES (?, ?, ?, ?) RETURNING ID;
             """
-            cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
+            cur.execute(sql_item, (order_id, product_id, quantity, unit_price_float))
             order_item_id = cur.fetchone()[0]
 
             # Insere extras do item (TYPE='extra')
@@ -1073,11 +1161,15 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                 ex_price = extra_prices.get(ex_id)
                 if ex_price is None:
                     raise ValueError(f"Ingrediente {ex_id} não encontrado ou preço indisponível")
+                
+                # Garante que o preço é float
+                ex_price_float = float(ex_price)
+                
                 sql_extra = """
                     INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
                     VALUES (?, ?, ?, 'extra', ?, ?);
                 """
-                cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_qty, ex_price))
+                cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_qty, ex_price_float))
             
             # Insere base_modifications do item (TYPE='base')
             for bm in item.get("base_modifications", []):
@@ -1088,11 +1180,15 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                     bm_price = base_mod_prices.get(bm_id)
                     if bm_price is None:
                         raise ValueError(f"Ingrediente {bm_id} não encontrado ou preço indisponível")
+                    
+                    # Garante que o preço é float
+                    bm_price_float = float(bm_price)
+                    
                     sql_base_mod = """
                         INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
                         VALUES (?, ?, 0, 'base', ?, ?);
                     """
-                    cur.execute(sql_base_mod, (order_item_id, bm_id, bm_delta, bm_price))
+                    cur.execute(sql_base_mod, (order_item_id, bm_id, bm_delta, bm_price_float))
         
         # Limpa o carrinho do usuário
         cart_id = cart_data["cart_id"]

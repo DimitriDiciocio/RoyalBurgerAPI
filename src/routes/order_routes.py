@@ -184,15 +184,26 @@ def get_order_details_route(order_id):
         return jsonify({"error": "Pedido não encontrado"}), 404  
 
 @order_bp.route('/<int:order_id>/cancel', methods=['POST'])  
-@require_role('customer')  
+@require_role('customer', 'manager')  
 def cancel_order_route(order_id):  
     claims = get_jwt()  
     user_id = int(claims.get('sub'))  
-    success, message = order_service.cancel_order_by_customer(order_id, user_id)  
+    user_roles = claims.get('roles', [])
+    
+    # Verifica se é gerente (manager ou admin)
+    is_manager = 'manager' in user_roles or 'admin' in user_roles
+    
+    success, message = order_service.cancel_order(order_id, user_id, is_manager)  
     if success:  
         return jsonify({"msg": message}), 200  
     else:  
-        return jsonify({"error": message}), 403  
+        # Retorna 404 se pedido não encontrado, 403 para permissão, 400 para status inválido
+        if "não encontrado" in message.lower():
+            return jsonify({"error": message}), 404
+        elif "permissão" in message.lower() or "não pode cancelar" in message.lower():
+            return jsonify({"error": message}), 403
+        else:
+            return jsonify({"error": message}), 400  
 
 
 # --- Rotas de impressão de cozinha ---

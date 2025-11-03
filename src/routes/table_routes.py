@@ -28,6 +28,8 @@ def create_table_route():
         return jsonify({"error": message}), 400
     if error_code == 'TABLE_NAME_EXISTS':
         return jsonify({"error": message}), 409
+    if error_code == 'POSITION_OVERLAP':
+        return jsonify({"error": message}), 409
     if error_code == 'DATABASE_ERROR':
         return jsonify({"error": message}), 500
     return jsonify({"error": "Falha ao criar mesa"}), 500
@@ -84,7 +86,7 @@ def update_table_route(table_id):
         return jsonify({"error": message}), 400
     if error_code == 'TABLE_NOT_FOUND':
         return jsonify({"error": message}), 404
-    if error_code == 'TABLE_NAME_EXISTS':
+    if error_code in ['TABLE_NAME_EXISTS', 'POSITION_OVERLAP']:
         return jsonify({"error": message}), 409
     if error_code == 'DATABASE_ERROR':
         return jsonify({"error": message}), 500
@@ -123,6 +125,8 @@ def update_layout_route():
         return jsonify({"error": message}), 400
     if error_code == 'TABLE_NOT_FOUND':
         return jsonify({"error": message}), 404
+    if error_code == 'POSITION_OVERLAP':
+        return jsonify({"error": message}), 409
     if error_code == 'DATABASE_ERROR':
         return jsonify({"error": message}), 500
     return jsonify({"error": "Falha ao atualizar layout"}), 500

@@ -23,7 +23,7 @@ VALID_TABLE_STATUSES = [
 ]
 
 
-def create_table(name, x_position=0, y_position=0):
+def create_table(name, x_position=0, y_position=0, check_overlap=True):
     """
     Cria uma nova mesa no restaurante.
     
@@ -31,6 +31,7 @@ def create_table(name, x_position=0, y_position=0):
         name: Nome da mesa (ex: "Mesa 01", "Balcão 03")
         x_position: Posição X no layout (default: 0)
         y_position: Posição Y no layout (default: 0)
+        check_overlap: Se True, verifica se já existe mesa na mesma posição (default: True)
     
     Returns:
         Tupla (table_dict, error_code, message)
@@ -48,6 +49,19 @@ def create_table(name, x_position=0, y_position=0):
         cur.execute("SELECT ID FROM RESTAURANT_TABLES WHERE UPPER(TRIM(NAME)) = UPPER(TRIM(?))", (name,))
         if cur.fetchone():
             return (None, "TABLE_NAME_EXISTS", "Já existe uma mesa com este nome")
+
+        # Opcionalmente verifica sobreposição de posição (se check_overlap=True)
+        if check_overlap:
+            cur.execute("""
+                SELECT ID, NAME 
+                FROM RESTAURANT_TABLES 
+                WHERE X_POSITION = ? AND Y_POSITION = ?
+            """, (int(x_position), int(y_position)))
+            overlapping = cur.fetchone()
+            if overlapping:
+                return (None, "POSITION_OVERLAP", 
+                       f"Já existe uma mesa ('{overlapping[1]}') na posição ({x_position}, {y_position}). "
+                       f"Use coordenadas diferentes ou mova a mesa existente primeiro.")
 
         sql = """
             INSERT INTO RESTAURANT_TABLES (NAME, STATUS, X_POSITION, Y_POSITION)
@@ -163,7 +177,7 @@ def get_tables_status():
     return get_all_tables()  # Por enquanto, mesma função
 
 
-def update_table(table_id, name=None, status=None, x_position=None, y_position=None):
+def update_table(table_id, name=None, status=None, x_position=None, y_position=None, check_overlap=True):
     """
     Atualiza dados de uma mesa.
     
@@ -173,6 +187,7 @@ def update_table(table_id, name=None, status=None, x_position=None, y_position=N
         status: Novo status (opcional) - deve ser um dos VALID_TABLE_STATUSES
         x_position: Nova posição X (opcional)
         y_position: Nova posição Y (opcional)
+        check_overlap: Se True, verifica sobreposição ao atualizar posição (default: True)
     
     Returns:
         Tupla (success, error_code, message)
@@ -190,15 +205,19 @@ def update_table(table_id, name=None, status=None, x_position=None, y_position=N
             return (False, "INVALID_STATUS", f"Status deve ser um dos: {', '.join(VALID_TABLE_STATUSES)}")
         fields_to_update['STATUS'] = status
     
+    new_x = None
+    new_y = None
     if x_position is not None:
         try:
-            fields_to_update['X_POSITION'] = int(x_position)
+            new_x = int(x_position)
+            fields_to_update['X_POSITION'] = new_x
         except (ValueError, TypeError):
             return (False, "INVALID_X_POSITION", "X_POSITION deve ser um número inteiro")
     
     if y_position is not None:
         try:
-            fields_to_update['Y_POSITION'] = int(y_position)
+            new_y = int(y_position)
+            fields_to_update['Y_POSITION'] = new_y
         except (ValueError, TypeError):
             return (False, "INVALID_Y_POSITION", "Y_POSITION deve ser um número inteiro")
     
@@ -221,6 +240,26 @@ def update_table(table_id, name=None, status=None, x_position=None, y_position=N
                        (fields_to_update['NAME'], table_id))
             if cur.fetchone():
                 return (False, "TABLE_NAME_EXISTS", "Já existe uma mesa com este nome")
+
+        # Verifica sobreposição de posição se estiver atualizando coordenadas
+        if check_overlap and (new_x is not None or new_y is not None):
+            # Busca as posições atuais se não foram fornecidas
+            cur.execute("SELECT X_POSITION, Y_POSITION FROM RESTAURANT_TABLES WHERE ID = ?", (table_id,))
+            current_pos = cur.fetchone()
+            final_x = new_x if new_x is not None else current_pos[0]
+            final_y = new_y if new_y is not None else current_pos[1]
+            
+            # Verifica se outra mesa já está nesta posição
+            cur.execute("""
+                SELECT ID, NAME 
+                FROM RESTAURANT_TABLES 
+                WHERE X_POSITION = ? AND Y_POSITION = ? AND ID <> ?
+            """, (final_x, final_y, table_id))
+            overlapping = cur.fetchone()
+            if overlapping:
+                return (False, "POSITION_OVERLAP", 
+                       f"Já existe uma mesa ('{overlapping[1]}') na posição ({final_x}, {final_y}). "
+                       f"Use coordenadas diferentes ou mova a mesa existente primeiro.")
 
         set_parts = [f"{k} = ?" for k in fields_to_update.keys()]
         values = list(fields_to_update.values())
@@ -276,12 +315,13 @@ def delete_table(table_id):
             conn.close()
 
 
-def update_layout(layout_data):
+def update_layout(layout_data, check_overlap=True):
     """
     Atualiza o layout de todas as mesas (posições X e Y).
     
     Args:
         layout_data: Lista de dicionários com {table_id, x, y}
+        check_overlap: Se True, verifica sobreposição de mesas (default: True)
     
     Returns:
         Tupla (success, error_code, message)
@@ -296,6 +336,8 @@ def update_layout(layout_data):
         
         # Valida todos os dados antes de fazer qualquer update
         table_ids = []
+        positions = {}  # {(x, y): [table_ids]}
+        
         for item in layout_data:
             if not isinstance(item, dict):
                 return (False, "INVALID_ITEM", "Cada item deve ser um dicionário")
@@ -317,6 +359,13 @@ def update_layout(layout_data):
                 return (False, "INVALID_TYPE", "table_id, x e y devem ser números inteiros")
             
             table_ids.append(table_id)
+            
+            # Coleta posições para verificar sobreposição
+            if check_overlap:
+                pos_key = (x, y)
+                if pos_key not in positions:
+                    positions[pos_key] = []
+                positions[pos_key].append(table_id)
         
         # Verifica se todas as mesas existem
         if table_ids:
@@ -326,6 +375,29 @@ def update_layout(layout_data):
             missing_ids = set(table_ids) - found_ids
             if missing_ids:
                 return (False, "TABLE_NOT_FOUND", f"Mesas não encontradas: {', '.join(map(str, missing_ids))}")
+        
+        # Verifica sobreposição se solicitado
+        if check_overlap:
+            for pos_key, ids in positions.items():
+                if len(ids) > 1:
+                    # Múltiplas mesas na mesma posição
+                    return (False, "POSITION_OVERLAP", 
+                           f"Múltiplas mesas ({', '.join(map(str, ids))}) estão sendo posicionadas na mesma coordenada ({pos_key[0]}, {pos_key[1]}). "
+                           f"Use coordenadas diferentes para cada mesa.")
+                
+                # Verifica se a posição está ocupada por outra mesa que não está na lista
+                x, y = pos_key
+                placeholders_ids = ', '.join(['?' for _ in ids])
+                cur.execute(f"""
+                    SELECT ID, NAME 
+                    FROM RESTAURANT_TABLES 
+                    WHERE X_POSITION = ? AND Y_POSITION = ? AND ID NOT IN ({placeholders_ids})
+                """, (x, y, *ids))
+                existing = cur.fetchone()
+                if existing:
+                    return (False, "POSITION_OVERLAP", 
+                           f"A posição ({x}, {y}) já está ocupada pela mesa '{existing[1]}' (ID: {existing[0]}). "
+                           f"Use coordenadas diferentes.")
         
         # Atualiza todas as posições
         for item in layout_data:

@@ -1221,7 +1221,14 @@ paths:
     post:
       tags: [Mesas]
       summary: Criar nova mesa
-      description: Cria uma nova mesa no restaurante (admin/manager)
+      description: |
+        Cria uma nova mesa no restaurante (admin/manager).
+        
+        **Sistema de Posicionamento:**
+        - As mesas são posicionadas usando coordenadas X e Y (em pixels ou unidades do layout visual)
+        - Por padrão, o sistema **previne sobreposição** - não é possível criar duas mesas na mesma posição
+        - Cada mesa deve ter coordenadas únicas no layout
+        - A validação de sobreposição é feita automaticamente ao criar ou atualizar mesas
       security:
         - bearerAuth: []
       requestBody:
@@ -1244,7 +1251,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
-          description: Nome de mesa já existe
+          description: Nome de mesa já existe ou posição já está ocupada
           content:
             application/json:
               schema:
@@ -1384,6 +1391,11 @@ paths:
         Atualiza as posições (X e Y) de múltiplas mesas no layout do salão.
         O frontend envia uma lista de mesas com suas novas posições.
         Requer papel de admin ou manager.
+        
+        **Validação de Posições:**
+        - O sistema valida automaticamente para evitar sobreposição
+        - Não é possível posicionar duas mesas na mesma coordenada (X, Y)
+        - Se houver conflito, a operação falhará com erro 409
       security:
         - bearerAuth: []
       requestBody:
@@ -1407,6 +1419,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Uma ou mais mesas não encontradas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sobreposição de posições detectada
           content:
             application/json:
               schema:
@@ -3519,7 +3537,17 @@ paths:
     post:
       tags: [Pedidos]
       summary: Cancelar pedido
-      description: Cancela um pedido (cliente)
+      description: |
+        Cancela um pedido. Disponível para clientes e gerentes.
+        
+        **Cliente:**
+        - Pode cancelar apenas seus próprios pedidos
+        - Apenas pedidos com status 'pending' podem ser cancelados
+        
+        **Gerente:**
+        - Pode cancelar qualquer pedido (exceto já concluídos ou cancelados)
+        - Pode cancelar pedidos em vários status (pending, preparing, confirmed, etc.)
+        - Se o pedido for on-site (active_table), a mesa será liberada automaticamente
       security:
         - bearerAuth: []
       parameters:
@@ -3531,10 +3559,28 @@ paths:
       responses:
         "200":
           description: Pedido cancelado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Não é possível cancelar este pedido (status inválido ou já cancelado/concluído)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Não é possível cancelar este pedido
+          description: Sem permissão para cancelar este pedido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Pedido não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /orders/open-table:
     post:
