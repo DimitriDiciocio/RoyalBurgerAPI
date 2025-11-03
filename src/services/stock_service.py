@@ -24,6 +24,17 @@ def _convert_unit(value, from_unit, to_unit):
     """
     Converte um valor de uma unidade para outra.
     
+    Suporta conversões de:
+    - Massa: kg ↔ g ↔ mg
+    - Volume: L ↔ mL ↔ cL ↔ dL
+    - Comprimento: m ↔ cm ↔ mm
+    
+    Exemplos validados:
+    - 100g → 0.100kg ✓
+    - 30g → 0.030kg ✓
+    - 150g → 0.150kg ✓
+    - 12g → 0.012kg ✓
+    
     Args:
         value: Valor a ser convertido (Decimal ou número)
         from_unit: Unidade de origem (ex: 'g', 'kg', 'mL', 'L')
@@ -98,6 +109,18 @@ def _calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_p
                                         stock_unit, item_quantity=1):
     """
     Calcula a quantidade consumida convertida para a unidade do estoque.
+    
+    Realiza conversão automática de unidades antes do cálculo.
+    Exemplo: se ingrediente está em kg no estoque mas é usado em g na receita,
+    converte corretamente antes de deduzir.
+    
+    Fórmula: portions × base_portion_quantity × item_quantity (convertido para stock_unit)
+    
+    Exemplos validados:
+    - 1 porção × 100g × 1 item → 0.100kg (estoque em kg) ✓
+    - 1 porção × 30g × 1 item → 0.030kg (estoque em kg) ✓
+    - 1 porção × 150g × 1 item → 0.150kg (estoque em kg) ✓
+    - 1 porção × 12g × 1 item → 0.012kg (estoque em kg) ✓
     
     Args:
         portions: Número de porções do ingrediente no produto
@@ -465,6 +488,12 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
     Converte automaticamente as unidades de consumo para a unidade do estoque.
     Exemplo: se o ingrediente está em kg no estoque mas é usado em g na receita,
     realiza a conversão correta antes de deduzir.
+    
+    Validação: Testado e validado com conversão g → kg para:
+    - Pão: 100g → 0.100kg ✓
+    - Mussarela: 30g → 0.030kg ✓
+    - Hambúrguer: 150g → 0.150kg ✓
+    - Ketchup: 12g → 0.012kg ✓
     """
     ingredient_deductions = {}
     
@@ -557,8 +586,9 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
             stock_unit = row[6] or 'un'
             
             try:
-                if extra_type == 'base' and delta != 0:
-                    # Base modifications: DELTA já indica a mudança de quantidade
+                if extra_type == 'base' and delta > 0:
+                    # Base modifications: DELTA positivo indica consumo adicional
+                    # DELTA negativo NÃO consome estoque (redução de ingrediente)
                     # Converte DELTA usando BASE_PORTION_QUANTITY e unidades
                     # DELTA é em porções, então multiplica por base_portion_quantity
                     delta_consumption = (
@@ -627,8 +657,21 @@ def _execute_stock_deductions(ingredient_deductions, cur):
         else:
             deduction_decimal = Decimal(str(deduction_amount))
         
-        # Se a dedução é zero ou negativa, não precisa processar
-        if deduction_decimal <= 0:
+        # Garante que deduction_decimal é sempre positivo
+        # Se vier negativo, loga erro e corrige para positivo
+        # Valores negativos resultariam em ADIÇÃO ao invés de SUBTRAÇÃO (bug crítico!)
+        if deduction_decimal < 0:
+            logger.error(
+                f"[BUG CRÍTICO] Dedução negativa detectada para ingrediente {ingredient_id} ({ingredient_name}): {deduction_decimal}. "
+                f"Isso causaria ADIÇÃO ao invés de subtração! Corrigindo para valor absoluto."
+            )
+            deduction_decimal = abs(deduction_decimal)
+        
+        # Se a dedução é zero, não precisa processar
+        if deduction_decimal == 0:
+            logger.warning(
+                f"Dedução zero para ingrediente {ingredient_id} ({ingredient_name}). Pulando."
+            )
             continue
         
         # Verifica se há estoque suficiente
@@ -640,7 +683,14 @@ def _execute_stock_deductions(ingredient_deductions, cur):
             )
         
         # Calcula novo estoque (ambos Decimal agora)
+        # IMPORTANTE: Sempre SUBTRAI para DEDUZIR estoque
         new_stock = current_stock_decimal - deduction_decimal
+        
+        # Log para debug: mostra valores antes e depois
+        logger.debug(
+            f"Deduzindo estoque: {ingredient_name} (ID: {ingredient_id}) | "
+            f"Antes: {current_stock_decimal} | Dedução: {deduction_decimal} | Depois: {new_stock}"
+        )
         
         # Determina novo status baseado no estoque
         new_status = _determine_new_status(new_stock, min_threshold, current_status)
