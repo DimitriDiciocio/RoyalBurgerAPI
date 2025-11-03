@@ -3,7 +3,7 @@ import random
 import string
 import logging
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service, table_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service
 from .printing_service import print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
 from ..config import Config
@@ -15,17 +15,12 @@ logger = logging.getLogger(__name__)
 # Constantes para tipos de pedido
 ORDER_TYPE_DELIVERY = 'delivery'
 ORDER_TYPE_PICKUP = 'pickup'
-ORDER_TYPE_ON_SITE = 'on_site'
-VALID_ORDER_TYPES = [ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP, ORDER_TYPE_ON_SITE]
-
-# Constantes para status de pedidos on-site
-ORDER_STATUS_ACTIVE_TABLE = 'active_table'
-ORDER_STATUS_OPEN = 'open'  # Sinônimo de active_table
+VALID_ORDER_TYPES = [ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP]
 
 def _validate_order_type(order_type):
     """Valida order_type"""
     if order_type not in VALID_ORDER_TYPES:
-        raise ValueError(f"order_type deve ser '{ORDER_TYPE_DELIVERY}', '{ORDER_TYPE_PICKUP}' ou '{ORDER_TYPE_ON_SITE}'")
+        raise ValueError(f"order_type deve ser '{ORDER_TYPE_DELIVERY}' ou '{ORDER_TYPE_PICKUP}'")
 
 def _validate_order_data(user_id, address_id, items, payment_method):
     """Valida dados básicos do pedido"""
@@ -374,6 +369,11 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             settings = settings_service.get_all_settings()
             if not settings:
                 settings = {}
+            
+            # VALIDAÇÃO DE ESTOQUE - antes de criar o pedido
+            stock_valid, stock_error_code, stock_error_message = stock_service.validate_stock_for_items(items, cur)
+            if not stock_valid:
+                return (None, stock_error_code, stock_error_message)
             
             # Validações de ingredientes e extras
             _validate_ingredients_and_extras(items, cur)
@@ -941,6 +941,11 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if not cart_data:
             return (None, "EMPTY_CART", "Carrinho está vazio")
         
+        # VALIDAÇÃO DE ESTOQUE - antes de criar o pedido
+        stock_valid, stock_error_code, stock_error_message = stock_service.validate_stock_for_items(cart_data["items"], cur)
+        if not stock_valid:
+            return (None, stock_error_code, stock_error_message)
+        
         # Validações básicas
         if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
             return (None, "INVALID_CPF", f"O CPF informado '{cpf_on_invoice}' é inválido.")
@@ -1358,308 +1363,3 @@ def _build_order_breakdown(items, cur):
         })
     
     return breakdown
-
-
-# =============================
-# Funções para Fluxo On-Site (Mesa)
-# =============================
-
-def open_table_order(table_id, attendant_id):
-    """
-    Abre uma mesa para pedido on-site (pagamento no final).
-    Cria um pedido com status 'active_table' e marca a mesa como ocupada.
-    
-    Args:
-        table_id: ID da mesa
-        attendant_id: ID do atendente (do token JWT)
-    
-    Returns:
-        Tupla (order_dict, error_code, message)
-    """
-    conn = None
-    try:
-        # Verifica se a mesa está disponível
-        if not table_service.is_table_available(table_id):
-            return (None, "TABLE_NOT_AVAILABLE", "A mesa não está disponível")
-        
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Verifica se a mesa existe
-        table = table_service.get_table_by_id(table_id)
-        if not table:
-            return (None, "TABLE_NOT_FOUND", "Mesa não encontrada")
-        
-        # Verifica se o atendente existe
-        cur.execute("SELECT ID FROM USERS WHERE ID = ? AND ROLE IN ('attendant', 'manager', 'admin')", (attendant_id,))
-        if not cur.fetchone():
-            return (None, "INVALID_ATTENDANT", "Atendente inválido ou sem permissão")
-        
-        # Gera código de confirmação
-        confirmation_code = _generate_confirmation_code()
-        
-        # Cria o pedido on-site
-        sql_order = """
-            INSERT INTO ORDERS (
-                USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD,
-                NOTES, CONFIRMATION_CODE, ORDER_TYPE, TABLE_ID, ATTENDANT_ID
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING ID;
-        """
-        cur.execute(sql_order, (
-            None,  # USER_ID pode ser NULL para pedidos on-site
-            None,  # ADDRESS_ID NULL para on-site
-            ORDER_STATUS_ACTIVE_TABLE,
-            0.0,  # TOTAL_AMOUNT inicial 0 (será calculado quando adicionar itens)
-            None,  # PAYMENT_METHOD NULL (será definido no fechamento)
-            '',  # NOTES
-            confirmation_code,
-            ORDER_TYPE_ON_SITE,
-            table_id,
-            attendant_id
-        ))
-        new_order_id = cur.fetchone()[0]
-        
-        # Marca a mesa como ocupada
-        if not table_service.set_table_occupied(table_id, new_order_id):
-            conn.rollback()
-            return (None, "DATABASE_ERROR", "Erro ao atualizar status da mesa")
-        
-        conn.commit()
-        
-        return ({
-            "order_id": new_order_id,
-            "confirmation_code": confirmation_code,
-            "status": ORDER_STATUS_ACTIVE_TABLE,
-            "table_id": table_id,
-            "table_name": table['name']
-        }, None, None)
-        
-    except fdb.Error as e:
-        logger.error(f"Erro ao abrir mesa {table_id}: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return (None, "DATABASE_ERROR", "Erro interno do servidor")
-    except Exception as e:
-        logger.error(f"Erro inesperado ao abrir mesa: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar solicitação")
-    finally:
-        if conn:
-            conn.close()
-
-
-def add_items_to_table_order(order_id, items, attendant_id):
-    """
-    Adiciona itens a um pedido de mesa que está aberto (status='active_table').
-    
-    Args:
-        order_id: ID do pedido
-        items: Lista de itens (mesmo formato do create_order)
-        attendant_id: ID do atendente (para validação)
-    
-    Returns:
-        Tupla (order_dict, error_code, message)
-    """
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Verifica se o pedido existe e está no status correto
-        cur.execute("""
-            SELECT STATUS, ORDER_TYPE, TABLE_ID, ATTENDANT_ID, TOTAL_AMOUNT
-            FROM ORDERS WHERE ID = ?
-        """, (order_id,))
-        order_row = cur.fetchone()
-        
-        if not order_row:
-            return (None, "ORDER_NOT_FOUND", "Pedido não encontrado")
-        
-        order_status, order_type, table_id, order_attendant_id, current_total = order_row
-        
-        if order_status != ORDER_STATUS_ACTIVE_TABLE and order_status != ORDER_STATUS_OPEN:
-            return (None, "INVALID_STATUS", f"Pedido não está aberto para adicionar itens. Status atual: {order_status}")
-        
-        if order_type != ORDER_TYPE_ON_SITE:
-            return (None, "INVALID_ORDER_TYPE", "Este pedido não é do tipo on-site")
-        
-        # Validação opcional: verifica se o atendente tem permissão
-        # (pode permitir que qualquer atendente adicione itens)
-        
-        # Valida itens
-        if not items or not isinstance(items, list) or len(items) == 0:
-            return (None, "EMPTY_ITEMS", "A lista de itens não pode estar vazia")
-        
-        # Valida ingredientes e extras
-        _validate_ingredients_and_extras(items, cur)
-        
-        # Calcula total dos novos itens
-        items_total = _calculate_order_total(items, cur)
-        
-        # Adiciona itens ao pedido
-        _add_order_items(order_id, items, cur)
-        
-        # Atualiza o total do pedido
-        new_total = float(current_total) + float(items_total)
-        cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ?, UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = ?", 
-                   (new_total, order_id))
-        
-        conn.commit()
-        
-        # Notifica cozinha sobre novos itens
-        _notify_kitchen(order_id)
-        
-        # Busca dados atualizados do pedido
-        order_data = get_order_details(order_id, None, ['attendant', 'manager', 'admin'])
-        
-        return (order_data, None, "Itens adicionados com sucesso")
-        
-    except ValueError as e:
-        logger.warning(f"Erro de validação ao adicionar itens: {e}")
-        if conn:
-            conn.rollback()
-        return (None, "VALIDATION_ERROR", str(e))
-    except fdb.Error as e:
-        logger.error(f"Erro ao adicionar itens ao pedido {order_id}: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return (None, "DATABASE_ERROR", "Erro interno do servidor")
-    except Exception as e:
-        logger.error(f"Erro inesperado ao adicionar itens: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar solicitação")
-    finally:
-        if conn:
-            conn.close()
-
-
-def close_table_order(order_id, payment_method, attendant_id):
-    """
-    Fecha um pedido de mesa, registra o pagamento e libera a mesa.
-    
-    Args:
-        order_id: ID do pedido
-        payment_method: Método de pagamento (ex: 'credit_card', 'cash', 'pix', 'debit_card')
-        attendant_id: ID do atendente (para validação)
-    
-    Returns:
-        Tupla (order_dict, error_code, message)
-    """
-    conn = None
-    try:
-        if not payment_method:
-            return (None, "MISSING_PAYMENT_METHOD", "payment_method é obrigatório")
-        
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Busca dados do pedido
-        cur.execute("""
-            SELECT STATUS, ORDER_TYPE, TABLE_ID, ATTENDANT_ID, TOTAL_AMOUNT, USER_ID
-            FROM ORDERS WHERE ID = ?
-        """, (order_id,))
-        order_row = cur.fetchone()
-        
-        if not order_row:
-            return (None, "ORDER_NOT_FOUND", "Pedido não encontrado")
-        
-        order_status, order_type, table_id, order_attendant_id, total_amount, user_id = order_row
-        
-        if order_status != ORDER_STATUS_ACTIVE_TABLE and order_status != ORDER_STATUS_OPEN:
-            return (None, "INVALID_STATUS", f"Pedido não está aberto para fechamento. Status atual: {order_status}")
-        
-        if order_type != ORDER_TYPE_ON_SITE:
-            return (None, "INVALID_ORDER_TYPE", "Este pedido não é do tipo on-site")
-        
-        if total_amount <= 0:
-            return (None, "EMPTY_ORDER", "Pedido não pode ser fechado sem itens")
-        
-        # Valida método de pagamento
-        valid_payment_methods = ['credit_card', 'debit_card', 'pix', 'cash', 'money', 'dinheiro']
-        if payment_method.lower() not in [pm.lower() for pm in valid_payment_methods]:
-            return (None, "INVALID_PAYMENT_METHOD", f"Método de pagamento inválido. Use: {', '.join(valid_payment_methods)}")
-        
-        # Inicia transação
-        # Atualiza o pedido: status, payment_method
-        payment_method_normalized = payment_method.lower()
-        if payment_method_normalized in ['money', 'dinheiro', 'cash']:
-            payment_method_normalized = 'cash'
-        elif payment_method_normalized in ['credit_card']:
-            payment_method_normalized = 'credit_card'
-        elif payment_method_normalized in ['debit_card']:
-            payment_method_normalized = 'debit_card'
-        elif payment_method_normalized in ['pix']:
-            payment_method_normalized = 'pix'
-        
-        cur.execute("""
-            UPDATE ORDERS
-            SET STATUS = 'completed',
-                PAYMENT_METHOD = ?,
-                UPDATED_AT = CURRENT_TIMESTAMP
-            WHERE ID = ?
-        """, (payment_method_normalized, order_id))
-        
-        # Libera a mesa
-        if table_id:
-            if not table_service.set_table_available(table_id):
-                logger.warning(f"Falha ao liberar mesa {table_id}, mas pedido foi fechado")
-        
-        conn.commit()
-        
-        # Se houver USER_ID, processa pontos de fidelidade (se aplicável)
-        if user_id:
-            try:
-                settings = settings_service.get_all_settings()
-                delivery_fee = 0.0
-                
-                # Calcula subtotal para pontos
-                cur.execute("""
-                    SELECT 
-                        CAST(COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) AS DECIMAL(10,2)) as SUBTOTAL_ITEMS,
-                        CAST(COALESCE(SUM(
-                            CASE 
-                                WHEN oie.DELTA IS NOT NULL THEN oie.DELTA * oie.UNIT_PRICE
-                                ELSE oie.QUANTITY * oie.UNIT_PRICE
-                            END
-                        ), 0) AS DECIMAL(10,2)) as TOTAL_EXTRAS
-                    FROM ORDER_ITEMS oi
-                    LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
-                    WHERE oi.ORDER_ID = ?
-                """, (order_id,))
-                row = cur.fetchone()
-                if row:
-                    subtotal_items = float(row[0]) if row[0] is not None else 0.0
-                    total_extras = float(row[1]) if row[1] is not None else 0.0
-                    subtotal = subtotal_items + total_extras
-                    discount_applied = 0.0  # Pedidos on-site geralmente não têm desconto
-                    
-                    loyalty_service.earn_points_for_order_with_details(
-                        user_id, order_id, subtotal, discount_applied, delivery_fee, cur
-                    )
-                    conn.commit()
-            except Exception as e:
-                logger.error(f"Erro ao creditar pontos para pedido on-site {order_id}: {e}", exc_info=True)
-                # Não falha o fechamento por erro nos pontos
-        
-        # Busca dados atualizados do pedido
-        order_data = get_order_details(order_id, None, ['attendant', 'manager', 'admin'])
-        
-        return (order_data, None, "Pedido fechado e mesa liberada com sucesso")
-        
-    except fdb.Error as e:
-        logger.error(f"Erro ao fechar pedido {order_id}: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return (None, "DATABASE_ERROR", "Erro interno do servidor")
-    except Exception as e:
-        logger.error(f"Erro inesperado ao fechar pedido: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar solicitação")
-    finally:
-        if conn:
-            conn.close()
