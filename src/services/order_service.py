@@ -482,38 +482,93 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
         return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar pedido")
 
 def get_orders_by_user_id(user_id):
-    """Busca o histórico de pedidos de um usuário específico."""
+    """Busca o histórico de pedidos de um usuário específico com otimizações.
+    Inclui total_amount e items básicos na mesma query para evitar N+1 queries."""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # Query otimizada que inclui total_amount e agrega items básicos
         sql = """
-            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, a.STREET, a."NUMBER"
+            SELECT 
+                o.ID, 
+                o.STATUS, 
+                o.CONFIRMATION_CODE, 
+                o.CREATED_AT, 
+                o.ORDER_TYPE, 
+                o.TOTAL_AMOUNT,
+                a.STREET, 
+                a."NUMBER"
             FROM ORDERS o
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
             WHERE o.USER_ID = ?
             ORDER BY o.CREATED_AT DESC;
         """
         cur.execute(sql, (user_id,))
+        order_rows = cur.fetchall()
+        
+        if not order_rows:
+            return []
+        
+        # Busca todos os items de todos os pedidos de uma vez (evita N+1)
+        order_ids = [row[0] for row in order_rows]
+        placeholders = ', '.join(['?' for _ in order_ids])
+        sql_items = f"""
+            SELECT 
+                oi.ORDER_ID,
+                oi.QUANTITY,
+                p.NAME as PRODUCT_NAME
+            FROM ORDER_ITEMS oi
+            JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
+            WHERE oi.ORDER_ID IN ({placeholders})
+            ORDER BY oi.ORDER_ID, oi.ID;
+        """
+        cur.execute(sql_items, tuple(order_ids))
+        items_rows = cur.fetchall()
+        
+        # Agrupa items por order_id
+        items_by_order = {}
+        for item_row in items_rows:
+            order_id = item_row[0]
+            if order_id not in items_by_order:
+                items_by_order[order_id] = []
+            items_by_order[order_id].append({
+                "quantity": item_row[1],
+                "product_name": item_row[2],
+                "name": item_row[2]  # Alias para compatibilidade
+            })
+        
+        # Monta resposta com items e total
         orders = []
-        for row in cur.fetchall():
-            # CORREÇÃO: row[4] é ORDER_TYPE, não índice incorreto
+        for row in order_rows:
+            order_id = row[0]
             order_type = row[4] if row[4] else ORDER_TYPE_DELIVERY
-            address_str = None
-            if order_type == ORDER_TYPE_PICKUP:
-                address_str = "Retirada no balcão"
-            elif row[5] and row[6]:  # STREET e NUMBER não nulos
-                address_str = f"{row[5]}, {row[6]}"
-            else:
-                address_str = "Endereço não informado"
             
-            orders.append({
-                "order_id": row[0], "status": row[1], "confirmation_code": row[2],
+            # Formata endereço como objeto para compatibilidade
+            address_obj = None
+            if order_type == ORDER_TYPE_PICKUP:
+                address_obj = {"street": "Retirada no balcão"}
+            elif row[6] and row[7]:  # STREET e NUMBER não nulos
+                address_obj = {"street": row[6], "number": row[7]}
+            else:
+                address_obj = {"street": "Endereço não informado"}
+            
+            order_data = {
+                "order_id": order_id,
+                "id": order_id,  # Alias para compatibilidade
+                "status": row[1],
+                "confirmation_code": row[2],
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
                 "order_type": order_type,
-                "address": address_str
-            })
+                "total_amount": float(row[5]) if row[5] is not None else None,
+                "total": float(row[5]) if row[5] is not None else None,  # Alias para compatibilidade
+                "address": address_obj,
+                "items": items_by_order.get(order_id, [])
+            }
+            
+            orders.append(order_data)
+        
         return orders
     except fdb.Error as e:
         logger.error(f"Erro ao buscar pedidos do usuário {user_id}: {e}", exc_info=True)
