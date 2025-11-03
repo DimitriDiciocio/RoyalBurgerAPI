@@ -1,8 +1,7 @@
-
-
 import fdb
 import random
 import string
+import logging
 
 from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service
 from .printing_service import print_kitchen_ticket, format_order_for_kitchen_json
@@ -10,6 +9,8 @@ from .. import socketio
 from ..config import Config
 from ..database import get_db_connection
 from ..utils import validators
+
+logger = logging.getLogger(__name__)
 
 # Constantes para tipos de pedido
 ORDER_TYPE_DELIVERY = 'delivery'
@@ -221,15 +222,23 @@ def _add_order_items(order_id, items, cur):
                 cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_qty, extra_price))
         
         # Insere base_modifications (TYPE='base')
+        # CORREÇÃO: Buscar preços de base_modifications em batch para evitar query N+1
         if 'base_modifications' in item and item['base_modifications']:
+            base_mod_ids = [bm['ingredient_id'] for bm in item['base_modifications'] if bm.get('delta', 0) != 0]
+            base_mod_prices_dict = {}
+            if base_mod_ids:
+                placeholders = ', '.join(['?' for _ in base_mod_ids])
+                cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ids))
+                base_mod_prices_dict = {row[0]: float(row[1] or 0.0) for row in cur.fetchall()}
+            
             for bm in item['base_modifications']:
                 bm_id = bm['ingredient_id']
                 bm_delta = bm.get('delta', 0)
                 if bm_delta != 0:
-                    # Busca preço para ingredientes de base modificados
-                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ?;", (bm_id,))
-                    bm_price_row = cur.fetchone()
-                    bm_price = float(bm_price_row[0] or 0.0) if bm_price_row else 0.0
+                    # CORREÇÃO: Verifica se ingrediente foi encontrado (não apenas se preço é 0)
+                    if bm_id not in base_mod_prices_dict:
+                        raise ValueError(f"Ingrediente {bm_id} não encontrado ou preço indisponível")
+                    bm_price = base_mod_prices_dict[bm_id]
                     sql_base_mod = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);"
                     cur.execute(sql_base_mod, (new_order_item_id, bm_id, bm_delta, bm_price))
 
@@ -239,9 +248,9 @@ def _notify_kitchen(order_id):
         kitchen_ticket_json = format_order_for_kitchen_json(order_id)
         if kitchen_ticket_json:
             socketio.emit('new_kitchen_order', kitchen_ticket_json)
-    except Exception:
-        # TODO: Implementar logging adequado (ex: logger.warning) em produção
-        pass
+    except Exception as e:
+        # Logging estruturado substitui print/TODO
+        logger.warning(f"Falha ao notificar cozinha sobre pedido {order_id}: {e}", exc_info=True)
 
 
 def _generate_confirmation_code(length=8):
@@ -268,7 +277,8 @@ def _calculate_estimated_delivery_time(order_status, order_type):
     prazo_iniciacao = settings.get('prazo_iniciacao') or 5
     prazo_preparo = settings.get('prazo_preparo') or 20
     prazo_envio = settings.get('prazo_envio') or 5
-    prazo_entrega = settings.get('prazo_entrega') or 15 if order_type == ORDER_TYPE_DELIVERY else 0
+    # CORREÇÃO: Operador ternário mal formado (linha 271 original)
+    prazo_entrega = (settings.get('prazo_entrega') or 15) if order_type == ORDER_TYPE_DELIVERY else 0
     
     # Calcula tempo total baseado no status atual
     # Mapeia status da aplicação para fases do ciclo
@@ -334,7 +344,7 @@ def _calculate_estimated_delivery_time(order_status, order_type):
         'order_type': order_type
     }
 
-def create_order(user_id, address_id, items, payment_method, change_for_amount=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
+def create_order(user_id, address_id, items, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
     """Cria um novo pedido validando TUDO"""
     
     try:
@@ -376,14 +386,30 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
             # Valida resgate de pontos
             _validate_points_redemption(points_to_redeem, order_total)
 
+            # Valida e processa valor pago para pagamento em dinheiro
+            paid_amount = None
+            if payment_method and payment_method.lower() in ['money', 'dinheiro', 'cash']:
+                if amount_paid is None:
+                    return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro")
+                try:
+                    paid_amount = float(amount_paid)
+                    if paid_amount < order_total:
+                        return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {order_total:.2f})")
+                except (ValueError, TypeError):
+                    return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+
             # Cria o pedido (address_id None para pickup)
             confirmation_code = _generate_confirmation_code()
             sql_order = """
-                INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE, ORDER_TYPE)
-                VALUES (?, ?, 'pending', ?, ?, ?, ?, ?) RETURNING ID;
+                INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE, ORDER_TYPE, CHANGE_FOR_AMOUNT)
+                VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?) RETURNING ID;
             """
             final_address_id = address_id if order_type == ORDER_TYPE_DELIVERY else None
-            cur.execute(sql_order, (user_id, final_address_id, order_total, payment_method, notes, confirmation_code, order_type))
+            # Calcula o troco: amount_paid - order_total (ou None se não for dinheiro)
+            change_amount = None
+            if paid_amount is not None:
+                change_amount = paid_amount - order_total
+            cur.execute(sql_order, (user_id, final_address_id, order_total, payment_method, notes, confirmation_code, order_type, change_amount))
             new_order_id = cur.fetchone()[0]
 
             # Debita pontos se houver
@@ -391,6 +417,10 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
                 discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, new_order_id, cur)
                 new_total = max(0, float(order_total) - float(discount_amount))
                 cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, new_order_id))
+                # Recalcula o troco com o novo total após desconto
+                if paid_amount is not None:
+                    new_change_amount = paid_amount - new_total
+                    cur.execute("UPDATE ORDERS SET CHANGE_FOR_AMOUNT = ? WHERE ID = ?;", (new_change_amount, new_order_id))
 
             # Adiciona itens ao pedido
             _add_order_items(new_order_id, items, cur)
@@ -402,11 +432,15 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
             
             return ({"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}, None, None)
 
-        except fdb.Error:
-            # TODO: Implementar logging adequado (ex: logger.error) em produção
-            # Não expor detalhes do erro de banco ao cliente
+        except fdb.Error as e:
+            # Logging estruturado com níveis apropriados
+            logger.error(f"Erro no banco de dados ao criar pedido: {e}", exc_info=Config.DEBUG)
             if conn:
                 conn.rollback()
+            # Verifica se o erro é relacionado a coluna não encontrada
+            error_msg = str(e).lower()
+            if 'change_for_amount' in error_msg or 'column' in error_msg or 'unknown' in error_msg:
+                return (None, "DATABASE_ERROR", "Campo CHANGE_FOR_AMOUNT não existe no banco. Execute a migração: ALTER TABLE ORDERS ADD CHANGE_FOR_AMOUNT DECIMAL(10,2);")
             return (None, "DATABASE_ERROR", "Erro interno do servidor")
         finally:
             if conn:
@@ -414,8 +448,9 @@ def create_order(user_id, address_id, items, payment_method, change_for_amount=N
             
     except ValueError as e:
         return (None, "VALIDATION_ERROR", str(e))
-    except Exception:
-        # TODO: Implementar logging adequado (ex: logger.error) em produção
+    except Exception as e:
+        # Logging estruturado - traceback apenas em DEBUG
+        logger.error(f"Erro inesperado ao processar pedido: {type(e).__name__}: {e}", exc_info=Config.DEBUG)
         return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar pedido")
 
 def get_orders_by_user_id(user_id):
@@ -426,23 +461,34 @@ def get_orders_by_user_id(user_id):
         cur = conn.cursor()
         
         sql = """
-            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, a.STREET, a."NUMBER"
+            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, a.STREET, a."NUMBER"
             FROM ORDERS o
-            JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
+            LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
             WHERE o.USER_ID = ?
             ORDER BY o.CREATED_AT DESC;
         """
         cur.execute(sql, (user_id,))
         orders = []
         for row in cur.fetchall():
+            # CORREÇÃO: row[4] é ORDER_TYPE, não índice incorreto
+            order_type = row[4] if row[4] else ORDER_TYPE_DELIVERY
+            address_str = None
+            if order_type == ORDER_TYPE_PICKUP:
+                address_str = "Retirada no balcão"
+            elif row[5] and row[6]:  # STREET e NUMBER não nulos
+                address_str = f"{row[5]}, {row[6]}"
+            else:
+                address_str = "Endereço não informado"
+            
             orders.append({
                 "order_id": row[0], "status": row[1], "confirmation_code": row[2],
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
-                "address": f"{row[4]}, {row[5]}"
+                "order_type": order_type,
+                "address": address_str
             })
         return orders
     except fdb.Error as e:
-        print(f"Erro ao buscar pedidos do usuário: {e}")
+        logger.error(f"Erro ao buscar pedidos do usuário {user_id}: {e}", exc_info=True)
         return []
     finally:
         if conn:
@@ -456,22 +502,35 @@ def get_all_orders():
         cur = conn.cursor()
         
         sql = """
-            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, u.FULL_NAME
+            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, u.FULL_NAME, a.STREET, a."NUMBER"
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
+            LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
             ORDER BY o.CREATED_AT DESC;
         """
         cur.execute(sql)
         orders = []
         for row in cur.fetchall():
+            # CORREÇÃO: Consistência com get_orders_by_user_id - extrair order_type primeiro
+            order_type = row[4] if row[4] else ORDER_TYPE_DELIVERY
+            address_str = None
+            if order_type == ORDER_TYPE_PICKUP:
+                address_str = "Retirada no balcão"
+            elif row[6] and row[7]:  # STREET e NUMBER não nulos
+                address_str = f"{row[6]}, {row[7]}"
+            else:
+                address_str = "Endereço não informado"
+            
             orders.append({
                 "order_id": row[0], "status": row[1], "confirmation_code": row[2],
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
-                "customer_name": row[4]
+                "order_type": order_type,
+                "customer_name": row[5],
+                "address": address_str
             })
         return orders
     except fdb.Error as e:
-        print(f"Erro ao buscar todos os pedidos: {e}")
+        logger.error(f"Erro ao buscar todos os pedidos: {e}", exc_info=True)
         return []
     finally:
         if conn:
@@ -480,33 +539,88 @@ def get_all_orders():
 
 def update_order_status(order_id, new_status):
     """Atualiza o status de um pedido e adiciona pontos de fidelidade se concluído."""
-    allowed_statuses = ['pending', 'preparing', 'on_the_way', 'completed', 'cancelled']
-    if new_status not in allowed_statuses:
-        return False
-
+    # IMPORTANTE: O banco tem constraint CHECK (INTEG_57) que permite apenas:
+    # 'pending', 'in_progress', 'awaiting_payment', 'preparing', 'on_the_way', 'delivered', 'cancelled'
+    # NOTA: Para suportar pedidos pickup corretamente, execute o script add_ready_status.sql
+    # para adicionar 'ready' à constraint. Se não executar, pedidos pickup usarão 'in_progress' temporariamente.
+    # Mapeamos 'completed' do frontend para 'delivered' do banco
+    # Para pedidos pickup: 'on_the_way' é mapeado para 'ready' (pronto para retirada)
+    
     conn = None
+    current_status = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # Primeiro verifica se o pedido existe, qual o status atual e o tipo
+        cur.execute("SELECT STATUS, ORDER_TYPE FROM ORDERS WHERE ID = ?;", (order_id,))
+        order_info = cur.fetchone()
         
+        if not order_info:
+            logger.error(f"Pedido {order_id} não encontrado")
+            return False
+        
+        current_status, order_type = order_info
+        
+        # Aceita tanto os valores do frontend quanto os do banco
+        allowed_statuses = ['pending', 'preparing', 'on_the_way', 'ready', 'completed', 'delivered', 'cancelled']
+        if new_status not in allowed_statuses:
+            logger.warning(f"Status '{new_status}' não permitido para pedido {order_id}")
+            return False
+        
+        # Mapeia status baseado no tipo de pedido
+        # Para pickup: on_the_way -> ready (pronto para retirada)
+        # Para delivery: on_the_way -> on_the_way (saindo para entrega)
+        if new_status == 'on_the_way':
+            if order_type == ORDER_TYPE_PICKUP:
+                # Tenta usar 'ready', se não estiver na constraint, usa 'in_progress' como fallback
+                db_status = 'ready'  # Para pickup, "pronto" em vez de "saindo para entrega"
+            else:
+                db_status = 'on_the_way'  # Para delivery, mantém "saindo para entrega"
+        elif new_status == 'completed':
+            db_status = 'delivered'  # Mapeia completed -> delivered
+        elif new_status == 'ready':
+            # Se já está enviando 'ready', mantém (pode ser usado para ambos os tipos)
+            db_status = 'ready'
+        else:
+            db_status = new_status
+        
+        # Se o status é o mesmo (ou equivalente), não precisa atualizar
+        if current_status == db_status:
+            return True
+        
+        # Atualiza o status usando o valor mapeado para o banco
+        # Se 'ready' não estiver na constraint, tenta usar 'in_progress' como fallback para pickup
         sql_update = "UPDATE ORDERS SET STATUS = ? WHERE ID = ?;"
-        cur.execute(sql_update, (new_status, order_id))
+        try:
+            cur.execute(sql_update, (db_status, order_id))
+            rows_updated = cur.rowcount  # Salva o rowcount logo após o UPDATE
+        except fdb.Error as e:
+            error_msg = str(e)
+            # Se 'ready' não está permitido e é um pedido pickup, usa 'in_progress' como fallback
+            if 'CHECK' in error_msg and db_status == 'ready' and order_type == ORDER_TYPE_PICKUP:
+                logger.warning(f"Status 'ready' não está na constraint. Usando 'in_progress' como fallback para pedido pickup {order_id}. Execute add_ready_status.sql para adicionar 'ready' à constraint.")
+                db_status = 'in_progress'
+                cur.execute(sql_update, (db_status, order_id))
+                rows_updated = cur.rowcount
+            else:
+                raise
 
         # Deduz estoque quando o pedido é confirmado (status 'preparing')
-        if new_status == 'preparing':
+        if db_status == 'preparing':
             success, error_code, message = stock_service.deduct_stock_for_order(order_id)
             if not success:
                 # Se falhou a dedução, reverte o status
                 cur.execute("UPDATE ORDERS SET STATUS = 'pending' WHERE ID = ?;", (order_id,))
                 conn.commit()
-                print(f"Erro ao deduzir estoque para pedido {order_id}: {message}")
+                logger.warning(f"Erro ao deduzir estoque para pedido {order_id}: {message}")
                 return False
-            print(f"Estoque deduzido para pedido {order_id}: {message}")
+            logger.info(f"Estoque deduzido para pedido {order_id}: {message}")
 
         # Busca dados do pedido uma única vez para uso em múltiplas operações
+        # order_type já foi obtido acima, então busca apenas USER_ID e TOTAL_AMOUNT
         cur.execute("""
-            SELECT USER_ID, ORDER_TYPE, TOTAL_AMOUNT FROM ORDERS WHERE ID = ?;
+            SELECT USER_ID, TOTAL_AMOUNT FROM ORDERS WHERE ID = ?;
         """, (order_id,))
         order_data = cur.fetchone()
         
@@ -514,11 +628,11 @@ def update_order_status(order_id, new_status):
             conn.rollback()
             return False
         
-        user_id, order_type, stored_total = order_data
+        user_id, stored_total = order_data
         total_after_discount = float(stored_total) if stored_total else 0.0
         
-        # Processa crédito de pontos apenas quando completado
-        if new_status == 'completed':
+        # Processa crédito de pontos apenas quando entregue (delivered)
+        if db_status == 'delivered':
             # Busca configurações para taxa de entrega
             settings = settings_service.get_all_settings()
             delivery_fee = 0.0
@@ -527,42 +641,59 @@ def update_order_status(order_id, new_status):
             
             # Calcula subtotal (soma dos itens) e desconto
             # Para extras e base_modifications, usa DELTA para multiplicar
-            cur.execute("""
-                SELECT 
-                    COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) as SUBTOTAL_ITEMS,
-                    COALESCE(SUM(
-                        CASE 
-                            WHEN oie.DELTA IS NOT NULL THEN oie.DELTA * oie.UNIT_PRICE
-                            ELSE oie.QUANTITY * oie.UNIT_PRICE
-                        END
-                    ), 0) as TOTAL_EXTRAS
-                FROM ORDER_ITEMS oi
-                LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
-                WHERE oi.ORDER_ID = ?;
-            """, (order_id,))
-            row = cur.fetchone()
-            if row:
-                subtotal_items = float(row[0]) if row[0] else 0.0
-                total_extras = float(row[1]) if row[1] else 0.0
-                subtotal = subtotal_items + total_extras
+            try:
+                # Primeiro verifica se o pedido tem itens
+                cur.execute("SELECT COUNT(*) FROM ORDER_ITEMS WHERE ORDER_ID = ?;", (order_id,))
+                item_count = cur.fetchone()[0]
                 
-                # Calcula desconto aplicado
-                total_before_discount = subtotal + delivery_fee
-                discount_applied = total_before_discount - total_after_discount
-                
-                # Credita pontos usando função precisa
-                try:
-                    loyalty_service.earn_points_for_order_with_details(
-                        user_id, order_id, subtotal, discount_applied, delivery_fee, cur
-                    )
-                except Exception as e:
-                    print(f"Erro ao creditar pontos para pedido {order_id}: {e}")
-                    # Não falha o pedido por erro nos pontos, apenas loga
+                if item_count > 0:
+                    cur.execute("""
+                        SELECT 
+                            CAST(COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) AS DECIMAL(10,2)) as SUBTOTAL_ITEMS,
+                            CAST(COALESCE(SUM(
+                                CASE 
+                                    WHEN oie.DELTA IS NOT NULL THEN oie.DELTA * oie.UNIT_PRICE
+                                    ELSE oie.QUANTITY * oie.UNIT_PRICE
+                                END
+                            ), 0) AS DECIMAL(10,2)) as TOTAL_EXTRAS
+                        FROM ORDER_ITEMS oi
+                        LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
+                        WHERE oi.ORDER_ID = ?;
+                    """, (order_id,))
+                    row = cur.fetchone()
+                    if row:
+                        subtotal_items = float(row[0]) if row[0] is not None else 0.0
+                        total_extras = float(row[1]) if row[1] is not None else 0.0
+                        subtotal = subtotal_items + total_extras
+                        
+                        # Calcula desconto aplicado
+                        total_before_discount = subtotal + delivery_fee
+                        discount_applied = total_before_discount - total_after_discount
+                        
+                        # Credita pontos usando função precisa
+                        try:
+                            loyalty_service.earn_points_for_order_with_details(
+                                user_id, order_id, subtotal, discount_applied, delivery_fee, cur
+                            )
+                        except Exception as e:
+                            logger.error(f"Erro ao creditar pontos para pedido {order_id}: {e}", exc_info=True)
+                            # Não falha o pedido por erro nos pontos, apenas loga
+                    else:
+                        logger.warning(f"Pedido {order_id} não retornou dados do cálculo de subtotal")
+                else:
+                    logger.warning(f"Pedido {order_id} não tem itens para calcular pontos")
+            except Exception as e:
+                logger.error(f"Erro ao calcular subtotal do pedido {order_id}: {e}", exc_info=True)
+                # Continua mesmo se houver erro no cálculo
 
         conn.commit()
         
         # Envia notificação após commit bem-sucedido
-        notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
+        # Para pickup com status ready ou in_progress (fallback), mensagem personalizada
+        if (db_status == 'ready' or db_status == 'in_progress') and order_type == ORDER_TYPE_PICKUP:
+            notification_message = f"Seu pedido #{order_id} está pronto para retirada no balcão!"
+        else:
+            notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
         notification_link = f"/my-orders/{order_id}"
         notification_service.create_notification(user_id, notification_message, notification_link)
         
@@ -579,12 +710,21 @@ def update_order_status(order_id, new_status):
                     new_status=new_status
                 )
             except Exception as e:
-                print(f"Erro ao enviar email para pedido {order_id}: {e}")
+                logger.error(f"Erro ao enviar email para pedido {order_id}: {e}", exc_info=True)
                 # Não falha a operação por erro no email
 
-        return cur.rowcount > 0
+        # Retorna True se a atualização foi bem-sucedida (rowcount > 0)
+        # ou se chegou até aqui sem erros (indica sucesso)
+        return rows_updated > 0
     except fdb.Error as e:
-        print(f"Erro ao atualizar status do pedido: {e}")
+        error_msg = str(e)
+        logger.error(f"Erro ao atualizar status do pedido {order_id} para '{new_status}': {error_msg}", exc_info=True)
+        
+        # Verifica se é erro de constraint
+        if 'CHECK' in error_msg or 'constraint' in error_msg or 'INTEG_57' in error_msg:
+            status_info = f"Status atual: '{current_status}'" if current_status else "Status atual: desconhecido"
+            logger.error(f"Constraint CHECK violada. {status_info}, Status tentado: '{new_status}'. Verifique se o valor é permitido pela constraint do banco.")
+        
         if conn:
             conn.rollback()
         return False
@@ -605,30 +745,36 @@ def get_order_details(order_id, user_id, user_role):
         
         sql_order = """
             SELECT ID, USER_ID, ADDRESS_ID, STATUS, CONFIRMATION_CODE, NOTES,
-                   PAYMENT_METHOD, TOTAL_AMOUNT, CREATED_AT, ORDER_TYPE
+                   PAYMENT_METHOD, TOTAL_AMOUNT, CREATED_AT, ORDER_TYPE, CHANGE_FOR_AMOUNT
             FROM ORDERS WHERE ID = ?;
         """
         cur.execute(sql_order, (order_id,))
         order_row = cur.fetchone()
 
         if not order_row:
-            return None 
+            return None
 
+        # Calcula amount_paid quando há troco (amount_paid = total + change)
+        total = float(order_row[7]) if order_row[7] is not None else 0.0
+        change = float(order_row[10]) if order_row[10] is not None else None
+        amount_paid = (total + change) if change is not None else (total if total > 0 else None)
         
         order_details = {
             "id": order_row[0], "user_id": order_row[1], "address_id": order_row[2],
             "status": order_row[3], "confirmation_code": order_row[4], "notes": order_row[5],
-            "payment_method": order_row[6], "total_amount": float(order_row[7]) if order_row[7] is not None else 0.0,
+            "payment_method": order_row[6], "total_amount": total,
             "created_at": order_row[8].strftime('%Y-%m-%d %H:%M:%S') if order_row[8] else None,
-            "order_type": order_row[9] if order_row[9] else 'delivery'
+            "order_type": order_row[9] if order_row[9] else 'delivery',
+            "change_for_amount": change,
+            "amount_paid": amount_paid
         }
 
-        
-        
+        # Verificação de segurança: cliente só pode ver seus próprios pedidos
         if user_role == 'customer' and order_details['user_id'] != user_id:
             return None 
-
         
+        # CORREÇÃO: Evitar query N+1 - buscar todos os extras de uma vez
+        # Primeiro busca todos os itens
         sql_items = """
             SELECT oi.ID, oi.QUANTITY, oi.UNIT_PRICE, p.NAME, p.DESCRIPTION
             FROM ORDER_ITEMS oi
@@ -636,47 +782,56 @@ def get_order_details(order_id, user_id, user_role):
             WHERE oi.ORDER_ID = ?;
         """
         cur.execute(sql_items, (order_id,))
+        item_rows = cur.fetchall()
+        
+        if not item_rows:
+            order_details['items'] = []
+            return order_details
+        
+        # Busca todos os extras de uma vez (evita N+1)
+        order_item_ids = [row[0] for row in item_rows]
+        placeholders = ', '.join(['?' for _ in order_item_ids])
+        sql_extras = f"""
+            SELECT e.ORDER_ITEM_ID, e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
+            FROM ORDER_ITEM_EXTRAS e
+            JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
+            WHERE e.ORDER_ITEM_ID IN ({placeholders})
+            ORDER BY e.ORDER_ITEM_ID, e.TYPE, i.NAME
+        """
+        cur.execute(sql_extras, tuple(order_item_ids))
+        extras_dict = {}
+        for ex in cur.fetchall():
+            order_item_id = ex[0]
+            if order_item_id not in extras_dict:
+                extras_dict[order_item_id] = {'extras': [], 'base_modifications': []}
+            row_type = (ex[4] or 'extra').lower()
+            if row_type == 'extra':
+                extras_dict[order_item_id]['extras'].append({
+                    "ingredient_id": ex[1],
+                    "name": ex[2],
+                    "quantity": ex[3]
+                })
+            elif row_type == 'base':
+                extras_dict[order_item_id]['base_modifications'].append({
+                    "ingredient_id": ex[1],
+                    "name": ex[2],
+                    "delta": int(ex[5])
+                })
 
+        # Monta lista de itens com seus extras
         order_items = []
-        for item_row in cur.fetchall():
+        for item_row in item_rows:
             order_item_id = item_row[0]
             item_dict = {
                 "quantity": item_row[1],
                 "unit_price": item_row[2],
                 "product_name": item_row[3],
                 "product_description": item_row[4],
-                "extras": [],
-                "base_modifications": []
+                "extras": extras_dict.get(order_item_id, {}).get('extras', []),
+                "base_modifications": extras_dict.get(order_item_id, {}).get('base_modifications', [])
             }
-            # Busca extras e base_modifications do item
-            cur2 = conn.cursor()
-            cur2.execute(
-                """
-                SELECT e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
-                FROM ORDER_ITEM_EXTRAS e
-                JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
-                WHERE e.ORDER_ITEM_ID = ?
-                ORDER BY e.TYPE, i.NAME
-                """,
-                (order_item_id,)
-            )
-            for ex in cur2.fetchall():
-                row_type = (ex[3] or 'extra').lower()
-                if row_type == 'extra':
-                    item_dict["extras"].append({
-                        "ingredient_id": ex[0],
-                        "name": ex[1],
-                        "quantity": ex[2]
-                    })
-                elif row_type == 'base':
-                    item_dict["base_modifications"].append({
-                        "ingredient_id": ex[0],
-                        "name": ex[1],
-                        "delta": int(ex[4])
-                    })
             order_items.append(item_dict)
 
-        
         order_details['items'] = order_items
         
         # Adiciona tempo estimado de entrega baseado nos prazos configurados
@@ -689,7 +844,7 @@ def get_order_details(order_id, user_id, user_role):
         return order_details
 
     except fdb.Error as e:
-        print(f"Erro ao buscar detalhes do pedido: {e}")
+        logger.error(f"Erro ao buscar detalhes do pedido {order_id}: {e}", exc_info=True)
         return None
     finally:
         if conn:
@@ -705,7 +860,6 @@ def cancel_order_by_customer(order_id, user_id):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        
         sql_find = "SELECT USER_ID, STATUS FROM ORDERS WHERE ID = ?;"
         cur.execute(sql_find, (order_id,))
         order_record = cur.fetchone()
@@ -715,20 +869,19 @@ def cancel_order_by_customer(order_id, user_id):
 
         owner_id, status = order_record
 
-        
+        # Verificação de autorização: apenas o dono pode cancelar
         if owner_id != user_id:
             return (False, "Você não tem permissão para cancelar este pedido.")
 
-        
+        # Validação de status: apenas pedidos pendentes podem ser cancelados pelo cliente
         if status != 'pending':
             return (False, f"Não é possível cancelar um pedido que já está com o status '{status}'.")
 
-        
         sql_update = "UPDATE ORDERS SET STATUS = 'cancelled' WHERE ID = ?;"
         cur.execute(sql_update, (order_id,))
         conn.commit()
 
-        
+        # Envia notificações de cancelamento
         try:
             message = f"Seu pedido #{order_id} foi cancelado com sucesso!"
             link = f"/my-orders/{order_id}"
@@ -736,21 +889,21 @@ def cancel_order_by_customer(order_id, user_id):
 
             customer = user_service.get_user_by_id(user_id)
             if customer:
-                 email_service.send_email(
+                email_service.send_email(
                     to=customer['email'],
                     subject=f"Seu pedido #{order_id} foi cancelado",
-                    template='order_status_update', 
+                    template='order_status_update',
                     user=customer,
                     order={"order_id": order_id},
                     new_status='cancelled'
                 )
         except Exception as e:
-            print(f"AVISO: Falha ao enviar notificação de cancelamento para o pedido {order_id}. Erro: {e}")
+            logger.warning(f"Falha ao enviar notificação de cancelamento para o pedido {order_id}: {e}", exc_info=True)
 
         return (True, "Pedido cancelado com sucesso.")
 
     except fdb.Error as e:
-        print(f"Erro ao cancelar pedido: {e}")
+        logger.error(f"Erro ao cancelar pedido {order_id}: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (False, "Ocorreu um erro interno ao tentar cancelar o pedido.")
@@ -759,7 +912,7 @@ def cancel_order_by_customer(order_id, user_id):
             conn.close()
 
 
-def create_order_from_cart(user_id, address_id, payment_method, change_for_amount=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
+def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
     """
     Fluxo 4: Finalização (Converter Carrinho em Pedido)
     Cria um pedido a partir do carrinho do usuário
@@ -820,14 +973,30 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
             if expected_discount > total_with_delivery:
                 return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
         
+        # Valida e processa valor pago para pagamento em dinheiro
+        paid_amount = None
+        if payment_method and payment_method.lower() in ['money', 'dinheiro', 'cash']:
+            if amount_paid is None:
+                return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro")
+            try:
+                paid_amount = float(amount_paid)
+                if paid_amount < total_with_delivery:
+                    return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {total_with_delivery:.2f})")
+            except (ValueError, TypeError):
+                return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+        
         # Cria o pedido (address_id None para pickup)
         sql_order = """
             INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, 
-                                NOTES, CONFIRMATION_CODE, ORDER_TYPE)
-            VALUES (?, ?, 'pending', ?, ?, ?, ?, ?) RETURNING ID;
+                                NOTES, CONFIRMATION_CODE, ORDER_TYPE, CHANGE_FOR_AMOUNT)
+            VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?) RETURNING ID;
         """
         final_address_id = address_id if order_type == ORDER_TYPE_DELIVERY else None
-        cur.execute(sql_order, (user_id, final_address_id, total_with_delivery, payment_method, notes, confirmation_code, order_type))
+        # Calcula o troco: amount_paid - total_with_delivery (ou None se não for dinheiro)
+        change_amount = None
+        if paid_amount is not None:
+            change_amount = paid_amount - total_with_delivery
+        cur.execute(sql_order, (user_id, final_address_id, total_with_delivery, payment_method, notes, confirmation_code, order_type, change_amount))
         order_id = cur.fetchone()[0]
 
         # Debita pontos (se houver) e atualiza o total do pedido
@@ -835,6 +1004,10 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
             discount_amount = loyalty_service.redeem_points_for_discount(user_id, points_to_redeem, order_id, cur)
             new_total = max(0, float(total_with_delivery) - float(discount_amount))
             cur.execute("UPDATE ORDERS SET TOTAL_AMOUNT = ? WHERE ID = ?;", (new_total, order_id))
+            # Recalcula o troco com o novo total após desconto
+            if paid_amount is not None:
+                new_change_amount = paid_amount - new_total
+                cur.execute("UPDATE ORDERS SET CHANGE_FOR_AMOUNT = ? WHERE ID = ?;", (new_change_amount, order_id))
         
         # Preços dos produtos do carrinho
         cart_product_ids = {it["product_id"] for it in cart_data["items"]}
@@ -869,7 +1042,10 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
         for item in cart_data["items"]:
             product_id = item["product_id"]
             quantity = item["quantity"]
-            unit_price = product_prices.get(product_id, 0)
+            # CORREÇÃO: Valida se produto existe antes de inserir
+            unit_price = product_prices.get(product_id)
+            if unit_price is None:
+                raise ValueError(f"Produto {product_id} não encontrado ou preço indisponível")
 
             # Insere item principal com UNIT_PRICE
             sql_item = """
@@ -883,7 +1059,10 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
             for extra in item.get("extras", []):
                 ex_id = extra["ingredient_id"]
                 ex_qty = extra.get("quantity", 1)
-                ex_price = extra_prices.get(ex_id, 0)
+                # CORREÇÃO: Valida se ingrediente existe antes de inserir
+                ex_price = extra_prices.get(ex_id)
+                if ex_price is None:
+                    raise ValueError(f"Ingrediente {ex_id} não encontrado ou preço indisponível")
                 sql_extra = """
                     INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
                     VALUES (?, ?, ?, 'extra', ?, ?);
@@ -895,7 +1074,10 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
                 bm_id = bm["ingredient_id"]
                 bm_delta = bm.get("delta", 0)
                 if bm_delta != 0:
-                    bm_price = base_mod_prices.get(bm_id, 0)
+                    # CORREÇÃO: Valida se ingrediente existe antes de inserir
+                    bm_price = base_mod_prices.get(bm_id)
+                    if bm_price is None:
+                        raise ValueError(f"Ingrediente {bm_id} não encontrado ou preço indisponível")
                     sql_base_mod = """
                         INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
                         VALUES (?, ?, 0, 'base', ?, ?);
@@ -917,9 +1099,8 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
             kitchen_ticket_json = format_order_for_kitchen_json(order_id)
             if kitchen_ticket_json:
                 socketio.emit('new_kitchen_order', kitchen_ticket_json)
-        except Exception:
-            # TODO: Implementar logging adequado (ex: logger.warning) em produção
-            pass
+        except Exception as e:
+            logger.warning(f"Falha ao notificar cozinha sobre pedido {order_id}: {e}", exc_info=True)
         
         # Busca dados completos do pedido criado
         order_data = get_order_details(order_id, user_id, ['customer'])
@@ -934,26 +1115,28 @@ def create_order_from_cart(user_id, address_id, payment_method, change_for_amoun
                     "notes": order_data.get('notes', ''),
                     "items": order_data.get('items', [])
                 })
-        except Exception:
-            # TODO: Implementar logging adequado (ex: logger.warning) em produção
-            pass
+        except Exception as e:
+            logger.warning(f"Falha ao imprimir ticket do pedido {order_id}: {e}", exc_info=True)
         
         # Envia notificação
         try:
             notification_service.send_order_confirmation(user_id, order_data)
-        except Exception:
-            # TODO: Implementar logging adequado (ex: logger.error) em produção
-            pass
+        except Exception as e:
+            logger.error(f"Falha ao enviar notificação de confirmação do pedido {order_id}: {e}", exc_info=True)
         
         return (order_data, None, "Pedido criado com sucesso a partir do carrinho")
         
-    except fdb.Error:
-        # TODO: Implementar logging adequado (ex: logger.error) em produção
+    except fdb.Error as e:
+        logger.error(f"Erro no banco de dados ao criar pedido do carrinho: {e}", exc_info=Config.DEBUG)
         if conn:
             conn.rollback()
+        # Verifica se o erro é relacionado a coluna não encontrada
+        error_msg = str(e).lower()
+        if 'change_for_amount' in error_msg or 'column' in error_msg or 'unknown' in error_msg:
+            return (None, "DATABASE_ERROR", "Campo CHANGE_FOR_AMOUNT não existe no banco. Execute a migração: ALTER TABLE ORDERS ADD CHANGE_FOR_AMOUNT DECIMAL(10,2);")
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
-    except Exception:
-        # TODO: Implementar logging adequado (ex: logger.error) em produção
+    except Exception as e:
+        logger.error(f"Erro inesperado ao processar pedido do carrinho: {type(e).__name__}: {e}", exc_info=Config.DEBUG)
         if conn:
             conn.rollback()
         return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar pedido")
@@ -974,7 +1157,7 @@ def get_orders_with_filters(filters=None):
         # Query base
         base_sql = """
             SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.TOTAL_AMOUNT,
-                   u.FULL_NAME as customer_name, a.STREET, a."NUMBER"
+                   o.ORDER_TYPE, u.FULL_NAME as customer_name, a.STREET, a."NUMBER"
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
@@ -1014,21 +1197,31 @@ def get_orders_with_filters(filters=None):
         orders = []
         
         for row in cur.fetchall():
+            # Monta endereço ou exibe tipo de retirada
+            order_type = row[5] if row[5] else ORDER_TYPE_DELIVERY
+            address_str = None
+            if order_type == ORDER_TYPE_PICKUP:
+                address_str = "Retirada no balcão"
+            elif row[7] and row[8]:  # STREET e NUMBER não nulos
+                address_str = f"{row[7]}, {row[8]}"
+            else:
+                address_str = "Endereço não informado"
+            
             orders.append({
                 "id": row[0],
                 "status": row[1],
                 "confirmation_code": row[2],
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
                 "total_amount": float(row[4]) if row[4] else 0.0,
-                "customer_name": row[5],
-                "address": f"{row[6]}, {row[7]}" if row[6] and row[7] else "N/A",
-                "order_type": "Delivery"  # Por enquanto sempre delivery
+                "order_type": order_type,
+                "customer_name": row[6],
+                "address": address_str
             })
         
         return orders
         
     except fdb.Error as e:
-        print(f"Erro ao buscar pedidos com filtros: {e}")
+        logger.error(f"Erro ao buscar pedidos com filtros: {e}", exc_info=True)
         return []
     finally:
         if conn:
@@ -1087,8 +1280,8 @@ def calculate_order_total_with_fees(items, points_to_redeem=0, order_type=ORDER_
             "order_type": order_type
         }
         
-    except fdb.Error:
-        # TODO: Implementar logging adequado (ex: logger.error) em produção
+    except fdb.Error as e:
+        logger.error(f"Erro ao calcular total do pedido: {e}", exc_info=True)
         return None
     finally:
         if conn:

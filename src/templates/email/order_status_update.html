@@ -1,0 +1,16 @@
+<h3>Olá, {{ user.full_name }}!</h3>
+<p>Temos uma novidade sobre o seu pedido <b>#{{ order.order_id }}</b>.</p>
+<p>Novo status: <b>{{ new_status }}</b></p>
+{% if new_status == 'preparing' %}
+    <p>Nossa cozinha já está preparando seu delicioso pedido!</p>
+{% elif new_status == 'on_the_way' %}
+    <p>Seu pedido já saiu para entrega. Bom apetite em breve!</p>
+{% elif new_status == 'ready' %}
+    <p>Seu pedido está pronto para retirada no balcão! Você já pode vir buscar seu pedido.</p>
+{% elif new_status == 'completed' or new_status == 'delivered' %}
+    <p>Pedido entregue! Esperamos que goste. Não se esqueça de deixar sua avaliação!</p>
+{% elif new_status == 'cancelled' %}
+    <p>Seu pedido foi cancelado. Se tiver alguma dúvida, entre em contato conosco.</p>
+{% endif %}
+<p>Obrigado por escolher Royal Burger!</p>
+

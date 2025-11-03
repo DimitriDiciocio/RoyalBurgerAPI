@@ -1,0 +1,20 @@
+Olá, {{ user.full_name }}!
+
+Temos uma novidade sobre o seu pedido #{{ order.order_id }}.
+
+Novo status: {{ new_status }}
+
+{% if new_status == 'preparing' %}
+Nossa cozinha já está preparando seu delicioso pedido!
+{% elif new_status == 'on_the_way' %}
+Seu pedido já saiu para entrega. Bom apetite em breve!
+{% elif new_status == 'ready' %}
+Seu pedido está pronto para retirada no balcão! Você já pode vir buscar seu pedido.
+{% elif new_status == 'completed' or new_status == 'delivered' %}
+Pedido entregue! Esperamos que goste. Não se esqueça de deixar sua avaliação!
+{% elif new_status == 'cancelled' %}
+Seu pedido foi cancelado. Se tiver alguma dúvida, entre em contato conosco.
+{% endif %}
+
+Obrigado por escolher Royal Burger!
+

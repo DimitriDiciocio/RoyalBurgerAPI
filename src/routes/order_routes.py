@@ -35,7 +35,7 @@ def create_order_route():
     items = data.get('items')
     payment_method = data.get('payment_method')
     notes = data.get('notes', '')
-    change_for_amount = data.get('change_for_amount')
+    amount_paid = data.get('amount_paid')  # Valor pago (usado para calcular troco automaticamente)
     cpf_on_invoice = data.get('cpf_on_invoice')
     points_to_redeem = data.get('points_to_redeem', 0)
     use_cart = data.get('use_cart', False)  # Nova opção para usar carrinho
@@ -65,7 +65,7 @@ def create_order_route():
             user_id,
             address_id if order_type == 'delivery' else None,
             payment_method,
-            change_for_amount,
+            amount_paid,  # Passa amount_paid ao invés de change_for_amount
             notes,
             cpf_on_invoice,
             points_to_redeem,
@@ -78,7 +78,7 @@ def create_order_route():
             address_id if order_type == 'delivery' else None,
             items,
             payment_method,
-            change_for_amount,
+            amount_paid,  # Passa amount_paid ao invés de change_for_amount
             notes,
             cpf_on_invoice,
             points_to_redeem,

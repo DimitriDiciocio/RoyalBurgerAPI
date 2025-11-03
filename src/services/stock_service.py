@@ -52,6 +52,7 @@ def deduct_stock_for_order(order_id):
         print(f"Erro ao deduzir estoque: {e}")
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     except ValueError as e:
+        if conn: conn.rollback()
         print(f"Erro de validação: {e}")
         return (False, "VALIDATION_ERROR", str(e))
     finally:
@@ -133,6 +134,10 @@ def _execute_stock_deductions(ingredient_deductions, cur):
             deduction_decimal = Decimal(str(deduction_amount))
         else:
             deduction_decimal = Decimal(str(deduction_amount))
+        
+        # Se a dedução é zero ou negativa, não precisa processar
+        if deduction_decimal <= 0:
+            continue
         
         # Verifica se há estoque suficiente
         if current_stock < deduction_decimal:
