@@ -105,7 +105,7 @@ def _convert_unit(value, from_unit, to_unit):
     return value_decimal
 
 
-def _calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_portion_unit, 
+def calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_portion_unit, 
                                         stock_unit, item_quantity=1):
     """
     Calcula a quantidade consumida convertida para a unidade do estoque.
@@ -185,6 +185,8 @@ def validate_stock_for_items(items, cur):
             logger.error(f"Product ID inválido na validação de estoque: {e}")
             return (False, "STOCK_VALIDATION_ERROR", "ID de produto inválido")
         
+        # SEGURANÇA: Construção segura de SQL dinâmico usando placeholders parametrizados
+        # product_ids foi validado como conjunto de inteiros, sem risco de SQL injection
         placeholders = ', '.join(['?' for _ in product_ids])
         
         # Buscar regras de ingredientes por produto com informações de unidades
@@ -237,7 +239,7 @@ def validate_stock_for_items(items, cur):
             for ing_id, rule in rules.items():
                 try:
                     # Calcula consumo convertido para unidade do estoque
-                    needed = _calculate_consumption_in_stock_unit(
+                    needed = calculate_consumption_in_stock_unit(
                         portions=rule['portions'],
                         base_portion_quantity=rule['base_portion_quantity'],
                         base_portion_unit=rule['base_portion_unit'],
@@ -268,6 +270,7 @@ def validate_stock_for_items(items, cur):
                         logger.warning(f"Ingredient IDs inválidos nos extras, pulando validação")
                         continue
                     
+                    # SEGURANÇA: Query parametrizada, extra_ing_ids validado como inteiros
                     placeholders_extras = ', '.join(['?' for _ in extra_ing_ids])
                     sql_extras_info = f"""
                         SELECT ID, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT
@@ -305,7 +308,7 @@ def validate_stock_for_items(items, cur):
                     })
                     
                     try:
-                        total_extra = _calculate_consumption_in_stock_unit(
+                        total_extra = calculate_consumption_in_stock_unit(
                             portions=extra_qty,
                             base_portion_quantity=info['base_portion_quantity'],
                             base_portion_unit=info['base_portion_unit'],
@@ -337,6 +340,7 @@ def validate_stock_for_items(items, cur):
                         logger.warning(f"Ingredient IDs inválidos em base_modifications, pulando validação")
                         continue
                     
+                    # SEGURANÇA: Query parametrizada, bm_ing_ids validado como inteiros
                     placeholders_bm = ', '.join(['?' for _ in bm_ing_ids])
                     sql_bm_info = f"""
                         SELECT ID, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT
@@ -397,6 +401,7 @@ def validate_stock_for_items(items, cur):
             return (True, None, None)
         
         # Buscar estoque atual dos ingredientes necessários
+        # SEGURANÇA: Query parametrizada, ing_ids são chaves do dict (validados como inteiros)
         ing_ids = list(required_ingredients.keys())
         placeholders = ', '.join(['?' for _ in ing_ids])
         sql_check = f"""
@@ -533,7 +538,7 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
             
             # Calcula consumo convertido para unidade do estoque
             try:
-                total_needed = _calculate_consumption_in_stock_unit(
+                total_needed = calculate_consumption_in_stock_unit(
                     portions=portions,
                     base_portion_quantity=base_portion_quantity,
                     base_portion_unit=base_portion_unit,
@@ -602,7 +607,7 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
                     ) * Decimal(str(quantity))
                 else:
                     # Extras normais: QUANTITY × base_portion_quantity × item_quantity
-                    total_extra = _calculate_consumption_in_stock_unit(
+                    total_extra = calculate_consumption_in_stock_unit(
                         portions=extra_quantity,
                         base_portion_quantity=base_portion_quantity,
                         base_portion_unit=base_portion_unit,

@@ -1,5 +1,10 @@
 from ..database import get_db_connection
+from . import stock_service
 import fdb
+import logging
+from decimal import Decimal
+
+logger = logging.getLogger(__name__)
 
 def _validate_cart_id(cart_id):
     """Valida se cart_id é um inteiro válido e converte se necessário"""
@@ -66,7 +71,7 @@ def get_or_create_cart(user_id):
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar/criar carrinho: {e}")
+        logger.error(f"Erro ao buscar/criar carrinho: {e}", exc_info=True)
         if conn: conn.rollback()
         return None
     finally:
@@ -185,10 +190,10 @@ def get_cart_items(cart_id):
         return items
         
     except fdb.Error as e:
-        print(f"Erro ao buscar itens do carrinho: {e}")
+        logger.error(f"Erro ao buscar itens do carrinho: {e}", exc_info=True)
         return []
     except ValueError as e:
-        print(f"Erro de validação: {e}")
+        logger.warning(f"Erro de validação ao buscar itens do carrinho: {e}")
         return []
     finally:
         if conn: conn.close()
@@ -208,7 +213,7 @@ def get_active_cart_by_user_id(user_id):
             return {"id": row[0]}
         return None
     except fdb.Error as e:
-        print(f"Erro ao buscar carrinho ativo do usuário: {e}")
+        logger.error(f"Erro ao buscar carrinho ativo do usuário: {e}", exc_info=True)
         return None
     finally:
         if conn: conn.close()
@@ -228,7 +233,7 @@ def get_guest_cart_by_id(cart_id):
             return {"id": row[0]}
         return None
     except fdb.Error as e:
-        print(f"Erro ao buscar carrinho convidado: {e}")
+        logger.error(f"Erro ao buscar carrinho convidado: {e}", exc_info=True)
         return None
     finally:
         if conn: conn.close()
@@ -271,7 +276,7 @@ def create_guest_cart():
                 raise constraint_error
         
     except fdb.Error as e:
-        print(f"Erro ao criar carrinho convidado: {e}")
+        logger.error(f"Erro ao criar carrinho convidado: {e}", exc_info=True)
         if conn: conn.rollback()
         return None
     finally:
@@ -305,7 +310,7 @@ def get_cart_summary(user_id):
         }
         
     except Exception as e:
-        print(f"Erro ao calcular resumo do carrinho: {e}")
+        logger.error(f"Erro ao calcular resumo do carrinho: {e}", exc_info=True)
         return None
 
 def _check_availability_alerts(items):
@@ -346,7 +351,7 @@ def _check_availability_alerts(items):
                         "issue": "extra_unavailable"
                     })
     except Exception as e:
-        print(f"Erro ao verificar disponibilidade: {e}")
+        logger.error(f"Erro ao verificar disponibilidade: {e}", exc_info=True)
     finally:
         if conn: conn.close()
     
@@ -413,15 +418,102 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 if qty < min_q or (max_q > 0 and qty > max_q):
                     return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
                 
-                # Verifica estoque suficiente para extras
-                extra_stock_check = _check_ingredient_stock_availability(cur, ing_id, qty * quantity)
-                if not extra_stock_check[0]:
-                    return (False, "INSUFFICIENT_STOCK", f"Estoque insuficiente para extra: {extra_stock_check[1]}")
-
+                # Verifica estoque suficiente para extras com conversão de unidades
+                # Busca informações do ingrediente para fazer conversão correta
+                cur.execute("""
+                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                    FROM INGREDIENTS
+                    WHERE ID = ? AND IS_AVAILABLE = TRUE
+                """, (ing_id,))
+                ing_info = cur.fetchone()
+                if not ing_info:
+                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                
+                base_portion_quantity = ing_info[0] or 1
+                base_portion_unit = ing_info[1] or 'un'
+                stock_unit = ing_info[2] or 'un'
+                current_stock = ing_info[3] or 0
+                ing_name = ing_info[4]
+                
+                # Calcula consumo convertido para unidade do estoque
+                try:
+                    required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                        portions=qty,
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=quantity
+                    )
+                except ValueError as e:
+                    return (False, "INSUFFICIENT_STOCK", f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                
+                # Converte current_stock para Decimal para comparação precisa
+                current_stock_decimal = Decimal(str(current_stock))
+                
+                if current_stock_decimal < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+        
         # Verifica se já existe um item idêntico (produto, extras, notes e base_mods)
         existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "", base_modifications or [])
         
         if existing_item_id:
+            # NOVA VALIDAÇÃO: Busca quantidade atual do item antes de incrementar
+            cur.execute("SELECT QUANTITY FROM CART_ITEMS WHERE ID = ?", (existing_item_id,))
+            existing_row = cur.fetchone()
+            if existing_row:
+                existing_quantity = existing_row[0]
+                new_total_quantity = existing_quantity + quantity
+                
+                # Valida estoque para a nova quantidade total do produto
+                stock_check_total = _check_product_stock_availability(cur, product_id, new_total_quantity)
+                if not stock_check_total[0]:
+                    return (False, "INSUFFICIENT_STOCK", stock_check_total[1])
+                
+                # Valida estoque para extras com a nova quantidade total
+                if extras:
+                    for extra in extras:
+                        ing_id = extra.get("ingredient_id")
+                        qty = int(extra.get("quantity", 1))
+                        
+                        cur.execute("""
+                            SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                            FROM INGREDIENTS
+                            WHERE ID = ? AND IS_AVAILABLE = TRUE
+                        """, (ing_id,))
+                        ing_info = cur.fetchone()
+                        if not ing_info:
+                            return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                        
+                        base_portion_quantity = ing_info[0] or 1
+                        base_portion_unit = ing_info[1] or 'un'
+                        stock_unit = ing_info[2] or 'un'
+                        current_stock = ing_info[3] or 0
+                        ing_name = ing_info[4]
+                        
+                        # Calcula consumo para a NOVA quantidade total
+                        try:
+                            required_quantity_total = stock_service.calculate_consumption_in_stock_unit(
+                                portions=qty,
+                                base_portion_quantity=base_portion_quantity,
+                                base_portion_unit=base_portion_unit,
+                                stock_unit=stock_unit,
+                                item_quantity=new_total_quantity  # ← Usa quantidade total
+                            )
+                        except ValueError as e:
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                        
+                        current_stock_decimal = Decimal(str(current_stock))
+                        
+                        if current_stock_decimal < required_quantity_total:
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Estoque insuficiente para extra '{ing_name}'. "
+                                   f"Necessário: {required_quantity_total:.3f} {stock_unit}, "
+                                   f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+            
             # Incrementa quantidade do item existente
             sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
             cur.execute(sql, (quantity, existing_item_id))
@@ -474,7 +566,7 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
         return (True, None, "Item adicionado ao carrinho com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao adicionar item ao carrinho: {e}")
+        logger.error(f"Erro ao adicionar item ao carrinho: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -542,15 +634,102 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 if qty < min_q or (max_q > 0 and qty > max_q):
                     return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
                 
-                # Verifica estoque suficiente para extras
-                extra_stock_check = _check_ingredient_stock_availability(cur, ing_id, qty * quantity)
-                if not extra_stock_check[0]:
-                    return (False, "INSUFFICIENT_STOCK", f"Estoque insuficiente para extra: {extra_stock_check[1]}")
+                # Verifica estoque suficiente para extras com conversão de unidades
+                # Busca informações do ingrediente para fazer conversão correta
+                cur.execute("""
+                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                    FROM INGREDIENTS
+                    WHERE ID = ? AND IS_AVAILABLE = TRUE
+                """, (ing_id,))
+                ing_info = cur.fetchone()
+                if not ing_info:
+                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                
+                base_portion_quantity = ing_info[0] or 1
+                base_portion_unit = ing_info[1] or 'un'
+                stock_unit = ing_info[2] or 'un'
+                current_stock = ing_info[3] or 0
+                ing_name = ing_info[4]
+                
+                # Calcula consumo convertido para unidade do estoque
+                try:
+                    required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                        portions=qty,
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=quantity
+                    )
+                except ValueError as e:
+                    return (False, "INSUFFICIENT_STOCK", f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                
+                # Converte current_stock para Decimal para comparação precisa
+                current_stock_decimal = Decimal(str(current_stock))
+                
+                if current_stock_decimal < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
 
         # Verifica item idêntico (inclui base_mods)
         existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "", base_modifications or [])
 
         if existing_item_id:
+            # NOVA VALIDAÇÃO: Busca quantidade atual do item antes de incrementar
+            cur.execute("SELECT QUANTITY FROM CART_ITEMS WHERE ID = ?", (existing_item_id,))
+            existing_row = cur.fetchone()
+            if existing_row:
+                existing_quantity = existing_row[0]
+                new_total_quantity = existing_quantity + quantity
+                
+                # Valida estoque para a nova quantidade total do produto
+                stock_check_total = _check_product_stock_availability(cur, product_id, new_total_quantity)
+                if not stock_check_total[0]:
+                    return (False, "INSUFFICIENT_STOCK", stock_check_total[1])
+                
+                # Valida estoque para extras com a nova quantidade total
+                if extras:
+                    for extra in extras:
+                        ing_id = extra.get("ingredient_id")
+                        qty = int(extra.get("quantity", 1))
+                        
+                        cur.execute("""
+                            SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                            FROM INGREDIENTS
+                            WHERE ID = ? AND IS_AVAILABLE = TRUE
+                        """, (ing_id,))
+                        ing_info = cur.fetchone()
+                        if not ing_info:
+                            return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                        
+                        base_portion_quantity = ing_info[0] or 1
+                        base_portion_unit = ing_info[1] or 'un'
+                        stock_unit = ing_info[2] or 'un'
+                        current_stock = ing_info[3] or 0
+                        ing_name = ing_info[4]
+                        
+                        # Calcula consumo para a NOVA quantidade total
+                        try:
+                            required_quantity_total = stock_service.calculate_consumption_in_stock_unit(
+                                portions=qty,
+                                base_portion_quantity=base_portion_quantity,
+                                base_portion_unit=base_portion_unit,
+                                stock_unit=stock_unit,
+                                item_quantity=new_total_quantity  # ← Usa quantidade total
+                            )
+                        except ValueError as e:
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                        
+                        current_stock_decimal = Decimal(str(current_stock))
+                        
+                        if current_stock_decimal < required_quantity_total:
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Estoque insuficiente para extra '{ing_name}'. "
+                                   f"Necessário: {required_quantity_total:.3f} {stock_unit}, "
+                                   f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+            
             sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
             cur.execute(sql, (quantity, existing_item_id))
         else:
@@ -596,7 +775,7 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
     except fdb.Error as e:
-        print(f"Erro ao adicionar item ao carrinho por cart_id: {e}")
+        logger.error(f"Erro ao adicionar item ao carrinho por cart_id: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -656,7 +835,7 @@ def find_identical_cart_item(cart_id, product_id, extras, notes, base_modificati
         return None
         
     except fdb.Error as e:
-        print(f"Erro ao verificar item idêntico: {e}")
+        logger.error(f"Erro ao verificar item idêntico: {e}", exc_info=True)
         return None
     finally:
         if conn: conn.close()
@@ -671,20 +850,76 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Verifica se o item pertence ao usuário
+        # Verifica se o item pertence ao usuário e busca informações necessárias
         sql = """
-            SELECT ci.ID FROM CART_ITEMS ci
+            SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY FROM CART_ITEMS ci
             JOIN CARTS c ON ci.CART_ID = c.ID
             WHERE ci.ID = ? AND c.USER_ID = ? AND c.IS_ACTIVE = TRUE;
         """
         cur.execute(sql, (cart_item_id, user_id))
-        if not cur.fetchone():
+        row = cur.fetchone()
+        if not row:
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no seu carrinho")
         
-        # Atualiza quantidade se fornecida
+        current_product_id = row[1]
+        
+        # CORREÇÃO: Se quantidade está sendo atualizada, valida estoque para a nova quantidade
         if quantity is not None:
             if quantity <= 0:
                 return (False, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
+            
+            # Valida estoque do produto para a nova quantidade
+            stock_check = _check_product_stock_availability(cur, current_product_id, quantity)
+            if not stock_check[0]:
+                return (False, "INSUFFICIENT_STOCK", stock_check[1])
+            
+            # Valida estoque dos extras existentes para a nova quantidade
+            # Busca extras atuais do item
+            cur.execute("""
+                SELECT cie.INGREDIENT_ID, cie.QUANTITY
+                FROM CART_ITEM_EXTRAS cie
+                WHERE cie.CART_ITEM_ID = ? AND cie.TYPE = 'extra'
+            """, (cart_item_id,))
+            existing_extras = cur.fetchall()
+            
+            for ing_id, extra_qty in existing_extras:
+                cur.execute("""
+                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                    FROM INGREDIENTS
+                    WHERE ID = ? AND IS_AVAILABLE = TRUE
+                """, (ing_id,))
+                ing_info = cur.fetchone()
+                if not ing_info:
+                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                
+                base_portion_quantity = ing_info[0] or 1
+                base_portion_unit = ing_info[1] or 'un'
+                stock_unit = ing_info[2] or 'un'
+                current_stock = ing_info[3] or 0
+                ing_name = ing_info[4]
+                
+                # Calcula consumo para a NOVA quantidade
+                try:
+                    required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                        portions=extra_qty,
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=quantity  # ← Nova quantidade
+                    )
+                except ValueError as e:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                
+                current_stock_decimal = Decimal(str(current_stock))
+                
+                if current_stock_decimal < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+            
+            # Atualiza quantidade após validação
             sql = "UPDATE CART_ITEMS SET QUANTITY = ? WHERE ID = ?;"
             cur.execute(sql, (quantity, cart_item_id))
         
@@ -696,11 +931,13 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         # Atualiza extras se fornecidos (independente de notes)
         if extras is not None:
             # Valida conforme regras do produto deste item
-            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+            cur.execute("SELECT PRODUCT_ID, QUANTITY FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
             row = cur.fetchone()
             if not row:
                 return (False, "ITEM_NOT_FOUND", "Item não encontrado")
             product_id = row[0]
+            item_quantity = row[1]  # Quantidade do item no carrinho (pode ter sido atualizada)
+            
             rules = _get_product_rules(cur, product_id)
             for extra in extras:
                 ing_id = extra.get("ingredient_id")
@@ -714,6 +951,44 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
                     return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
+                
+                # VALIDAÇÃO DE ESTOQUE com conversão de unidades
+                cur.execute("""
+                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                    FROM INGREDIENTS
+                    WHERE ID = ? AND IS_AVAILABLE = TRUE
+                """, (ing_id,))
+                ing_info = cur.fetchone()
+                if not ing_info:
+                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                
+                base_portion_quantity = ing_info[0] or 1
+                base_portion_unit = ing_info[1] or 'un'
+                stock_unit = ing_info[2] or 'un'
+                current_stock = ing_info[3] or 0
+                ing_name = ing_info[4]
+                
+                # Calcula consumo convertido para unidade do estoque
+                try:
+                    required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                        portions=qty,
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=item_quantity  # Usa quantidade do item no carrinho
+                    )
+                except ValueError as e:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                
+                # Converte current_stock para Decimal para comparação precisa
+                current_stock_decimal = Decimal(str(current_stock))
+                
+                if current_stock_decimal < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
             
             # Remove e recria apenas linhas TYPE='extra'
             cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'extra';", (cart_item_id,))
@@ -763,7 +1038,7 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         return (True, None, "Item atualizado com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao atualizar item do carrinho: {e}")
+        logger.error(f"Erro ao atualizar item do carrinho: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -782,19 +1057,76 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Verifica se o item pertence ao carrinho convidado
+        # Verifica se o item pertence ao carrinho convidado e busca informações necessárias
         sql = (
-            "SELECT ci.ID FROM CART_ITEMS ci "
+            "SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY FROM CART_ITEMS ci "
             "JOIN CARTS c ON ci.CART_ID = c.ID "
             "WHERE ci.ID = ? AND c.ID = ? AND c.USER_ID IS NULL AND c.IS_ACTIVE = TRUE;"
         )
         cur.execute(sql, (cart_item_id, cart_id))
-        if not cur.fetchone():
+        row = cur.fetchone()
+        if not row:
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no carrinho informado")
+        
+        current_product_id = row[1]
 
+        # CORREÇÃO: Se quantidade está sendo atualizada, valida estoque para a nova quantidade
         if quantity is not None:
             if quantity <= 0:
                 return (False, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
+            
+            # Valida estoque do produto para a nova quantidade
+            stock_check = _check_product_stock_availability(cur, current_product_id, quantity)
+            if not stock_check[0]:
+                return (False, "INSUFFICIENT_STOCK", stock_check[1])
+            
+            # Valida estoque dos extras existentes para a nova quantidade
+            # Busca extras atuais do item
+            cur.execute("""
+                SELECT cie.INGREDIENT_ID, cie.QUANTITY
+                FROM CART_ITEM_EXTRAS cie
+                WHERE cie.CART_ITEM_ID = ? AND cie.TYPE = 'extra'
+            """, (cart_item_id,))
+            existing_extras = cur.fetchall()
+            
+            for ing_id, extra_qty in existing_extras:
+                cur.execute("""
+                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                    FROM INGREDIENTS
+                    WHERE ID = ? AND IS_AVAILABLE = TRUE
+                """, (ing_id,))
+                ing_info = cur.fetchone()
+                if not ing_info:
+                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                
+                base_portion_quantity = ing_info[0] or 1
+                base_portion_unit = ing_info[1] or 'un'
+                stock_unit = ing_info[2] or 'un'
+                current_stock = ing_info[3] or 0
+                ing_name = ing_info[4]
+                
+                # Calcula consumo para a NOVA quantidade
+                try:
+                    required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                        portions=extra_qty,
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=quantity  # ← Nova quantidade
+                    )
+                except ValueError as e:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                
+                current_stock_decimal = Decimal(str(current_stock))
+                
+                if current_stock_decimal < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+            
+            # Atualiza quantidade após validação
             cur.execute("UPDATE CART_ITEMS SET QUANTITY = ? WHERE ID = ?;", (quantity, cart_item_id))
 
         # Atualiza notes se fornecido (independente de extras)
@@ -804,11 +1136,13 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
         # Atualiza extras se fornecidos (independente de notes)
         if extras is not None:
             # Valida conforme regras do produto deste item
-            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+            cur.execute("SELECT PRODUCT_ID, QUANTITY FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
             row = cur.fetchone()
             if not row:
                 return (False, "ITEM_NOT_FOUND", "Item não encontrado")
             product_id = row[0]
+            item_quantity = row[1]  # Quantidade do item no carrinho (pode ter sido atualizada)
+            
             rules = _get_product_rules(cur, product_id)
             for extra in extras:
                 ing_id = extra.get("ingredient_id")
@@ -822,6 +1156,44 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
                 max_q = int(rule["max_quantity"] or 0)
                 if qty < min_q or (max_q > 0 and qty > max_q):
                     return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
+                
+                # VALIDAÇÃO DE ESTOQUE com conversão de unidades
+                cur.execute("""
+                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
+                    FROM INGREDIENTS
+                    WHERE ID = ? AND IS_AVAILABLE = TRUE
+                """, (ing_id,))
+                ing_info = cur.fetchone()
+                if not ing_info:
+                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                
+                base_portion_quantity = ing_info[0] or 1
+                base_portion_unit = ing_info[1] or 'un'
+                stock_unit = ing_info[2] or 'un'
+                current_stock = ing_info[3] or 0
+                ing_name = ing_info[4]
+                
+                # Calcula consumo convertido para unidade do estoque
+                try:
+                    required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                        portions=qty,
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=item_quantity  # Usa quantidade do item no carrinho
+                    )
+                except ValueError as e:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
+                
+                # Converte current_stock para Decimal para comparação precisa
+                current_stock_decimal = Decimal(str(current_stock))
+                
+                if current_stock_decimal < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
 
             # Remove e recria apenas TYPE='extra'
             cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'extra';", (cart_item_id,))
@@ -868,7 +1240,7 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
         conn.commit()
         return (True, None, "Item atualizado com sucesso")
     except fdb.Error as e:
-        print(f"Erro ao atualizar item do carrinho por cart_id: {e}")
+        logger.error(f"Erro ao atualizar item do carrinho por cart_id: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -898,12 +1270,20 @@ def _get_product_rules(cur, product_id):
 def _check_product_stock_availability(cur, product_id, quantity):
     """
     Verifica se há estoque suficiente para um produto.
+    Faz conversão correta de unidades antes de verificar.
     Retorna (is_available, message)
     """
     try:
-        # Busca ingredientes do produto com suas porções
+        # Busca ingredientes do produto com informações completas de unidades
         cur.execute("""
-            SELECT i.ID, i.NAME, pi.PORTIONS, i.CURRENT_STOCK, i.STOCK_UNIT
+            SELECT 
+                i.ID, 
+                i.NAME, 
+                pi.PORTIONS, 
+                i.CURRENT_STOCK, 
+                i.STOCK_UNIT,
+                i.BASE_PORTION_QUANTITY,
+                i.BASE_PORTION_UNIT
             FROM PRODUCT_INGREDIENTS pi
             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
             WHERE pi.PRODUCT_ID = ? AND i.IS_AVAILABLE = TRUE
@@ -913,17 +1293,36 @@ def _check_product_stock_availability(cur, product_id, quantity):
         if not ingredients:
             return (True, "Produto sem ingredientes cadastrados")
         
-        for ing_id, name, portions, current_stock, stock_unit in ingredients:
-            required_quantity = float(portions or 0) * quantity
-            current_stock = float(current_stock or 0)
+        for row in ingredients:
+            name = row[1]
+            portions = row[2] or 0
+            current_stock = row[3] or 0
+            stock_unit = row[4] or 'un'
+            base_portion_quantity = row[5] or 1
+            base_portion_unit = row[6] or 'un'
             
-            if current_stock < required_quantity:
-                return (False, f"Estoque insuficiente de '{name}'. Necessário: {required_quantity:.2f} {stock_unit}, Disponível: {current_stock:.2f} {stock_unit}")
+            # Calcula consumo convertido para unidade do estoque
+            try:
+                required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                    portions=portions,
+                    base_portion_quantity=base_portion_quantity,
+                    base_portion_unit=base_portion_unit,
+                    stock_unit=stock_unit,
+                    item_quantity=quantity
+                )
+            except ValueError as e:
+                return (False, f"Erro na conversão de unidades para '{name}': {str(e)}")
+            
+            # Converte current_stock para Decimal para comparação precisa
+            current_stock_decimal = Decimal(str(current_stock))
+            
+            if current_stock_decimal < required_quantity:
+                return (False, f"Estoque insuficiente de '{name}'. Necessário: {required_quantity:.3f} {stock_unit}, Disponível: {current_stock_decimal:.3f} {stock_unit}")
         
         return (True, "Estoque disponível")
         
     except Exception as e:
-        print(f"Erro ao verificar estoque do produto: {e}")
+        logger.error(f"Erro ao verificar estoque do produto: {e}", exc_info=True)
         return (False, "Erro ao verificar disponibilidade de estoque")
 
 
@@ -955,7 +1354,7 @@ def _check_ingredient_stock_availability(cur, ingredient_id, quantity):
         return (True, "Estoque disponível")
         
     except Exception as e:
-        print(f"Erro ao verificar estoque do ingrediente: {e}")
+        logger.error(f"Erro ao verificar estoque do ingrediente: {e}", exc_info=True)
         return (False, "Erro ao verificar disponibilidade de estoque")
 
 
@@ -986,7 +1385,7 @@ def remove_cart_item(user_id, cart_item_id):
         return (True, None, "Item removido do carrinho com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao remover item do carrinho: {e}")
+        logger.error(f"Erro ao remover item do carrinho: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -1018,7 +1417,7 @@ def remove_cart_item_by_cart(cart_id, cart_item_id):
         conn.commit()
         return (True, None, "Item removido do carrinho com sucesso")
     except fdb.Error as e:
-        print(f"Erro ao remover item do carrinho por cart_id: {e}")
+        logger.error(f"Erro ao remover item do carrinho por cart_id: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -1049,7 +1448,7 @@ def clear_cart(user_id):
         return (True, None, "Carrinho limpo com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao limpar carrinho: {e}")
+        logger.error(f"Erro ao limpar carrinho: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -1240,7 +1639,7 @@ def validate_guest_cart_for_order(cart_id):
         return (is_valid, alerts, total_amount)
         
     except fdb.Error as e:
-        print(f"Erro ao validar carrinho de convidado: {e}")
+        logger.error(f"Erro ao validar carrinho de convidado: {e}", exc_info=True)
         return (False, ["Erro interno do servidor"], 0.0)
     finally:
         if conn: conn.close()
@@ -1338,7 +1737,7 @@ def claim_guest_cart(guest_cart_id, user_id):
         conn.commit()
         return (True, None, "Carrinho mesclado com sucesso")
     except fdb.Error as e:
-        print(f"Erro ao reivindicar carrinho convidado: {e}")
+        logger.error(f"Erro ao reivindicar carrinho convidado: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
