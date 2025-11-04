@@ -7,7 +7,7 @@ settings_bp = Blueprint('settings', __name__)
 
 @settings_bp.route('/public', methods=['GET'])
 def get_public_settings_route():
-    """Retorna configurações públicas (sem autenticação) - taxas, prazos e info da empresa"""
+    """Retorna configurações públicas (sem autenticação) - taxas, prazos, info da empresa e taxas de conversão de pontos"""
     try:
         settings = settings_service.get_all_settings()
         if not settings:
@@ -29,6 +29,11 @@ def get_public_settings_route():
                 "endereco": settings.get('endereco'),
                 "telefone": settings.get('telefone'),
                 "email": settings.get('email')
+            },
+            "loyalty_rates": {
+                "gain_rate": settings.get('taxa_conversao_ganho_clube'),
+                "redemption_rate": settings.get('taxa_conversao_resgate_clube'),
+                "expiration_days": settings.get('taxa_expiracao_pontos_clube')
             }
         }), 200
     except Exception as e:

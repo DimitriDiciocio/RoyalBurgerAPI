@@ -341,6 +341,7 @@ def update_product(product_id, update_data):
         set_parts = [f"{key} = ?" for key in fields_to_update]  
         values = list(fields_to_update.values())  
         values.append(product_id)  
+        price_updated = 'price' in fields_to_update
         if set_parts:
             sql = f"UPDATE PRODUCTS SET {', '.join(set_parts)} WHERE ID = ? AND IS_ACTIVE = TRUE;"  
             cur.execute(sql, tuple(values))  
@@ -428,7 +429,17 @@ def update_product(product_id, update_data):
                         (new_vals['portions'], new_vals['min_quantity'], new_vals['max_quantity'], product_id, ing_id)
                     )
 
-        conn.commit()  
+        conn.commit()
+        
+        # Se o preço foi atualizado, recalcula os descontos das promoções após o commit
+        if price_updated:
+            try:
+                from . import promotion_service
+                promotion_service.recalculate_promotion_discount_value(product_id)
+            except Exception as e:
+                print(f"Erro ao recalcular desconto da promoção: {e}")
+                # Não falha a atualização do produto se o recálculo falhar
+        
         return (True, None, "Produto atualizado com sucesso")  
     except fdb.Error as e:  
         print(f"Erro ao atualizar produto: {e}")  
