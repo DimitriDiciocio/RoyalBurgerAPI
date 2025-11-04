@@ -21,7 +21,20 @@ def get_product_by_id_route(product_id):
     product = product_service.get_product_by_id(product_id)  
     if product:  
         return jsonify(product), 200  
-    return jsonify({"msg": "Produto não encontrado"}), 404  
+    return jsonify({"msg": "Produto não encontrado"}), 404
+
+@product_bp.route('/<int:product_id>/availability', methods=['GET'])
+def check_product_availability_route(product_id):
+    """
+    Verifica a disponibilidade completa de um produto, incluindo estoque de todos os ingredientes.
+    """
+    quantity = request.args.get('quantity', type=int, default=1)
+    availability = product_service.check_product_availability(product_id, quantity)
+    
+    if availability['status'] == 'unknown' and 'Produto não encontrado' in availability.get('message', ''):
+        return jsonify({"error": "Produto não encontrado"}), 404
+    
+    return jsonify(availability), 200  
 
 @product_bp.route('/', methods=['POST'])  
 @require_role('admin', 'manager')  

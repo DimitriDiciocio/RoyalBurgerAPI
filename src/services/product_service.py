@@ -1,7 +1,8 @@
 import fdb  
 from ..database import get_db_connection
-from . import groups_service
-from ..utils.image_handler import get_product_image_url  
+from . import groups_service, stock_service
+from ..utils.image_handler import get_product_image_url
+from decimal import Decimal  
 
 def create_product(product_data):  
     name = product_data.get('name')  
@@ -139,6 +140,314 @@ def _get_product_availability_status(product_id, cur):
         print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
         return "unknown"
 
+
+def check_product_availability(product_id, quantity=1):
+    """
+    Verifica a disponibilidade completa de um produto, incluindo estoque de todos os ingredientes.
+    Retorna informações detalhadas sobre disponibilidade.
+    
+    Args:
+        product_id: ID do produto
+        quantity: Quantidade desejada do produto (padrão: 1)
+    
+    Returns:
+        dict: {
+            'is_available': bool,
+            'status': str,  # 'available', 'low_stock', 'unavailable', 'unknown'
+            'message': str,
+            'ingredients': [
+                {
+                    'ingredient_id': int,
+                    'name': str,
+                    'is_available': bool,
+                    'current_stock': Decimal,
+                    'required': Decimal,
+                    'stock_unit': str
+                }
+            ]
+        }
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se produto existe e está ativo
+        cur.execute("SELECT ID, NAME FROM PRODUCTS WHERE ID = ? AND IS_ACTIVE = TRUE;", (product_id,))
+        product = cur.fetchone()
+        if not product:
+            return {
+                'is_available': False,
+                'status': 'unavailable',
+                'message': 'Produto não encontrado ou inativo',
+                'ingredients': []
+            }
+        
+        # Busca ingredientes do produto com informações completas
+        cur.execute("""
+            SELECT 
+                i.ID, 
+                i.NAME, 
+                pi.PORTIONS, 
+                i.CURRENT_STOCK, 
+                i.STOCK_UNIT,
+                i.BASE_PORTION_QUANTITY,
+                i.BASE_PORTION_UNIT,
+                i.IS_AVAILABLE,
+                i.STOCK_STATUS
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ?
+        """, (product_id,))
+        
+        ingredients_info = []
+        is_available = True
+        has_low_stock = False
+        
+        for row in cur.fetchall():
+            ing_id, name, portions, current_stock, stock_unit, base_portion_quantity, base_portion_unit, is_ing_available, stock_status = row
+            
+            if not is_ing_available or stock_status == 'out_of_stock':
+                is_available = False
+                ingredients_info.append({
+                    'ingredient_id': ing_id,
+                    'name': name,
+                    'is_available': False,
+                    'current_stock': Decimal(str(current_stock or 0)),
+                    'required': Decimal('0'),
+                    'stock_unit': stock_unit or 'un',
+                    'reason': 'indisponível' if not is_ing_available else 'sem estoque'
+                })
+                continue
+            
+            # Calcula quantidade necessária convertida para unidade do estoque
+            try:
+                required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                    portions=portions or 0,
+                    base_portion_quantity=base_portion_quantity or 1,
+                    base_portion_unit=base_portion_unit or 'un',
+                    stock_unit=stock_unit or 'un',
+                    item_quantity=quantity
+                )
+            except ValueError as e:
+                is_available = False
+                ingredients_info.append({
+                    'ingredient_id': ing_id,
+                    'name': name,
+                    'is_available': False,
+                    'current_stock': Decimal(str(current_stock or 0)),
+                    'required': Decimal('0'),
+                    'stock_unit': stock_unit or 'un',
+                    'reason': f'erro na conversão: {str(e)}'
+                })
+                continue
+            
+            current_stock_decimal = Decimal(str(current_stock or 0))
+            
+            if current_stock_decimal < required_quantity:
+                is_available = False
+                ingredients_info.append({
+                    'ingredient_id': ing_id,
+                    'name': name,
+                    'is_available': False,
+                    'current_stock': current_stock_decimal,
+                    'required': required_quantity,
+                    'stock_unit': stock_unit or 'un',
+                    'reason': 'estoque insuficiente'
+                })
+            else:
+                # Verifica se está com estoque baixo
+                if stock_status == 'low' or (current_stock_decimal - required_quantity) < (current_stock_decimal * Decimal('0.2')):
+                    has_low_stock = True
+                
+                ingredients_info.append({
+                    'ingredient_id': ing_id,
+                    'name': name,
+                    'is_available': True,
+                    'current_stock': current_stock_decimal,
+                    'required': required_quantity,
+                    'stock_unit': stock_unit or 'un',
+                    'reason': None
+                })
+        
+        if not ingredients_info:
+            return {
+                'is_available': False,
+                'status': 'unavailable',
+                'message': 'Produto sem ingredientes cadastrados',
+                'ingredients': []
+            }
+        
+        # Determina status final
+        if not is_available:
+            status = 'unavailable'
+            message = 'Produto indisponível por falta de estoque de ingredientes'
+        elif has_low_stock:
+            status = 'low_stock'
+            message = 'Produto disponível, mas com estoque baixo de alguns ingredientes'
+        else:
+            status = 'available'
+            message = 'Produto disponível'
+        
+        return {
+            'is_available': is_available,
+            'status': status,
+            'message': message,
+            'ingredients': ingredients_info
+        }
+        
+    except Exception as e:
+        print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
+        return {
+            'is_available': False,
+            'status': 'unknown',
+            'message': f'Erro ao verificar disponibilidade: {str(e)}',
+            'ingredients': []
+        }
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1):
+    """
+    Calcula a quantidade máxima disponível de um ingrediente extra baseado em:
+    1. MAX_QUANTITY definido na regra do produto (se fornecido)
+    2. Estoque atual do ingrediente
+    
+    Retorna a menor quantidade entre os dois limites.
+    
+    Args:
+        ingredient_id: ID do ingrediente
+        max_quantity_from_rule: MAX_QUANTITY da regra do produto (None se não limitado)
+        item_quantity: Quantidade de itens do produto (padrão: 1)
+    
+    Returns:
+        dict: {
+            'max_available': int,  # Quantidade máxima disponível
+            'limited_by': str,  # 'rule' ou 'stock' ou 'both'
+            'stock_info': {
+                'current_stock': Decimal,
+                'stock_unit': str,
+                'base_portion_quantity': Decimal,
+                'base_portion_unit': str
+            }
+        }
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Busca informações do ingrediente
+        cur.execute("""
+            SELECT 
+                NAME, CURRENT_STOCK, STOCK_UNIT, BASE_PORTION_QUANTITY, 
+                BASE_PORTION_UNIT, IS_AVAILABLE
+            FROM INGREDIENTS
+            WHERE ID = ?
+        """, (ingredient_id,))
+        
+        result = cur.fetchone()
+        if not result:
+            return {
+                'max_available': 0,
+                'limited_by': 'not_found',
+                'stock_info': None
+            }
+        
+        name, current_stock, stock_unit, base_portion_quantity, base_portion_unit, is_available = result
+        
+        if not is_available:
+            return {
+                'max_available': 0,
+                'limited_by': 'unavailable',
+                'stock_info': {
+                    'current_stock': Decimal(str(current_stock or 0)),
+                    'stock_unit': stock_unit or 'un',
+                    'base_portion_quantity': Decimal(str(base_portion_quantity or 1)),
+                    'base_portion_unit': base_portion_unit or 'un'
+                }
+            }
+        
+        current_stock_decimal = Decimal(str(current_stock or 0))
+        base_portion_quantity_decimal = Decimal(str(base_portion_quantity or 1))
+        stock_unit_str = stock_unit or 'un'
+        base_portion_unit_str = base_portion_unit or 'un'
+        
+        # Calcula quantidade máxima baseada no estoque
+        # Precisa converter da unidade do estoque para a unidade da porção base
+        max_from_stock = 0
+        if current_stock_decimal > 0:
+            try:
+                # Converte estoque para unidade da porção base
+                # Usa calculate_consumption_in_stock_unit de forma reversa
+                # Para converter de stock_unit para base_portion_unit, usa a função interna
+                from .stock_service import _convert_unit
+                stock_in_base_unit = _convert_unit(
+                    current_stock_decimal,
+                    stock_unit_str,
+                    base_portion_unit_str
+                )
+                
+                # Calcula quantas porções base cabem no estoque disponível
+                # Divide pelo item_quantity para ter a quantidade por item
+                if base_portion_quantity_decimal > 0:
+                    max_portions_from_stock = stock_in_base_unit / base_portion_quantity_decimal
+                    # Arredonda para baixo e converte para int
+                    max_from_stock = int(max_portions_from_stock // item_quantity)
+            except Exception as e:
+                print(f"Erro ao calcular quantidade máxima do estoque para ingrediente {ingredient_id}: {e}")
+                max_from_stock = 0
+        
+        # Determina o limite final (menor entre regra e estoque)
+        limited_by = []
+        max_available = 0
+        
+        if max_quantity_from_rule is not None and max_quantity_from_rule > 0:
+            # Há limite da regra
+            if max_from_stock > 0:
+                # Compara com estoque
+                max_available = min(max_quantity_from_rule, max_from_stock)
+                if max_available == max_quantity_from_rule:
+                    limited_by.append('rule')
+                if max_available == max_from_stock:
+                    limited_by.append('stock')
+            else:
+                # Sem estoque, usa regra (mas será 0 se não houver estoque)
+                max_available = max_quantity_from_rule if max_from_stock > 0 else 0
+                if max_available > 0:
+                    limited_by.append('rule')
+                else:
+                    limited_by.append('stock')
+        else:
+            # Sem limite da regra, usa apenas estoque
+            max_available = max_from_stock
+            if max_available > 0:
+                limited_by.append('stock')
+        
+        return {
+            'max_available': max_available,
+            'limited_by': 'both' if len(limited_by) == 2 else (limited_by[0] if limited_by else 'none'),
+            'stock_info': {
+                'current_stock': current_stock_decimal,
+                'stock_unit': stock_unit_str,
+                'base_portion_quantity': base_portion_quantity_decimal,
+                'base_portion_unit': base_portion_unit_str
+            }
+        }
+        
+    except Exception as e:
+        print(f"Erro ao calcular quantidade máxima disponível do ingrediente {ingredient_id}: {e}")
+        return {
+            'max_available': 0,
+            'limited_by': 'error',
+            'stock_info': None
+        }
+    finally:
+        if conn:
+            conn.close()
+
 def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False):  
     page = max(int(page or 1), 1)  
     page_size = max(int(page_size or 10), 1)  
@@ -259,7 +568,7 @@ def get_product_by_id(product_id):
             # Adiciona status de disponibilidade baseado no estoque
             product["availability_status"] = _get_product_availability_status(product_id, cur)
 
-            # Carrega ingredientes com regras
+            # Carrega ingredientes com regras e informações de disponibilidade
             cur.execute(
                 """
                 SELECT pi.INGREDIENT_ID, i.NAME, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY,
@@ -271,15 +580,39 @@ def get_product_by_id(product_id):
                 """,
                 (product_id,)
             )
-            product["ingredients"] = [{
-                "ingredient_id": r[0],
-                "name": r[1],
-                "portions": float(r[2]) if r[2] is not None else 0.0,
-                "min_quantity": int(r[3]) if r[3] is not None else 0,
-                "max_quantity": int(r[4]) if r[4] is not None else 0,
-                "additional_price": float(r[5]) if r[5] is not None else 0.0,
-                "is_available": bool(r[6])
-            } for r in cur.fetchall()]
+            ingredients_data = []
+            for r in cur.fetchall():
+                ing_id = r[0]
+                max_quantity_rule = int(r[4]) if r[4] is not None else None
+                
+                # Calcula quantidade máxima disponível baseada no estoque e na regra
+                max_available_info = get_ingredient_max_available_quantity(
+                    ingredient_id=ing_id,
+                    max_quantity_from_rule=max_quantity_rule,
+                    item_quantity=1  # Por padrão, verifica para 1 item
+                )
+                
+                # Se é um ingrediente extra (portions = 0), usa max_available calculado
+                # Se não, mantém max_quantity da regra
+                portions = float(r[2]) if r[2] is not None else 0.0
+                if portions == 0.0:  # É um ingrediente extra
+                    effective_max_quantity = max_available_info['max_available']
+                else:  # É ingrediente da base, não tem limite de quantidade extra
+                    effective_max_quantity = max_quantity_rule if max_quantity_rule else None
+                
+                ingredients_data.append({
+                    "ingredient_id": ing_id,
+                    "name": r[1],
+                    "portions": portions,
+                    "min_quantity": int(r[3]) if r[3] is not None else 0,
+                    "max_quantity": effective_max_quantity,  # Usa quantidade máxima disponível
+                    "max_quantity_rule": max_quantity_rule,  # Mantém a regra original para referência
+                    "additional_price": float(r[5]) if r[5] is not None else 0.0,
+                    "is_available": bool(r[6]),
+                    "availability_info": max_available_info if portions == 0.0 else None  # Info adicional para extras
+                })
+            
+            product["ingredients"] = ingredients_data
 
             return product
         return None  

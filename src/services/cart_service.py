@@ -414,47 +414,70 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 if float(rule["portions"]) != 0.0:
                     return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
                 min_q = int(rule["min_quantity"] or 0)
-                max_q = int(rule["max_quantity"] or 0)
-                if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
+                max_q_rule = int(rule["max_quantity"]) if rule["max_quantity"] else None
                 
-                # Verifica estoque suficiente para extras com conversão de unidades
-                # Busca informações do ingrediente para fazer conversão correta
-                cur.execute("""
-                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
-                    FROM INGREDIENTS
-                    WHERE ID = ? AND IS_AVAILABLE = TRUE
-                """, (ing_id,))
-                ing_info = cur.fetchone()
-                if not ing_info:
-                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                # Verifica disponibilidade em tempo real do ingrediente
+                from .product_service import get_ingredient_max_available_quantity
+                max_available_info = get_ingredient_max_available_quantity(
+                    ingredient_id=ing_id,
+                    max_quantity_from_rule=max_q_rule,
+                    item_quantity=quantity
+                )
                 
-                base_portion_quantity = ing_info[0] or 1
-                base_portion_unit = ing_info[1] or 'un'
-                stock_unit = ing_info[2] or 'un'
-                current_stock = ing_info[3] or 0
-                ing_name = ing_info[4]
+                max_q_available = max_available_info['max_available']
+                
+                # Usa o menor entre a regra e o estoque disponível
+                effective_max_q = max_q_available
+                if max_q_rule is not None and max_q_rule > 0:
+                    effective_max_q = min(max_q_rule, max_q_available)
+                
+                # Valida quantidade mínima
+                if qty < min_q:
+                    return (False, "EXTRA_OUT_OF_RANGE", 
+                           f"Quantidade de extra abaixo do mínimo permitido [{min_q}]")
+                
+                # Valida quantidade máxima (considerando estoque)
+                if effective_max_q > 0 and qty > effective_max_q:
+                    return (False, "EXTRA_OUT_OF_RANGE", 
+                           f"Quantidade de extra excede o disponível. "
+                           f"Máximo permitido: {effective_max_q} "
+                           f"(limitado por {'regra' if max_available_info['limited_by'] == 'rule' else 'estoque'})")
+                
+                # Verifica se ingrediente está disponível
+                if not max_available_info['stock_info'] or max_q_available == 0:
+                    # Busca nome do ingrediente para mensagem de erro
+                    cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                    ing_name_row = cur.fetchone()
+                    ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Ingrediente '{ing_name}' não disponível ou sem estoque")
+                
+                # Verifica estoque suficiente para a quantidade solicitada com conversão de unidades
+                stock_info = max_available_info['stock_info']
+                base_portion_quantity = stock_info['base_portion_quantity']
+                base_portion_unit = stock_info['base_portion_unit']
+                stock_unit = stock_info['stock_unit']
+                current_stock = stock_info['current_stock']
                 
                 # Calcula consumo convertido para unidade do estoque
                 try:
                     required_quantity = stock_service.calculate_consumption_in_stock_unit(
                         portions=qty,
-                        base_portion_quantity=base_portion_quantity,
-                        base_portion_unit=base_portion_unit,
-                        stock_unit=stock_unit,
+                        base_portion_quantity=float(base_portion_quantity),
+                        base_portion_unit=str(base_portion_unit),
+                        stock_unit=str(stock_unit),
                         item_quantity=quantity
                     )
                 except ValueError as e:
-                    return (False, "INSUFFICIENT_STOCK", f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
-                
-                # Converte current_stock para Decimal para comparação precisa
-                current_stock_decimal = Decimal(str(current_stock))
-                
-                if current_stock_decimal < required_quantity:
                     return (False, "INSUFFICIENT_STOCK", 
-                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Erro na conversão de unidades: {str(e)}")
+                
+                # Compara com estoque disponível
+                if current_stock < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra. "
                            f"Necessário: {required_quantity:.3f} {stock_unit}, "
-                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+                           f"Disponível: {current_stock:.3f} {stock_unit}")
         
         # Verifica se já existe um item idêntico (produto, extras, notes e base_mods)
         existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "", base_modifications or [])
@@ -477,42 +500,56 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                     for extra in extras:
                         ing_id = extra.get("ingredient_id")
                         qty = int(extra.get("quantity", 1))
+                        rule = rules.get(ing_id)
+                        max_q_rule = int(rule["max_quantity"]) if rule and rule.get("max_quantity") else None
                         
-                        cur.execute("""
-                            SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
-                            FROM INGREDIENTS
-                            WHERE ID = ? AND IS_AVAILABLE = TRUE
-                        """, (ing_id,))
-                        ing_info = cur.fetchone()
-                        if not ing_info:
-                            return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                        # Verifica disponibilidade em tempo real para a nova quantidade total
+                        from .product_service import get_ingredient_max_available_quantity
+                        max_available_info = get_ingredient_max_available_quantity(
+                            ingredient_id=ing_id,
+                            max_quantity_from_rule=max_q_rule,
+                            item_quantity=new_total_quantity
+                        )
                         
-                        base_portion_quantity = ing_info[0] or 1
-                        base_portion_unit = ing_info[1] or 'un'
-                        stock_unit = ing_info[2] or 'un'
-                        current_stock = ing_info[3] or 0
-                        ing_name = ing_info[4]
+                        # Verifica estoque suficiente para a quantidade solicitada com conversão de unidades
+                        stock_info = max_available_info.get('stock_info')
+                        if not stock_info:
+                            cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                            ing_name_row = cur.fetchone()
+                            ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Ingrediente '{ing_name}' não disponível ou sem estoque")
+                        
+                        base_portion_quantity = stock_info['base_portion_quantity']
+                        base_portion_unit = stock_info['base_portion_unit']
+                        stock_unit = stock_info['stock_unit']
+                        current_stock = stock_info['current_stock']
                         
                         # Calcula consumo para a NOVA quantidade total
                         try:
                             required_quantity_total = stock_service.calculate_consumption_in_stock_unit(
                                 portions=qty,
-                                base_portion_quantity=base_portion_quantity,
-                                base_portion_unit=base_portion_unit,
-                                stock_unit=stock_unit,
+                                base_portion_quantity=float(base_portion_quantity),
+                                base_portion_unit=str(base_portion_unit),
+                                stock_unit=str(stock_unit),
                                 item_quantity=new_total_quantity  # ← Usa quantidade total
                             )
                         except ValueError as e:
+                            cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                            ing_name_row = cur.fetchone()
+                            ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
                         
-                        current_stock_decimal = Decimal(str(current_stock))
-                        
-                        if current_stock_decimal < required_quantity_total:
+                        # Compara com estoque disponível
+                        if current_stock < required_quantity_total:
+                            cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                            ing_name_row = cur.fetchone()
+                            ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Estoque insuficiente para extra '{ing_name}'. "
                                    f"Necessário: {required_quantity_total:.3f} {stock_unit}, "
-                                   f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+                                   f"Disponível: {current_stock:.3f} {stock_unit}")
             
             # Incrementa quantidade do item existente
             sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
@@ -618,7 +655,7 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
         if not stock_check[0]:
             return (False, "INSUFFICIENT_STOCK", stock_check[1])
 
-        # Verifica e valida extras conforme regras do produto
+        # Verifica e valida extras conforme regras do produto (PORTIONS=0, min/max)
         rules = _get_product_rules(cur, product_id)
         if extras:
             for extra in extras:
@@ -630,47 +667,70 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 if float(rule["portions"]) != 0.0:
                     return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
                 min_q = int(rule["min_quantity"] or 0)
-                max_q = int(rule["max_quantity"] or 0)
-                if qty < min_q or (max_q > 0 and qty > max_q):
-                    return (False, "EXTRA_OUT_OF_RANGE", f"Quantidade de extra fora do intervalo permitido [{min_q}, {max_q or '∞'}]")
+                max_q_rule = int(rule["max_quantity"]) if rule["max_quantity"] else None
                 
-                # Verifica estoque suficiente para extras com conversão de unidades
-                # Busca informações do ingrediente para fazer conversão correta
-                cur.execute("""
-                    SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
-                    FROM INGREDIENTS
-                    WHERE ID = ? AND IS_AVAILABLE = TRUE
-                """, (ing_id,))
-                ing_info = cur.fetchone()
-                if not ing_info:
-                    return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                # Verifica disponibilidade em tempo real do ingrediente
+                from .product_service import get_ingredient_max_available_quantity
+                max_available_info = get_ingredient_max_available_quantity(
+                    ingredient_id=ing_id,
+                    max_quantity_from_rule=max_q_rule,
+                    item_quantity=quantity
+                )
                 
-                base_portion_quantity = ing_info[0] or 1
-                base_portion_unit = ing_info[1] or 'un'
-                stock_unit = ing_info[2] or 'un'
-                current_stock = ing_info[3] or 0
-                ing_name = ing_info[4]
+                max_q_available = max_available_info['max_available']
+                
+                # Usa o menor entre a regra e o estoque disponível
+                effective_max_q = max_q_available
+                if max_q_rule is not None and max_q_rule > 0:
+                    effective_max_q = min(max_q_rule, max_q_available)
+                
+                # Valida quantidade mínima
+                if qty < min_q:
+                    return (False, "EXTRA_OUT_OF_RANGE", 
+                           f"Quantidade de extra abaixo do mínimo permitido [{min_q}]")
+                
+                # Valida quantidade máxima (considerando estoque)
+                if effective_max_q > 0 and qty > effective_max_q:
+                    return (False, "EXTRA_OUT_OF_RANGE", 
+                           f"Quantidade de extra excede o disponível. "
+                           f"Máximo permitido: {effective_max_q} "
+                           f"(limitado por {'regra' if max_available_info['limited_by'] == 'rule' else 'estoque'})")
+                
+                # Verifica se ingrediente está disponível
+                if not max_available_info['stock_info'] or max_q_available == 0:
+                    # Busca nome do ingrediente para mensagem de erro
+                    cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                    ing_name_row = cur.fetchone()
+                    ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Ingrediente '{ing_name}' não disponível ou sem estoque")
+                
+                # Verifica estoque suficiente para a quantidade solicitada com conversão de unidades
+                stock_info = max_available_info['stock_info']
+                base_portion_quantity = stock_info['base_portion_quantity']
+                base_portion_unit = stock_info['base_portion_unit']
+                stock_unit = stock_info['stock_unit']
+                current_stock = stock_info['current_stock']
                 
                 # Calcula consumo convertido para unidade do estoque
                 try:
                     required_quantity = stock_service.calculate_consumption_in_stock_unit(
                         portions=qty,
-                        base_portion_quantity=base_portion_quantity,
-                        base_portion_unit=base_portion_unit,
-                        stock_unit=stock_unit,
+                        base_portion_quantity=float(base_portion_quantity),
+                        base_portion_unit=str(base_portion_unit),
+                        stock_unit=str(stock_unit),
                         item_quantity=quantity
                     )
                 except ValueError as e:
-                    return (False, "INSUFFICIENT_STOCK", f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
-                
-                # Converte current_stock para Decimal para comparação precisa
-                current_stock_decimal = Decimal(str(current_stock))
-                
-                if current_stock_decimal < required_quantity:
                     return (False, "INSUFFICIENT_STOCK", 
-                           f"Estoque insuficiente para extra '{ing_name}'. "
+                           f"Erro na conversão de unidades: {str(e)}")
+                
+                # Compara com estoque disponível
+                if current_stock < required_quantity:
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Estoque insuficiente para extra. "
                            f"Necessário: {required_quantity:.3f} {stock_unit}, "
-                           f"Disponível: {current_stock_decimal:.3f} {stock_unit}")
+                           f"Disponível: {current_stock:.3f} {stock_unit}")
 
         # Verifica item idêntico (inclui base_mods)
         existing_item_id = find_identical_cart_item(cart_id, product_id, extras or [], notes or "", base_modifications or [])
