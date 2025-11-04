@@ -356,8 +356,12 @@ def add_points_manually(user_id, points, reason, order_id=None):
         # Cria conta se não existir
         create_loyalty_account_if_not_exists(user_id, cur)
         
-        # Calcula data de expiração (60 dias a partir de hoje)
-        expiration_date = _calculate_expiration_date(60)
+        # Obter configurações de expiração das settings
+        loyalty_config = _get_loyalty_settings()
+        expiration_days = loyalty_config['expiration_days']
+        
+        # Calcula data de expiração usando o valor das settings
+        expiration_date = _calculate_expiration_date(expiration_days)
         
         # Atualiza pontos acumulados
         sql_update = """
@@ -374,7 +378,7 @@ def add_points_manually(user_id, points, reason, order_id=None):
         cur.execute(sql_history, (user_id, order_id, points, reason))
         
         conn.commit()
-        print(f"Adicionados {points} pontos para o usuário {user_id}: {reason}")
+        print(f"Adicionados {points} pontos para o usuário {user_id}: {reason} (expira em {expiration_days} dias)")
         return True
     except fdb.Error as e:
         print(f"Erro ao adicionar pontos manualmente: {e}")
