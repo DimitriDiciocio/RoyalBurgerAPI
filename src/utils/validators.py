@@ -234,4 +234,49 @@ def convert_iso_date_to_br(date_string: str) -> str:
         parsed_date = datetime.strptime(date_string, '%Y-%m-%d').date()
         return parsed_date.strftime('%d-%m-%Y')
     except ValueError:
-        return None  
+        return None
+
+
+def validate_pagination_params(page, page_size, max_page_size=100):
+    """
+    Valida e normaliza parâmetros de paginação (seção 1.10 - SQL Injection prevention)
+    
+    Args:
+        page: Número da página (pode ser int, str ou None)
+        page_size: Tamanho da página (pode ser int, str ou None)
+        max_page_size: Tamanho máximo permitido por página (padrão: 100)
+    
+    Returns:
+        tuple: (page, page_size, offset) com valores validados e normalizados
+    
+    Raises:
+        ValueError: Se os parâmetros não puderem ser validados
+    """
+    try:
+        # Valida e normaliza page
+        if page is None:
+            page = 1
+        elif isinstance(page, str):
+            page = int(page)
+        elif not isinstance(page, (int, float)):
+            raise ValueError("Parâmetro 'page' deve ser um número")
+        
+        page = max(int(page), 1)  # Garante que seja pelo menos 1
+        
+        # Valida e normaliza page_size
+        if page_size is None:
+            page_size = 50
+        elif isinstance(page_size, str):
+            page_size = int(page_size)
+        elif not isinstance(page_size, (int, float)):
+            raise ValueError("Parâmetro 'page_size' deve ser um número")
+        
+        page_size = min(max(int(page_size), 1), max_page_size)  # Entre 1 e max_page_size
+        
+        # Calcula offset
+        offset = (page - 1) * page_size
+        
+        return page, page_size, offset
+        
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Parâmetros de paginação inválidos: {e}")  

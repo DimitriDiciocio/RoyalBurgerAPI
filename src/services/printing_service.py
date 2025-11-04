@@ -370,11 +370,11 @@ def format_order_for_kitchen_json(order_id: int) -> dict:
         cur = conn.cursor()
 
         # Dados básicos do pedido
-        cur.execute("SELECT ID, CREATED_AT, COALESCE(NOTES, '') FROM ORDERS WHERE ID = ?;", (order_id,))
+        cur.execute("SELECT ID, CREATED_AT, COALESCE(NOTES, ''), COALESCE(ORDER_TYPE, 'delivery') FROM ORDERS WHERE ID = ?;", (order_id,))
         row = cur.fetchone()
         if not row:
             return {}
-        _id, created_at, notes = row[0], row[1], row[2] or ""
+        _id, created_at, notes, order_type = row[0], row[1], row[2] or "", row[3] or "delivery"
 
         # Itens do pedido
         cur.execute(
@@ -387,47 +387,70 @@ def format_order_for_kitchen_json(order_id: int) -> dict:
             """,
             (order_id,)
         )
+        items_rows = cur.fetchall()
         items = []
-        for item_row in cur.fetchall():
-            order_item_id, qty, product_name = item_row[0], int(item_row[1] or 1), item_row[2]
-
-            # Extras e modificações de base do item
-            cur2 = conn.cursor()
-            cur2.execute(
+        
+        if not items_rows:
+            return {"order_number": _id, "order_type": order_type, "timestamp": created_at.strftime('%d/%m/%Y %H:%M'), "notes": notes, "items": []}
+        
+        # OTIMIZAÇÃO: Coleta todos os order_item_ids para buscar extras em batch
+        order_item_ids = [row[0] for row in items_rows]
+        extras_map = {}
+        
+        # OTIMIZAÇÃO: Busca todos os extras e modificações de base de uma vez
+        if order_item_ids:
+            try:
+                placeholders = ', '.join(['?' for _ in order_item_ids])
+                extras_sql = f"""
+                    SELECT 
+                        e.ORDER_ITEM_ID,
+                        i.NAME,
+                        e.QUANTITY,
+                        e.TYPE,
+                        COALESCE(e.DELTA, e.QUANTITY) as DELTA
+                    FROM ORDER_ITEM_EXTRAS e
+                    JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
+                    WHERE e.ORDER_ITEM_ID IN ({placeholders})
+                    ORDER BY e.ORDER_ITEM_ID, e.TYPE, i.NAME
                 """
-                SELECT i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
-                FROM ORDER_ITEM_EXTRAS e
-                JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
-                WHERE e.ORDER_ITEM_ID = ?
-                ORDER BY e.TYPE, i.NAME
-                """,
-                (order_item_id,)
-            )
-            extras = []
-            for ex in cur2.fetchall():
-                row_type = (ex[2] or 'extra').lower()
-                if row_type == 'extra':
-                    # Extra adicional
-                    extras.append({
-                        "type": "add",
-                        "name": ex[0],
-                        "quantity": int(ex[1] or 1)
-                    })
-                elif row_type == 'base':
-                    # Modificação da receita base
-                    delta = int(ex[3] or 0)
-                    if delta > 0:
-                        extras.append({
+                cur.execute(extras_sql, tuple(order_item_ids))
+                
+                for ex in cur.fetchall():
+                    order_item_id = ex[0]
+                    row_type = (ex[3] or 'extra').lower()
+                    
+                    if order_item_id not in extras_map:
+                        extras_map[order_item_id] = []
+                    
+                    if row_type == 'extra':
+                        # Extra adicional
+                        extras_map[order_item_id].append({
                             "type": "add",
-                            "name": f"{ex[0]} +{delta}",
-                            "quantity": delta
+                            "name": ex[1],
+                            "quantity": int(ex[2] or 1)
                         })
-                    elif delta < 0:
-                        extras.append({
-                            "type": "remove",
-                            "name": ex[0],
-                            "quantity": abs(delta)
-                        })
+                    elif row_type == 'base':
+                        # Modificação da receita base
+                        delta = int(ex[4] or 0)
+                        if delta > 0:
+                            extras_map[order_item_id].append({
+                                "type": "add",
+                                "name": f"{ex[1]} +{delta}",
+                                "quantity": delta
+                            })
+                        elif delta < 0:
+                            extras_map[order_item_id].append({
+                                "type": "remove",
+                                "name": ex[1],
+                                "quantity": abs(delta)
+                            })
+            except Exception as e:
+                print(f"Erro ao buscar extras do pedido em batch: {e}")
+        
+        # Processa os itens com os extras já carregados
+        for item_row in items_rows:
+            order_item_id, qty, product_name = item_row[0], int(item_row[1] or 1), item_row[2]
+            extras = extras_map.get(order_item_id, [])
 
             items.append({
                 "quantity": qty,
@@ -443,7 +466,7 @@ def format_order_for_kitchen_json(order_id: int) -> dict:
 
         return {
             "order_number": order_id,
-            "order_type": "Delivery",  # padrão atual até termos origem/retirada
+            "order_type": order_type,
             "timestamp": ts,
             "notes": notes or "",
             "items": items

@@ -134,6 +134,24 @@ def create_app():
             # Não faz nada, deixa o Flask processar normalmente
             pass
     
+    # Inicialização e cleanup do pool de conexões
+    # O pool é criado automaticamente na primeira chamada de get_db_connection()
+    # Fechamos o pool ao encerrar o app para shutdown graceful
+    import atexit
+    from .database import get_pool
+    
+    def close_db_pool():
+        """Fecha todas as conexões do pool ao encerrar aplicação"""
+        try:
+            pool = get_pool()
+            if pool:
+                pool.close_all()
+                print("Pool de conexões fechado com sucesso.")
+        except Exception as e:
+            print(f"Erro ao fechar pool de conexões: {e}")
+    
+    atexit.register(close_db_pool)
+    
     @app.route('/api/health')  
     def health_check():  
         return "API is running!"

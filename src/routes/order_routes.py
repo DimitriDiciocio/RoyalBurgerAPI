@@ -157,7 +157,10 @@ def get_my_orders_route():
 @order_bp.route('/all', methods=['GET'])  
 @require_role('admin', 'manager')  
 def get_all_orders_route():  
-    orders = order_service.get_all_orders()  
+    # OTIMIZAÇÃO: Suportar parâmetros de paginação (seção 1.9)
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 50, type=int)
+    orders = order_service.get_all_orders(page=page, page_size=page_size)  
     return jsonify(orders), 200  
 
 @order_bp.route('/<int:order_id>/status', methods=['PATCH'])  

@@ -1,5 +1,5 @@
 import fdb  
-from datetime import datetime, date  
+from datetime import datetime, date, timedelta
 from ..database import get_db_connection  
 
 def get_financial_summary(period='this_month'):  
@@ -69,12 +69,29 @@ def get_financial_transactions(filters=None):
         conditions = []  
         params = []  
         if filters:  
+            # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
             if filters.get('start_date'):  
-                conditions.append("DATE(ft.TRANSACTION_DATE) >= ?")
-                params.append(filters['start_date'])
+                start_date = filters['start_date']
+                if isinstance(start_date, str):
+                    try:
+                        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+                    except:
+                        pass
+                if isinstance(start_date, date) and not isinstance(start_date, datetime):
+                    start_date = datetime.combine(start_date, datetime.min.time())
+                conditions.append("ft.TRANSACTION_DATE >= ?")
+                params.append(start_date)
             if filters.get('end_date'):  
-                conditions.append("DATE(ft.TRANSACTION_DATE) <= ?")
-                params.append(filters['end_date'])
+                end_date = filters['end_date']
+                if isinstance(end_date, str):
+                    try:
+                        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+                    except:
+                        pass
+                if isinstance(end_date, date) and not isinstance(end_date, datetime):
+                    end_date = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+                conditions.append("ft.TRANSACTION_DATE < ?")
+                params.append(end_date)
             if filters.get('type'):  
                 conditions.append("ft.TYPE = ?")
                 params.append(filters['type'])

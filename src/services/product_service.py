@@ -469,10 +469,82 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         # page - Query com sintaxe FIRST/SKIP do Firebird
-        query = f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE FROM PRODUCTS WHERE {where_sql} ORDER BY NAME"
+        # OTIMIZAÇÃO: Incluir nome da categoria via LEFT JOIN para evitar N+1
+        query = f"""
+            SELECT FIRST {page_size} SKIP {offset} 
+                p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, 
+                p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID, p.IMAGE_URL, p.IS_ACTIVE,
+                COALESCE(c.NAME, 'Sem categoria') as CATEGORY_NAME
+            FROM PRODUCTS p
+            LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID
+            WHERE {where_sql} 
+            ORDER BY p.NAME
+        """
         cur.execute(query, tuple(params))  
-        items = []  
-        for row in cur.fetchall():
+        
+        # Coleta todos os product_ids primeiro
+        product_rows = cur.fetchall()
+        product_ids = [row[0] for row in product_rows]
+        items = []
+        
+        # Inicializa estruturas para armazenar dados batch
+        availability_map = {}
+        ingredients_map = {}
+        
+        # OTIMIZAÇÃO: Busca todos os status de disponibilidade de uma vez
+        if product_ids:
+            try:
+                placeholders = ', '.join(['?' for _ in product_ids])
+                availability_query = f"""
+                    SELECT 
+                        pi.PRODUCT_ID,
+                        MIN(CASE WHEN i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock' THEN 0 ELSE 1 END) as all_available,
+                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock
+                    FROM PRODUCT_INGREDIENTS pi
+                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    WHERE pi.PRODUCT_ID IN ({placeholders})
+                    GROUP BY pi.PRODUCT_ID
+                """
+                cur.execute(availability_query, tuple(product_ids))
+                for row in cur.fetchall():
+                    product_id = row[0]
+                    all_av = row[1]
+                    has_low = row[2]
+                    if all_av == 0:
+                        availability_map[product_id] = "unavailable"
+                    elif has_low == 1:
+                        availability_map[product_id] = "low_stock"
+                    else:
+                        availability_map[product_id] = "available"
+            except Exception as e:
+                print(f"Erro ao buscar disponibilidade em batch: {e}")
+        
+        # OTIMIZAÇÃO: Busca todos os ingredientes de uma vez
+        if product_ids:
+            try:
+                placeholders = ', '.join(['?' for _ in product_ids])
+                ingredients_query = f"""
+                    SELECT pi.PRODUCT_ID, pi.INGREDIENT_ID, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY
+                    FROM PRODUCT_INGREDIENTS pi
+                    WHERE pi.PRODUCT_ID IN ({placeholders})
+                    ORDER BY pi.PRODUCT_ID, pi.INGREDIENT_ID
+                """
+                cur.execute(ingredients_query, tuple(product_ids))
+                for row in cur.fetchall():
+                    product_id = row[0]
+                    if product_id not in ingredients_map:
+                        ingredients_map[product_id] = []
+                    ingredients_map[product_id].append({
+                        "ingredient_id": row[1],
+                        "portions": float(row[2]) if row[2] is not None else 0.0,
+                        "min_quantity": int(row[3]) if row[3] is not None else 0,
+                        "max_quantity": int(row[4]) if row[4] is not None else 0
+                    })
+            except Exception as e:
+                print(f"Erro ao buscar ingredientes em batch: {e}")
+        
+        # Processa os produtos com os dados já carregados
+        for row in product_rows:
             product_id = row[0]
             item = {  
                 "id": product_id,  
@@ -494,36 +566,14 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                     print(f"Erro ao gerar hash da imagem: {e}")
                     item["image_hash"] = None
             
-            # Adiciona status de disponibilidade baseado no estoque
-            try:
-                item["availability_status"] = _get_product_availability_status(product_id, cur)
-            except Exception as e:
-                print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
-                item["availability_status"] = "unknown"
-
-            # Carrega ingredientes com regras (compacto para listagem)
-            try:
-                cur2 = conn.cursor()
-                cur2.execute(
-                    """
-                    SELECT pi.INGREDIENT_ID, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY
-                    FROM PRODUCT_INGREDIENTS pi
-                    WHERE pi.PRODUCT_ID = ?
-                    ORDER BY pi.INGREDIENT_ID
-                    """,
-                    (product_id,)
-                )
-                item["ingredients"] = [{
-                    "ingredient_id": r[0],
-                    "portions": float(r[1]) if r[1] is not None else 0.0,
-                    "min_quantity": int(r[2]) if r[2] is not None else 0,
-                    "max_quantity": int(r[3]) if r[3] is not None else 0
-                } for r in cur2.fetchall()]
-            except Exception as e:
-                print(f"Erro ao carregar ingredientes do produto {product_id}: {e}")
-                item["ingredients"] = []
+            # Adiciona status de disponibilidade (já carregado em batch)
+            item["availability_status"] = availability_map.get(product_id, "unknown")
+            
+            # Adiciona ingredientes (já carregados em batch)
+            item["ingredients"] = ingredients_map.get(product_id, [])
             
             items.append(item)  
+        
         total_pages = (total + page_size - 1) // page_size  
         return {  
             "items": items,  
@@ -901,11 +951,82 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         total = cur.fetchone()[0] or 0  
         
         # Busca os produtos paginados - Query com sintaxe FIRST/SKIP do Firebird
-        query = f"SELECT FIRST {page_size} SKIP {offset} ID, NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE FROM PRODUCTS WHERE {where_sql} ORDER BY NAME"
+        # OTIMIZAÇÃO: Incluir nome da categoria via LEFT JOIN para evitar N+1
+        query = f"""
+            SELECT FIRST {page_size} SKIP {offset} 
+                p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, 
+                p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID, p.IMAGE_URL, p.IS_ACTIVE,
+                COALESCE(c.NAME, 'Sem categoria') as CATEGORY_NAME
+            FROM PRODUCTS p
+            LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID
+            WHERE {where_sql} 
+            ORDER BY p.NAME
+        """
         cur.execute(query, tuple(params))  
         
-        items = []  
-        for row in cur.fetchall():
+        # Coleta todos os product_ids primeiro
+        product_rows = cur.fetchall()
+        product_ids = [row[0] for row in product_rows]
+        items = []
+        
+        # Inicializa estruturas para armazenar dados batch
+        availability_map = {}
+        ingredients_map = {}
+        
+        # OTIMIZAÇÃO: Busca todos os status de disponibilidade de uma vez
+        if product_ids:
+            try:
+                placeholders = ', '.join(['?' for _ in product_ids])
+                availability_query = f"""
+                    SELECT 
+                        pi.PRODUCT_ID,
+                        MIN(CASE WHEN i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock' THEN 0 ELSE 1 END) as all_available,
+                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock
+                    FROM PRODUCT_INGREDIENTS pi
+                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    WHERE pi.PRODUCT_ID IN ({placeholders})
+                    GROUP BY pi.PRODUCT_ID
+                """
+                cur.execute(availability_query, tuple(product_ids))
+                for row in cur.fetchall():
+                    product_id = row[0]
+                    all_av = row[1]
+                    has_low = row[2]
+                    if all_av == 0:
+                        availability_map[product_id] = "unavailable"
+                    elif has_low == 1:
+                        availability_map[product_id] = "low_stock"
+                    else:
+                        availability_map[product_id] = "available"
+            except Exception as e:
+                print(f"Erro ao buscar disponibilidade em batch: {e}")
+        
+        # OTIMIZAÇÃO: Busca todos os ingredientes de uma vez
+        if product_ids:
+            try:
+                placeholders = ', '.join(['?' for _ in product_ids])
+                ingredients_query = f"""
+                    SELECT pi.PRODUCT_ID, pi.INGREDIENT_ID, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY
+                    FROM PRODUCT_INGREDIENTS pi
+                    WHERE pi.PRODUCT_ID IN ({placeholders})
+                    ORDER BY pi.PRODUCT_ID, pi.INGREDIENT_ID
+                """
+                cur.execute(ingredients_query, tuple(product_ids))
+                for row in cur.fetchall():
+                    product_id = row[0]
+                    if product_id not in ingredients_map:
+                        ingredients_map[product_id] = []
+                    ingredients_map[product_id].append({
+                        "ingredient_id": row[1],
+                        "portions": float(row[2]) if row[2] is not None else 0.0,
+                        "min_quantity": int(row[3]) if row[3] is not None else 0,
+                        "max_quantity": int(row[4]) if row[4] is not None else 0
+                    })
+            except Exception as e:
+                print(f"Erro ao buscar ingredientes em batch: {e}")
+        
+        # Processa os produtos com os dados já carregados
+        for row in product_rows:
             product_id = row[0]
             item = {  
                 "id": product_id,  
@@ -927,29 +1048,12 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                     print(f"Erro ao gerar hash da imagem: {e}")
                     item["image_hash"] = None
             
-            # Adiciona status de disponibilidade baseado no estoque
-            try:
-                item["availability_status"] = _get_product_availability_status(product_id, cur)
-            except Exception as e:
-                print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
-                item["availability_status"] = "unknown"
+            # Adiciona status de disponibilidade (já carregado em batch)
+            item["availability_status"] = availability_map.get(product_id, "unknown")
             
-            # Inclui ingredientes (regras) resumidas
-            try:
-                cur2 = conn.cursor()
-                cur2.execute(
-                    "SELECT INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?",
-                    (product_id,)
-                )
-                item["ingredients"] = [{
-                    "ingredient_id": r[0],
-                    "portions": float(r[1]) if r[1] is not None else 0.0,
-                    "min_quantity": int(r[2]) if r[2] is not None else 0,
-                    "max_quantity": int(r[3]) if r[3] is not None else 0
-                } for r in cur2.fetchall()]
-            except Exception as e:
-                print(f"Erro ao carregar ingredientes do produto {product_id}: {e}")
-                item["ingredients"] = []
+            # Adiciona ingredientes (já carregados em batch)
+            item["ingredients"] = ingredients_map.get(product_id, [])
+            
             items.append(item)  
             
         total_pages = (total + page_size - 1) // page_size  

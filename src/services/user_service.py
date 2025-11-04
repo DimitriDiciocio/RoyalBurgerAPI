@@ -803,13 +803,34 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
                 conditions.append("IS_ACTIVE = ?")
                 params.append(bool(filters['status']))
             
+            # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
             if filters.get('created_after'):
-                conditions.append("DATE(CREATED_AT) >= ?")
-                params.append(filters['created_after'])
+                created_after = filters['created_after']
+                if isinstance(created_after, str):
+                    from datetime import datetime as dt
+                    try:
+                        created_after = dt.strptime(created_after, '%Y-%m-%d').date()
+                    except:
+                        pass
+                if isinstance(created_after, date) and not isinstance(created_after, datetime):
+                    from datetime import datetime
+                    created_after = datetime.combine(created_after, datetime.min.time())
+                conditions.append("CREATED_AT >= ?")
+                params.append(created_after)
             
             if filters.get('created_before'):
-                conditions.append("DATE(CREATED_AT) <= ?")
-                params.append(filters['created_before'])
+                created_before = filters['created_before']
+                if isinstance(created_before, str):
+                    from datetime import datetime as dt
+                    try:
+                        created_before = dt.strptime(created_before, '%Y-%m-%d').date()
+                    except:
+                        pass
+                if isinstance(created_before, date) and not isinstance(created_before, datetime):
+                    from datetime import datetime, timedelta
+                    created_before = datetime.combine(created_before + timedelta(days=1), datetime.min.time())
+                conditions.append("CREATED_AT < ?")
+                params.append(created_before)
         
         if conditions:
             base_sql += " AND " + " AND ".join(conditions)

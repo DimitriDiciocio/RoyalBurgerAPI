@@ -577,19 +577,30 @@ def get_orders_by_user_id(user_id):
         if conn:
             conn.close()
 
-def get_all_orders():
-    """Busca todos os pedidos para a visão do administrador."""
+def get_all_orders(page=1, page_size=50):
+    """Busca todos os pedidos para a visão do administrador com paginação."""
+    # OTIMIZAÇÃO: Validação de parâmetros de paginação usando função utilitária (seção 1.9 e 1.10)
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
+    except ValueError:
+        page = 1
+        page_size = 50
+        offset = 0
+    
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        sql = """
-            SELECT o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, u.FULL_NAME, a.STREET, a."NUMBER"
+        # OTIMIZAÇÃO: Query com paginação usando FIRST/SKIP do Firebird
+        sql = f"""
+            SELECT FIRST {page_size} SKIP {offset}
+                o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, u.FULL_NAME, a.STREET, a."NUMBER"
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
-            ORDER BY o.CREATED_AT DESC;
+            ORDER BY o.CREATED_AT DESC
         """
         cur.execute(sql)
         orders = []
@@ -611,10 +622,24 @@ def get_all_orders():
                 "customer_name": row[5],
                 "address": address_str
             })
-        return orders
+        
+        # Buscar total para paginação
+        cur.execute("SELECT COUNT(*) FROM ORDERS")
+        total = cur.fetchone()[0] or 0
+        total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
+        
+        return {
+            "items": orders,
+            "pagination": {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages
+            }
+        }
     except fdb.Error as e:
         logger.error(f"Erro ao buscar todos os pedidos: {e}", exc_info=True)
-        return []
+        return {"items": [], "pagination": {"total": 0, "page": page, "page_size": page_size, "total_pages": 0}}
     finally:
         if conn:
             conn.close()
@@ -1330,13 +1355,34 @@ def get_orders_with_filters(filters=None):
         params = []
         
         if filters:
+            # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
             if filters.get('start_date'):
-                conditions.append("DATE(o.CREATED_AT) >= ?")
-                params.append(filters['start_date'])
+                # Se for date, converte para datetime (início do dia)
+                start_date = filters['start_date']
+                if isinstance(start_date, str):
+                    from datetime import datetime as dt
+                    try:
+                        start_date = dt.strptime(start_date, '%Y-%m-%d').date()
+                    except:
+                        pass
+                if isinstance(start_date, date) and not isinstance(start_date, datetime):
+                    start_date = datetime.combine(start_date, datetime.min.time())
+                conditions.append("o.CREATED_AT >= ?")
+                params.append(start_date)
             
             if filters.get('end_date'):
-                conditions.append("DATE(o.CREATED_AT) <= ?")
-                params.append(filters['end_date'])
+                # Se for date, converte para datetime (fim do dia)
+                end_date = filters['end_date']
+                if isinstance(end_date, str):
+                    from datetime import datetime as dt
+                    try:
+                        end_date = dt.strptime(end_date, '%Y-%m-%d').date()
+                    except:
+                        pass
+                if isinstance(end_date, date) and not isinstance(end_date, datetime):
+                    end_date = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+                conditions.append("o.CREATED_AT < ?")
+                params.append(end_date)
             
             if filters.get('status'):
                 conditions.append("o.STATUS = ?")
@@ -1345,16 +1391,55 @@ def get_orders_with_filters(filters=None):
         if conditions:
             base_sql += " AND " + " AND ".join(conditions)
         
+        # OTIMIZAÇÃO: Validação de parâmetros de paginação usando função utilitária (seção 1.9 e 1.10)
+        from ..utils.validators import validate_pagination_params
+        page = filters.get('page', 1) if filters else 1
+        page_size = filters.get('page_size', 50) if filters else 50
+        try:
+            page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
+        except ValueError:
+            page = 1
+            page_size = 50
+            offset = 0
+        
+        # Query de contagem para paginação
+        count_query = """
+            SELECT COUNT(*)
+            FROM ORDERS o
+            JOIN USERS u ON o.USER_ID = u.ID
+            LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
+            WHERE 1=1
+        """
+        if conditions:
+            count_query += " AND " + " AND ".join(conditions)
+        
+        cur.execute(count_query, params)
+        total = cur.fetchone()[0] or 0
+        
         # Ordenação
         sort_by = filters.get('sort_by', 'date_desc') if filters else 'date_desc'
         if sort_by == 'date_desc':
-            base_sql += " ORDER BY o.CREATED_AT DESC"
+            order_clause = " ORDER BY o.CREATED_AT DESC"
         elif sort_by == 'date_asc':
-            base_sql += " ORDER BY o.CREATED_AT ASC"
+            order_clause = " ORDER BY o.CREATED_AT ASC"
         else:
-            base_sql += " ORDER BY o.CREATED_AT DESC"
+            order_clause = " ORDER BY o.CREATED_AT DESC"
         
-        cur.execute(base_sql, params)
+        # OTIMIZAÇÃO: Query principal com paginação usando FIRST/SKIP do Firebird
+        paginated_query = f"""
+            SELECT FIRST {page_size} SKIP {offset}
+                o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.TOTAL_AMOUNT,
+                u.FULL_NAME as customer_name, a.STREET, a."NUMBER"
+            FROM ORDERS o
+            JOIN USERS u ON o.USER_ID = u.ID
+            LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
+            WHERE 1=1
+        """
+        if conditions:
+            paginated_query += " AND " + " AND ".join(conditions)
+        paginated_query += order_clause
+        
+        cur.execute(paginated_query, params)
         orders = []
         
         for row in cur.fetchall():
@@ -1379,11 +1464,29 @@ def get_orders_with_filters(filters=None):
                 "address": address_str
             })
         
-        return orders
+        total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
+        
+        return {
+            "items": orders,
+            "pagination": {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages
+            }
+        }
         
     except fdb.Error as e:
         logger.error(f"Erro ao buscar pedidos com filtros: {e}", exc_info=True)
-        return []
+        return {
+            "items": [],
+            "pagination": {
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0
+            }
+        }
     finally:
         if conn:
             conn.close()

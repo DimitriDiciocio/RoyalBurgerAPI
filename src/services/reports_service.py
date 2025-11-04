@@ -35,19 +35,31 @@ def get_reports(report_type, period):
 
 
 def _get_sales_report(cur, start_date, end_date):
+    # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
+    from datetime import datetime, timedelta
+    # Converte start_date e end_date para datetime se necessário
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+    
+    # Converte para datetime range
+    start_datetime = datetime.combine(start_date, datetime.min.time()) if isinstance(start_date, date) else start_date
+    end_datetime = datetime.combine(end_date + timedelta(days=1), datetime.min.time()) if isinstance(end_date, date) else end_date
+    
     cur.execute("""
-        SELECT DATE(CREATED_AT) as date, 
+        SELECT CAST(CREATED_AT AS DATE) as date, 
                COUNT(*) as total_orders,
                SUM(TOTAL_AMOUNT) as total_revenue
         FROM ORDERS 
-        WHERE DATE(CREATED_AT) BETWEEN ? AND ?
-        GROUP BY DATE(CREATED_AT)
+        WHERE CREATED_AT >= ? AND CREATED_AT < ?
+        GROUP BY CAST(CREATED_AT AS DATE)
         ORDER BY date
-    """, (start_date, end_date))
+    """, (start_datetime, end_datetime))
     sales_by_date = []
     for row in cur.fetchall():
         sales_by_date.append({
-            "date": row[0].isoformat(),
+            "date": row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
             "total_orders": row[1],
             "total_revenue": float(row[2]) if row[2] else 0.0
         })
@@ -55,10 +67,10 @@ def _get_sales_report(cur, start_date, end_date):
         SELECT EXTRACT(HOUR FROM CREATED_AT) as hour,
                COUNT(*) as total_orders
         FROM ORDERS 
-        WHERE DATE(CREATED_AT) BETWEEN ? AND ?
+        WHERE CREATED_AT >= ? AND CREATED_AT < ?
         GROUP BY EXTRACT(HOUR FROM CREATED_AT)
         ORDER BY hour
-    """, (start_date, end_date))
+    """, (start_datetime, end_datetime))
     sales_by_hour = []
     for row in cur.fetchall():
         sales_by_hour.append({
@@ -77,19 +89,31 @@ def _get_sales_report(cur, start_date, end_date):
 
 
 def _get_financial_report(cur, start_date, end_date):  
+    # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
+    from datetime import datetime, timedelta
+    # Converte start_date e end_date para datetime se necessário
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+    
+    # Converte para datetime range
+    start_datetime = datetime.combine(start_date, datetime.min.time()) if isinstance(start_date, date) else start_date
+    end_datetime = datetime.combine(end_date + timedelta(days=1), datetime.min.time()) if isinstance(end_date, date) else end_date
+    
     cur.execute("""
-        SELECT DATE(TRANSACTION_DATE) as date,
+        SELECT CAST(TRANSACTION_DATE AS DATE) as date,
                SUM(CASE WHEN TYPE = 'revenue' THEN AMOUNT ELSE 0 END) as revenue,
                SUM(CASE WHEN TYPE = 'expense' THEN AMOUNT ELSE 0 END) as expense
         FROM FINANCIAL_TRANSACTIONS 
-        WHERE DATE(TRANSACTION_DATE) BETWEEN ? AND ?
-        GROUP BY DATE(TRANSACTION_DATE)
+        WHERE TRANSACTION_DATE >= ? AND TRANSACTION_DATE < ?
+        GROUP BY CAST(TRANSACTION_DATE AS DATE)
         ORDER BY date
-    """, (start_date, end_date))  
+    """, (start_datetime, end_datetime))  
     financial_by_date = []  
     for row in cur.fetchall():  
         financial_by_date.append({  
-            "date": row[0].isoformat(),
+            "date": row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
             "revenue": float(row[1]) if row[1] else 0.0,
             "expense": float(row[2]) if row[2] else 0.0,
             "profit": float(row[1]) - float(row[2]) if row[1] and row[2] else 0.0
@@ -98,8 +122,8 @@ def _get_financial_report(cur, start_date, end_date):
         SELECT SUM(CASE WHEN TYPE = 'revenue' THEN AMOUNT ELSE 0 END) as total_revenue,
                SUM(CASE WHEN TYPE = 'expense' THEN AMOUNT ELSE 0 END) as total_expense
         FROM FINANCIAL_TRANSACTIONS 
-        WHERE DATE(TRANSACTION_DATE) BETWEEN ? AND ?
-    """, (start_date, end_date))  
+        WHERE TRANSACTION_DATE >= ? AND TRANSACTION_DATE < ?
+    """, (start_datetime, end_datetime))  
     summary_row = cur.fetchone()  
     total_revenue = float(summary_row[0]) if summary_row[0] else 0.0  
     total_expense = float(summary_row[1]) if summary_row[1] else 0.0  
@@ -119,27 +143,39 @@ def _get_financial_report(cur, start_date, end_date):
 
 
 def _get_performance_report(cur, start_date, end_date):  
+    # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
+    from datetime import datetime, timedelta
+    # Converte start_date e end_date para datetime se necessário
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+    
+    # Converte para datetime range
+    start_datetime = datetime.combine(start_date, datetime.min.time()) if isinstance(start_date, date) else start_date
+    end_datetime = datetime.combine(end_date + timedelta(days=1), datetime.min.time()) if isinstance(end_date, date) else end_date
+    
     cur.execute("""
-        SELECT DATE(CREATED_AT) as date,
+        SELECT CAST(CREATED_AT AS DATE) as date,
                AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60) as avg_prep_time
         FROM ORDERS 
-        WHERE DATE(CREATED_AT) BETWEEN ? AND ?
+        WHERE CREATED_AT >= ? AND CREATED_AT < ?
         AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
-        GROUP BY DATE(CREATED_AT)
+        GROUP BY CAST(CREATED_AT AS DATE)
         ORDER BY date
-    """, (start_date, end_date))  
+    """, (start_datetime, end_datetime))  
     performance_by_date = []  
     for row in cur.fetchall():  
         performance_by_date.append({  
-            "date": row[0].isoformat(),
+            "date": row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
             "avg_prep_time": round(float(row[1]), 1) if row[1] else 0.0
         })
     cur.execute("""
         SELECT COUNT(*) as total_orders,
                SUM(CASE WHEN STATUS = 'cancelled' THEN 1 ELSE 0 END) as cancelled_orders
         FROM ORDERS 
-        WHERE DATE(CREATED_AT) BETWEEN ? AND ?
-    """, (start_date, end_date))  
+        WHERE CREATED_AT >= ? AND CREATED_AT < ?
+    """, (start_datetime, end_datetime))  
     cancel_row = cur.fetchone()  
     total_orders = cancel_row[0] if cancel_row[0] else 0  
     cancelled_orders = cancel_row[1] if cancel_row[1] else 0  
@@ -156,6 +192,18 @@ def _get_performance_report(cur, start_date, end_date):
 
 
 def _get_employees_report(cur, start_date, end_date):  
+    # OTIMIZAÇÃO: Converter datas para range queries (substitui DATE() por range para usar índices)
+    from datetime import datetime, timedelta
+    # Converte start_date e end_date para datetime se necessário
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+    
+    # Converte para datetime range
+    start_datetime = datetime.combine(start_date, datetime.min.time()) if isinstance(start_date, date) else start_date
+    end_datetime = datetime.combine(end_date + timedelta(days=1), datetime.min.time()) if isinstance(end_date, date) else end_date
+    
     cur.execute("""
         SELECT u.FULL_NAME, u.ID,
                COUNT(o.ID) as total_orders,
@@ -164,10 +212,10 @@ def _get_employees_report(cur, start_date, end_date):
         FROM USERS u
         LEFT JOIN ORDERS o ON u.ID = o.ATTENDANT_ID 
         WHERE u.ROLE = 'attendant' 
-        AND (o.CREATED_AT IS NULL OR DATE(o.CREATED_AT) BETWEEN ? AND ?)
+        AND (o.CREATED_AT IS NULL OR (o.CREATED_AT >= ? AND o.CREATED_AT < ?))
         GROUP BY u.ID, u.FULL_NAME
         ORDER BY total_orders DESC
-    """, (start_date, end_date))  
+    """, (start_datetime, end_datetime))  
     employees_performance = []  
     for row in cur.fetchall():  
         employees_performance.append({  
@@ -284,7 +332,9 @@ def generate_orders_pdf_report(filters=None):
     from .order_service import get_orders_with_filters
     
     # Busca pedidos com filtros
-    orders = get_orders_with_filters(filters or {})
+    orders_result = get_orders_with_filters(filters or {})
+    # OTIMIZAÇÃO: get_orders_with_filters agora retorna dict com items e pagination
+    orders = orders_result.get('items', []) if isinstance(orders_result, dict) else orders_result
     
     # Calcula resumo
     total_orders = len(orders)

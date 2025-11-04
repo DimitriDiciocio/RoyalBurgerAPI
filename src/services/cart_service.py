@@ -315,39 +315,70 @@ def get_cart_summary(user_id):
 
 def _check_availability_alerts(items):
     """Verifica alertas de disponibilidade de forma centralizada"""
+    if not items:
+        return []
+    
     availability_alerts = []
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # OTIMIZAÇÃO: Coletar todos os product_ids e ingredient_ids de uma vez
+        product_ids = [item["product_id"] for item in items]
+        extra_ingredient_ids = set()
         for item in items:
-            # Disponibilidade de ingredientes base do produto
-            cur.execute(
-                """
-                SELECT i.ID, i.IS_AVAILABLE
+            for extra in item.get("extras", []):
+                extra_ingredient_ids.add(extra["ingredient_id"])
+        
+        # OTIMIZAÇÃO: Query única para ingredientes base de todos os produtos
+        base_availability = {}
+        if product_ids:
+            placeholders = ', '.join(['?' for _ in product_ids])
+            base_query = f"""
+                SELECT pi.PRODUCT_ID, i.ID, i.IS_AVAILABLE
                 FROM PRODUCT_INGREDIENTS pi
-                JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
-                WHERE pi.PRODUCT_ID = ?
-                """,
-                (item["product_id"],)
-            )
-            for ing_id, is_av in cur.fetchall():
-                if not is_av:
+                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                WHERE pi.PRODUCT_ID IN ({placeholders})
+            """
+            cur.execute(base_query, tuple(product_ids))
+            for row in cur.fetchall():
+                product_id, ing_id, is_av = row
+                base_availability[(product_id, ing_id)] = is_av
+        
+        # OTIMIZAÇÃO: Query única para extras
+        extra_availability = {}
+        if extra_ingredient_ids:
+            placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+            extra_query = f"""
+                SELECT ID, IS_AVAILABLE
+                FROM INGREDIENTS
+                WHERE ID IN ({placeholders})
+            """
+            cur.execute(extra_query, tuple(extra_ingredient_ids))
+            for row in cur.fetchall():
+                extra_availability[row[0]] = row[1]
+        
+        # OTIMIZAÇÃO: Processar resultados em memória
+        for item in items:
+            product_id = item["product_id"]
+            
+            # Verificar ingredientes base do produto
+            for (prod_id, ing_id), is_av in base_availability.items():
+                if prod_id == product_id and not is_av:
                     availability_alerts.append({
-                        "product_id": item["product_id"],
+                        "product_id": product_id,
                         "ingredient_id": ing_id,
                         "issue": "ingredient_unavailable"
                     })
             
-            # Disponibilidade de extras
+            # Verificar extras
             for extra in item.get("extras", []):
-                cur.execute("SELECT IS_AVAILABLE FROM INGREDIENTS WHERE ID = ?", (extra["ingredient_id"],))
-                row = cur.fetchone()
-                if row and row[0] is False:
+                ing_id = extra["ingredient_id"]
+                if not extra_availability.get(ing_id, True):
                     availability_alerts.append({
-                        "product_id": item["product_id"],
-                        "ingredient_id": extra["ingredient_id"],
+                        "product_id": product_id,
+                        "ingredient_id": ing_id,
                         "issue": "extra_unavailable"
                     })
     except Exception as e:
@@ -1563,46 +1594,8 @@ def get_cart_summary_by_cart_id(cart_id):
     if items is None:
         return None
 
-    # Validação básica de disponibilidade (produto e extras disponíveis)
-    availability_alerts = []
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        for item in items:
-            # Disponibilidade de ingredientes base do produto
-            cur.execute(
-                """
-                SELECT i.ID, i.IS_AVAILABLE
-                FROM PRODUCT_INGREDIENTS pi
-                JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
-                WHERE pi.PRODUCT_ID = ?
-                """,
-                (item["product_id"],)
-            )
-            for ing_id, is_av in cur.fetchall():
-                if not is_av:
-                    availability_alerts.append({
-                        "product_id": item["product_id"],
-                        "ingredient_id": ing_id,
-                        "issue": "ingredient_unavailable"
-                    })
-            # Disponibilidade de extras
-            for extra in item.get("extras", []):
-                cur.execute("SELECT IS_AVAILABLE FROM INGREDIENTS WHERE ID = ?", (extra["ingredient_id"],))
-                row = cur.fetchone()
-                if row and row[0] is False:
-                    availability_alerts.append({
-                        "product_id": item["product_id"],
-                        "ingredient_id": extra["ingredient_id"],
-                        "issue": "extra_unavailable"
-                    })
-    except Exception:
-        pass
-    finally:
-        try:
-            if conn: conn.close()
-        except Exception:
-            pass
+    # OTIMIZAÇÃO: Usar função otimizada de disponibilidade (seção 1.7)
+    availability_alerts = _check_availability_alerts(items)
 
     # Calcula totais
     total_items = sum(item["quantity"] for item in items)
