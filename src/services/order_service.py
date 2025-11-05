@@ -2,8 +2,9 @@ import fdb
 import random
 import string
 import logging
+from datetime import datetime, date, timedelta
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service, table_service
 from .printing_service import print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
 from ..config import Config
@@ -15,7 +16,11 @@ logger = logging.getLogger(__name__)
 # Constantes para tipos de pedido
 ORDER_TYPE_DELIVERY = 'delivery'
 ORDER_TYPE_PICKUP = 'pickup'
-VALID_ORDER_TYPES = [ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP]
+ORDER_TYPE_ON_SITE = 'on_site'  # Pedido presencial no restaurante
+VALID_ORDER_TYPES = [ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP, ORDER_TYPE_ON_SITE]
+
+# Constantes para status de pedido
+ORDER_STATUS_ACTIVE_TABLE = 'active_table'  # Mesa ativa para pedido on-site
 
 def _validate_order_type(order_type):
     """Valida order_type"""
@@ -653,7 +658,7 @@ def update_order_status(order_id, new_status):
     # para adicionar 'ready' à constraint. Se não executar, pedidos pickup usarão 'in_progress' temporariamente.
     # Mapeamos 'completed' do frontend para 'delivered' do banco
     # Para pedidos pickup: 'on_the_way' é mapeado para 'ready' (pronto para retirada)
-    
+
     conn = None
     current_status = None
     try:
@@ -802,8 +807,8 @@ def update_order_status(order_id, new_status):
             notification_message = f"Seu pedido #{order_id} está pronto para retirada no balcão!"
         else:
             notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
-        notification_link = f"/my-orders/{order_id}"
-        notification_service.create_notification(user_id, notification_message, notification_link)
+            notification_link = f"/my-orders/{order_id}"
+            notification_service.create_notification(user_id, notification_message, notification_link)
         
         # Envia email de notificação
         customer = user_service.get_user_by_id(user_id)
@@ -860,7 +865,7 @@ def get_order_details(order_id, user_id, user_role):
         order_row = cur.fetchone()
 
         if not order_row:
-            return None
+            return None 
 
         # Calcula amount_paid quando há troco (amount_paid = total + change)
         total = float(order_row[7]) if order_row[7] is not None else 0.0
@@ -880,7 +885,7 @@ def get_order_details(order_id, user_id, user_role):
         # Verificação de segurança: cliente só pode ver seus próprios pedidos
         if user_role == 'customer' and order_details['user_id'] != user_id:
             return None 
-        
+
         # CORREÇÃO: Evitar query N+1 - buscar todos os extras de uma vez
         # Primeiro busca todos os itens
         sql_items = """
@@ -939,7 +944,7 @@ def get_order_details(order_id, user_id, user_role):
                 "base_modifications": extras_dict.get(order_item_id, {}).get('base_modifications', [])
             }
             order_items.append(item_dict)
-
+        
         order_details['items'] = order_items
         
         # Adiciona tempo estimado de entrega baseado nos prazos configurados
@@ -999,7 +1004,7 @@ def cancel_order(order_id, user_id, is_manager=False):
             # Cliente: apenas o dono pode cancelar
             if owner_id != user_id:
                 return (False, "Você não tem permissão para cancelar este pedido.")
-            
+
             # Cliente: apenas pedidos pendentes podem ser cancelados
             if status != 'pending':
                 return (False, f"Não é possível cancelar um pedido que já está com o status '{status}'. Apenas pedidos pendentes podem ser cancelados.")
@@ -1041,7 +1046,7 @@ def cancel_order(order_id, user_id, is_manager=False):
                 email_service.send_email(
                     to=customer['email'],
                     subject=f"Seu pedido #{order_id} foi cancelado",
-                    template='order_status_update',
+                    template='order_status_update', 
                     user=customer,
                     order={"order_id": order_id},
                     new_status='cancelled'
@@ -1110,9 +1115,9 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if order_type == ORDER_TYPE_DELIVERY:
             if not address_id:
                 return (None, "INVALID_ADDRESS", "address_id é obrigatório para pedidos de entrega")
-            cur.execute("SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;", (address_id, user_id))
-            if not cur.fetchone():
-                return (None, "INVALID_ADDRESS", "Endereço não encontrado ou não pertence ao usuário.")
+        cur.execute("SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;", (address_id, user_id))
+        if not cur.fetchone():
+            return (None, "INVALID_ADDRESS", "Endereço não encontrado ou não pertence ao usuário.")
         
         # Gera código de confirmação
         confirmation_code = _generate_confirmation_code()
@@ -1360,9 +1365,8 @@ def get_orders_with_filters(filters=None):
                 # Se for date, converte para datetime (início do dia)
                 start_date = filters['start_date']
                 if isinstance(start_date, str):
-                    from datetime import datetime as dt
                     try:
-                        start_date = dt.strptime(start_date, '%Y-%m-%d').date()
+                        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
                     except:
                         pass
                 if isinstance(start_date, date) and not isinstance(start_date, datetime):
@@ -1374,9 +1378,8 @@ def get_orders_with_filters(filters=None):
                 # Se for date, converte para datetime (fim do dia)
                 end_date = filters['end_date']
                 if isinstance(end_date, str):
-                    from datetime import datetime as dt
                     try:
-                        end_date = dt.strptime(end_date, '%Y-%m-%d').date()
+                        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
                     except:
                         pass
                 if isinstance(end_date, date) and not isinstance(end_date, datetime):

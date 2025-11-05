@@ -886,7 +886,7 @@ def find_identical_cart_item(cart_id, product_id, extras, notes, base_modificati
         sql = "SELECT ID, CAST(NOTES AS VARCHAR(1000)) FROM CART_ITEMS WHERE CART_ID = ? AND PRODUCT_ID = ?;"
         cur.execute(sql, (cart_id, product_id))
         items = cur.fetchall()
-
+        
         for item_id, existing_notes in items:
             # Busca todas as linhas (extras e base) e normaliza
             cur.execute(
@@ -921,7 +921,7 @@ def find_identical_cart_item(cart_id, product_id, extras, notes, base_modificati
             base_match = (existing_base == wanted_base)
 
             if extras_match and base_match and (existing_notes or "") == (notes or ""):
-                return item_id
+                    return item_id
         
         return None
         
@@ -1124,7 +1124,7 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
                     "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
                     (cart_item_id, ing_id, delta, unit_price)
                 )
-
+        
         conn.commit()
         return (True, None, "Item atualizado com sucesso")
         
@@ -1158,7 +1158,7 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
         row = cur.fetchone()
         if not row:
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no carrinho informado")
-        
+
         current_product_id = row[1]
 
         # CORREÇÃO: Se quantidade está sendo atualizada, valida estoque para a nova quantidade
