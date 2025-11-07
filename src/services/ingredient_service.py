@@ -85,9 +85,12 @@ def create_ingredient(data):
         if conn: conn.close()  
 
 def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10):  
-    page = max(int(page or 1), 1)  
-    page_size = max(int(page_size or 10), 1)  
-    offset = (page - 1) * page_size  
+    # OTIMIZAÇÃO: Usar validador centralizado de paginação
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
+    except ValueError:
+        page, page_size, offset = 1, 10, 0  
     conn = None  
     try:  
         conn = get_db_connection()  

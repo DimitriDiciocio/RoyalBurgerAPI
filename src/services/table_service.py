@@ -360,3 +360,110 @@ def is_table_available(table_id):
         if conn:
             conn.close()
 
+
+def transfer_order_to_table(order_id, new_table_id):
+    """
+    Transfere um pedido de uma mesa para outra.
+    Libera a mesa antiga e ocupa a nova mesa.
+    
+    Args:
+        order_id: ID do pedido a ser transferido
+        new_table_id: ID da nova mesa
+    
+    Returns:
+        Tupla (success, error_code, message)
+        - success: True se transferido com sucesso, False caso contrário
+        - error_code: Código do erro (None se sucesso)
+        - message: Mensagem descritiva
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Verificar se o pedido existe e está associado a uma mesa
+        cur.execute("""
+            SELECT TABLE_ID, STATUS 
+            FROM ORDERS 
+            WHERE ID = ?
+        """, (order_id,))
+        order_row = cur.fetchone()
+        
+        if not order_row:
+            return (False, "ORDER_NOT_FOUND", "Pedido não encontrado")
+        
+        old_table_id = order_row[0]
+        order_status = order_row[1]
+        
+        # Verificar se o pedido já está associado a uma mesa
+        if not old_table_id:
+            return (False, "ORDER_NOT_ON_TABLE", "Pedido não está associado a nenhuma mesa")
+        
+        # 2. Verificar se a nova mesa existe
+        cur.execute("SELECT ID, STATUS, CURRENT_ORDER_ID FROM RESTAURANT_TABLES WHERE ID = ?", (new_table_id,))
+        new_table_row = cur.fetchone()
+        
+        if not new_table_row:
+            return (False, "NEW_TABLE_NOT_FOUND", "Nova mesa não encontrada")
+        
+        new_table_status = new_table_row[1]
+        new_table_current_order = new_table_row[2]
+        
+        # 3. Verificar se a nova mesa está disponível
+        if new_table_status != TABLE_STATUS_AVAILABLE:
+            return (False, "NEW_TABLE_NOT_AVAILABLE", f"Nova mesa não está disponível (status: {new_table_status})")
+        
+        # Verificar se a nova mesa não tem pedido associado
+        if new_table_current_order is not None:
+            return (False, "NEW_TABLE_OCCUPIED", "Nova mesa já possui um pedido associado")
+        
+        # 4. Verificar se a mesa antiga existe e está ocupada com este pedido
+        cur.execute("SELECT ID, STATUS, CURRENT_ORDER_ID FROM RESTAURANT_TABLES WHERE ID = ?", (old_table_id,))
+        old_table_row = cur.fetchone()
+        
+        if not old_table_row:
+            return (False, "OLD_TABLE_NOT_FOUND", "Mesa antiga não encontrada")
+        
+        old_table_current_order = old_table_row[2]
+        
+        # Verificar se a mesa antiga realmente está associada a este pedido
+        if old_table_current_order != order_id:
+            logger.warning(f"Mesa antiga {old_table_id} não está associada ao pedido {order_id}. Pedido pode estar inconsistente.")
+            # Continuar mesmo assim, mas logar o aviso
+        
+        # 5. Executar a transferência em uma transação
+        # 5.1. Atualizar o pedido para apontar para a nova mesa
+        cur.execute("""
+            UPDATE ORDERS 
+            SET TABLE_ID = ?, UPDATED_AT = CURRENT_TIMESTAMP
+            WHERE ID = ?
+        """, (new_table_id, order_id))
+        
+        # 5.2. Liberar a mesa antiga
+        cur.execute("""
+            UPDATE RESTAURANT_TABLES
+            SET STATUS = ?, CURRENT_ORDER_ID = NULL, UPDATED_AT = CURRENT_TIMESTAMP
+            WHERE ID = ?
+        """, (TABLE_STATUS_AVAILABLE, old_table_id))
+        
+        # 5.3. Ocupar a nova mesa
+        cur.execute("""
+            UPDATE RESTAURANT_TABLES
+            SET STATUS = ?, CURRENT_ORDER_ID = ?, UPDATED_AT = CURRENT_TIMESTAMP
+            WHERE ID = ?
+        """, (TABLE_STATUS_OCCUPIED, order_id, new_table_id))
+        
+        conn.commit()
+        
+        logger.info(f"Pedido {order_id} transferido da mesa {old_table_id} para mesa {new_table_id}")
+        
+        return (True, None, f"Pedido transferido com sucesso da mesa {old_table_id} para mesa {new_table_id}")
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao transferir pedido de mesa: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor ao transferir pedido")
+    finally:
+        if conn:
+            conn.close()

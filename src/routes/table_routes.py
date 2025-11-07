@@ -99,4 +99,52 @@ def delete_table_route(table_id):
     return jsonify({"error": "Mesa não encontrada, está ocupada ou falha ao excluir"}), 404
 
 
+@table_bp.route('/transfer-order', methods=['POST'])
+@require_role('admin', 'manager', 'attendant')
+def transfer_order_to_table_route():
+    """
+    Transfere um pedido de uma mesa para outra.
+    Libera a mesa antiga e ocupa a nova mesa.
+    """
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+    except Exception:
+        return jsonify({"error": "Erro ao processar JSON"}), 400
+
+    order_id = data.get('order_id')
+    new_table_id = data.get('new_table_id')
+
+    if not order_id:
+        return jsonify({"error": "Campo 'order_id' é obrigatório"}), 400
+    
+    if not new_table_id:
+        return jsonify({"error": "Campo 'new_table_id' é obrigatório"}), 400
+
+    try:
+        order_id = int(order_id)
+        new_table_id = int(new_table_id)
+    except (ValueError, TypeError):
+        return jsonify({"error": "order_id e new_table_id devem ser números inteiros"}), 400
+
+    success, error_code, message = table_service.transfer_order_to_table(order_id, new_table_id)
+    
+    if success:
+        return jsonify({"msg": message}), 200
+    
+    if error_code == "ORDER_NOT_FOUND":
+        return jsonify({"error": message}), 404
+    if error_code == "ORDER_NOT_ON_TABLE":
+        return jsonify({"error": message}), 400
+    if error_code in ["NEW_TABLE_NOT_FOUND", "OLD_TABLE_NOT_FOUND"]:
+        return jsonify({"error": message}), 404
+    if error_code in ["NEW_TABLE_NOT_AVAILABLE", "NEW_TABLE_OCCUPIED"]:
+        return jsonify({"error": message}), 409
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    
+    return jsonify({"error": message or "Falha ao transferir pedido"}), 500
+
+
 

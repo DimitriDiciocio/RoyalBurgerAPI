@@ -1,7 +1,10 @@
 import fdb
+import logging
 from datetime import datetime, date, timedelta
 from ..database import get_db_connection
 from .pdf_report_service import generate_pdf_report
+
+logger = logging.getLogger(__name__)
 
 def get_reports(report_type, period):
     conn = None
@@ -28,7 +31,7 @@ def get_reports(report_type, period):
         else:
             return {"error": "Tipo de relatório inválido"}
     except fdb.Error as e:
-        print(f"Erro ao gerar relatório: {e}")
+        logger.error(f"Erro ao gerar relatório: {e}", exc_info=True)
         return {"error": "Erro interno do servidor"}
     finally:
         if conn: conn.close()

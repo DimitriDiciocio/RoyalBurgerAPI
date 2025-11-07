@@ -486,17 +486,29 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
         logger.error(f"Erro inesperado ao processar pedido: {type(e).__name__}: {e}", exc_info=Config.DEBUG)
         return (None, "UNKNOWN_ERROR", "Erro inesperado ao processar pedido")
 
-def get_orders_by_user_id(user_id):
+def get_orders_by_user_id(user_id, page=1, page_size=50):
     """Busca o histórico de pedidos de um usuário específico com otimizações.
-    Inclui total_amount e items básicos na mesma query para evitar N+1 queries."""
+    Inclui total_amount e items básicos na mesma query para evitar N+1 queries.
+    Suporta paginação opcional."""
+    # OTIMIZAÇÃO: Usar validador centralizado de paginação
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
+    except ValueError:
+        page, page_size, offset = 1, 50, 0
+    
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # Contar total de pedidos do usuário
+        cur.execute("SELECT COUNT(*) FROM ORDERS WHERE USER_ID = ?", (user_id,))
+        total = cur.fetchone()[0] or 0
+        
         # Query otimizada que inclui total_amount e agrega items básicos
-        sql = """
-            SELECT 
+        sql = f"""
+            SELECT FIRST {page_size} SKIP {offset}
                 o.ID, 
                 o.STATUS, 
                 o.CONFIRMATION_CODE, 
@@ -508,13 +520,22 @@ def get_orders_by_user_id(user_id):
             FROM ORDERS o
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
             WHERE o.USER_ID = ?
-            ORDER BY o.CREATED_AT DESC;
+            ORDER BY o.CREATED_AT DESC
         """
         cur.execute(sql, (user_id,))
         order_rows = cur.fetchall()
         
         if not order_rows:
-            return []
+            total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+            return {
+                "items": [],
+                "pagination": {
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages
+                }
+            }
         
         # Busca todos os items de todos os pedidos de uma vez (evita N+1)
         order_ids = [row[0] for row in order_rows]
@@ -574,10 +595,28 @@ def get_orders_by_user_id(user_id):
             
             orders.append(order_data)
         
-        return orders
+        # Retornar com metadados de paginação
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+        return {
+            "items": orders,
+            "pagination": {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages
+            }
+        }
     except fdb.Error as e:
         logger.error(f"Erro ao buscar pedidos do usuário {user_id}: {e}", exc_info=True)
-        return []
+        return {
+            "items": [],
+            "pagination": {
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0
+            }
+        }
     finally:
         if conn:
             conn.close()

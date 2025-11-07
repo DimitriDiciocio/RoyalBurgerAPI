@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, send_from_directory
+from flask import Blueprint, request, jsonify, send_from_directory, send_file, Response
 import os
 from ..services import product_service  
 from ..services.auth_service import require_role
@@ -476,17 +476,37 @@ def get_product_image_route(product_id):
         if not os.path.exists(file_path):
             return jsonify({"error": "Arquivo de imagem não encontrado"}), 404
         
-        # Serve o arquivo com headers de segurança
-        response = send_from_directory(upload_dir, filename, mimetype='image/jpeg')
-        # Cache mais curto para evitar problemas com imagens atualizadas
-        response.headers['Cache-Control'] = 'public, max-age=300'  # Cache por 5 minutos
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        # Adiciona ETag baseado na data de modificação do arquivo para cache mais inteligente
-        import time
-        file_mtime = os.path.getmtime(file_path)
-        response.headers['ETag'] = f'"{int(file_mtime)}"'
-        # Adiciona timestamp para cache busting
-        response.headers['Last-Modified'] = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(file_mtime))
+        # Abordagem simplificada: ler arquivo em binário e retornar diretamente
+        # Isso evita problemas com chunked encoding ou stream
+        with open(file_path, 'rb') as f:
+            image_data = f.read()
+        
+        file_size = len(image_data)
+        
+        # Criar resposta direta sem chunked encoding
+        response = Response(
+            image_data,
+            mimetype='image/jpeg',
+            headers={
+                'Content-Type': 'image/jpeg',
+                'Content-Length': str(file_size),
+                'Accept-Ranges': 'bytes',
+                'X-Content-Type-Options': 'nosniff',
+                'Cache-Control': 'public, max-age=3600',
+            }
+        )
+        
+        # Headers CORS
+        origin = request.headers.get('Origin')
+        if origin:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        else:
+            response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Cross-Origin-Resource-Policy', 'cross-origin')
+        
         return response
         
     except Exception as e:

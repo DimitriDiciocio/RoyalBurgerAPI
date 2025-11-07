@@ -1,12 +1,15 @@
 import fdb  
 import bcrypt  
+import logging
 from datetime import datetime, timedelta  
 from . import email_service
 from . import loyalty_service
 from ..database import get_db_connection  
 from . import auth_service
 from ..utils import token_helper  
-from ..utils import validators  
+from ..utils import validators
+
+logger = logging.getLogger(__name__)  
 
 def convert_date_format(date_string):
     """
@@ -758,6 +761,13 @@ def is_last_active_admin(user_id):
 
 def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', sort_order='asc'):
     """Busca usuários com paginação, filtros e ordenação."""
+    # OTIMIZAÇÃO: Usar validador centralizado de paginação
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, per_page, offset = validate_pagination_params(page, per_page, max_page_size=100)
+    except ValueError:
+        page, per_page, offset = 1, 20, 0
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -883,13 +893,20 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar usuários paginados: {e}")
+        logger.error(f"Erro ao buscar usuários paginados: {e}", exc_info=True)
         return {"users": [], "pagination": {"page": page, "per_page": per_page, "total": 0, "pages": 0}}
     finally:
         if conn: conn.close()
 
 def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_name', sort_order='asc'):
     """Busca clientes com paginação, filtros e ordenação."""
+    # OTIMIZAÇÃO: Usar validador centralizado de paginação
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, per_page, offset = validate_pagination_params(page, per_page, max_page_size=100)
+    except ValueError:
+        page, per_page, offset = 1, 20, 0
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -943,8 +960,7 @@ def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_nam
         cur.execute(count_sql, params)
         total = cur.fetchone()[0]
         
-        # Paginação
-        offset = (page - 1) * per_page
+        # Paginação (offset já calculado pelo validate_pagination_params)
         base_sql += f" ROWS {offset + 1} TO {offset + per_page}"
         
         cur.execute(base_sql, params)
@@ -975,7 +991,7 @@ def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_nam
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar clientes paginados: {e}")
+        logger.error(f"Erro ao buscar clientes paginados: {e}", exc_info=True)
         return {"customers": [], "pagination": {"page": page, "per_page": per_page, "total": 0, "pages": 0}}
     finally:
         if conn: conn.close()

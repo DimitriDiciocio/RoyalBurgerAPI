@@ -34,9 +34,12 @@ def create_category(category_data):
 
 
 def list_categories(name_filter=None, page=1, page_size=10):
-    page = max(int(page or 1), 1)
-    page_size = max(int(page_size or 10), 1)
-    offset = (page - 1) * page_size
+    # OTIMIZAÇÃO: Usar validador centralizado de paginação
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
+    except ValueError:
+        page, page_size, offset = 1, 10, 0
 
     conn = None
     try:
@@ -345,6 +348,91 @@ def move_category_to_position(category_id, new_position):
         if conn: conn.rollback()
         print(f"Erro ao mover categoria: {e}")
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn: conn.close()
+
+
+def get_categories_with_products(include_inactive=False):
+    """
+    Retorna todas as categorias ativas com seus produtos já incluídos.
+    Útil para a tela inicial do mobile que precisa mostrar todas as categorias e produtos.
+    Retorna (resultado, error_code, mensagem)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Busca todas as categorias ativas ordenadas
+        cur.execute(
+            "SELECT ID, NAME, DISPLAY_ORDER FROM CATEGORIES WHERE IS_ACTIVE = TRUE ORDER BY DISPLAY_ORDER, NAME;"
+        )
+        category_rows = cur.fetchall()
+        
+        if not category_rows:
+            return ([], None, None)
+        
+        # Coleta todos os IDs de categorias
+        category_ids = [row[0] for row in category_rows]
+        placeholders = ','.join(['?' for _ in category_ids])
+        
+        # Busca todos os produtos ativos das categorias de uma vez
+        where_clause = f"CATEGORY_ID IN ({placeholders})"
+        if not include_inactive:
+            where_clause += " AND IS_ACTIVE = TRUE"
+        
+        cur.execute(f"""
+            SELECT 
+                ID, NAME, DESCRIPTION, PRICE, COST_PRICE, 
+                PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE
+            FROM PRODUCTS 
+            WHERE {where_clause}
+            ORDER BY CATEGORY_ID, NAME
+        """, category_ids)
+        
+        product_rows = cur.fetchall()
+        
+        # Organiza produtos por categoria
+        products_by_category = {}
+        for row in product_rows:
+            category_id = row[6]  # CATEGORY_ID
+            if category_id not in products_by_category:
+                products_by_category[category_id] = []
+            
+            product = {
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "price": str(row[3]),
+                "cost_price": str(row[4]) if row[4] else "0.00",
+                "preparation_time_minutes": row[5] if row[5] else 0,
+                "category_id": category_id,
+                "is_active": row[8] if len(row) > 8 else True
+            }
+            
+            # Adiciona URL da imagem se existir
+            if row[7]:  # IMAGE_URL
+                product["image_url"] = row[7]
+            
+            products_by_category[category_id].append(product)
+        
+        # Monta o resultado final com categorias e seus produtos
+        result = []
+        for cat_row in category_rows:
+            category_id = cat_row[0]
+            category = {
+                "id": category_id,
+                "name": cat_row[1],
+                "display_order": cat_row[2],
+                "products": products_by_category.get(category_id, [])
+            }
+            result.append(category)
+        
+        return (result, None, None)
+        
+    except fdb.Error as e:
+        print(f"Erro ao buscar categorias com produtos: {e}")
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
 

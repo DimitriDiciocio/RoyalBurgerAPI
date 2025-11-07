@@ -150,9 +150,20 @@ def calculate_order_total_route():
 @require_role('customer')  
 def get_my_orders_route():  
     claims = get_jwt()  
-    user_id = int(claims.get('sub'))  
-    orders = order_service.get_orders_by_user_id(user_id)  
-    return jsonify(orders), 200  
+    user_id = int(claims.get('sub'))
+    
+    # OTIMIZAÇÃO: Suportar parâmetros de paginação
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 50, type=int)
+    
+    result = order_service.get_orders_by_user_id(user_id, page=page, page_size=page_size)
+    
+    # Compatibilidade: Se retornar lista (formato antigo), manter compatibilidade
+    if isinstance(result, list):
+        return jsonify(result), 200
+    
+    # Novo formato com paginação
+    return jsonify(result), 200  
 
 @order_bp.route('/all', methods=['GET'])  
 @require_role('admin', 'manager')  

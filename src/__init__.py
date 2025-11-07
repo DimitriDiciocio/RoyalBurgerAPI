@@ -19,7 +19,16 @@ def create_app():
     
     # Configuração para permitir multipart/form-data
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB  
-    CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500", "http://127.0.0.1:5000"]}}, supports_credentials=True, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization', 'Content-Disposition'])  
+    # CORS: Permitir origens para web (localhost) e mobile (IPs locais)
+    # Em produção, especificar origens exatas
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": ["*"],  # Permitir todas as origens (ajustar em produção)
+            "methods": ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+            "allow_headers": ['Content-Type', 'Authorization', 'Content-Disposition'],
+            "supports_credentials": True
+        }
+    })  
     jwt = JWTManager(app)  
     app.config["JWT_BLOCKLIST_ENABLED"] = True  
     app.config["JWT_BLOCKLIST_TOKEN_CHECKS"] = ["access", "refresh"]  
@@ -192,18 +201,38 @@ def create_app():
             else:
                 abort(400)
             
-            # Serve o arquivo com headers de segurança
-            response = send_from_directory(upload_dir, filename, mimetype=mimetype)
-            # Cache mais curto para evitar problemas com imagens atualizadas
-            response.headers['Cache-Control'] = 'public, max-age=300'  # Cache por 5 minutos
-            response.headers['X-Content-Type-Options'] = 'nosniff'
-            response.headers['X-Frame-Options'] = 'DENY'
-            # Adiciona ETag baseado na data de modificação do arquivo para cache mais inteligente
-            import time
-            file_mtime = os.path.getmtime(file_path)
-            response.headers['ETag'] = f'"{int(file_mtime)}"'
-            # Adiciona timestamp para cache busting
-            response.headers['Last-Modified'] = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(file_mtime))
+            # Abordagem simplificada: ler arquivo em binário e retornar diretamente
+            # Isso evita problemas com chunked encoding ou stream
+            with open(file_path, 'rb') as f:
+                image_data = f.read()
+            
+            file_size = len(image_data)
+            
+            # Criar resposta direta sem chunked encoding
+            from flask import Response
+            response = Response(
+                image_data,
+                mimetype=mimetype,
+                headers={
+                    'Content-Type': mimetype,
+                    'Content-Length': str(file_size),
+                    'Accept-Ranges': 'bytes',
+                    'X-Content-Type-Options': 'nosniff',
+                    'Cache-Control': 'public, max-age=3600',
+                }
+            )
+            
+            # Headers CORS
+            origin = request.headers.get('Origin')
+            if origin:
+                response.headers.add('Access-Control-Allow-Origin', origin)
+            else:
+                response.headers.add('Access-Control-Allow-Origin', '*')
+            response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            response.headers.add('Cross-Origin-Resource-Policy', 'cross-origin')
+            
             return response
             
         except Exception as e:

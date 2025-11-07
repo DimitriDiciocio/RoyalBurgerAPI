@@ -1,6 +1,9 @@
 import fdb  
+import logging
 from datetime import datetime, date, timedelta
-from ..database import get_db_connection  
+from ..database import get_db_connection
+
+logger = logging.getLogger(__name__)  
 
 def get_dashboard_metrics():  
     conn = None  
@@ -95,7 +98,7 @@ def get_dashboard_metrics():
             "recent_orders": recent_orders
         }
     except fdb.Error as e:  
-        print(f"Erro ao buscar métricas do dashboard: {e}")  
+        logger.error(f"Erro ao buscar métricas do dashboard: {e}", exc_info=True)  
         return {  
             "total_orders_today": 0,
             "revenue_today": 0.0,

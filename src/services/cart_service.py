@@ -105,9 +105,41 @@ def get_cart_items(cart_id):
             ORDER BY ci.CREATED_AT;
         """
         cur.execute(sql, (cart_id,))
-        items = []
+        item_rows = cur.fetchall()
         
-        for row in cur.fetchall():
+        if not item_rows:
+            return []
+        
+        # OTIMIZAÇÃO: Buscar todos os extras de uma vez (evita N+1 queries)
+        item_ids = [row[0] for row in item_rows]
+        placeholders = ', '.join(['?' for _ in item_ids])
+        extras_sql = f"""
+            SELECT 
+                cie.CART_ITEM_ID,
+                cie.ID,
+                cie.INGREDIENT_ID,
+                COALESCE(cie.DELTA, cie.QUANTITY) as DELTA,
+                COALESCE(cie.UNIT_PRICE, COALESCE(i.ADDITIONAL_PRICE, i.PRICE)) as UNIT_PRICE,
+                cie.TYPE,
+                i.NAME as INGREDIENT_NAME
+            FROM CART_ITEM_EXTRAS cie
+            JOIN INGREDIENTS i ON cie.INGREDIENT_ID = i.ID
+            WHERE cie.CART_ITEM_ID IN ({placeholders})
+            ORDER BY cie.CART_ITEM_ID, cie.TYPE, i.NAME;
+        """
+        cur.execute(extras_sql, tuple(item_ids))
+        extras_rows = cur.fetchall()
+        
+        # Agrupar extras por cart_item_id
+        extras_by_item = {}
+        for extra_row in extras_rows:
+            cart_item_id = extra_row[0]
+            if cart_item_id not in extras_by_item:
+                extras_by_item[cart_item_id] = []
+            extras_by_item[cart_item_id].append(extra_row)
+        
+        items = []
+        for row in item_rows:
             item_id = row[0]
             product_id = row[1]
             quantity = row[2]
@@ -117,33 +149,20 @@ def get_cart_items(cart_id):
             product_description = row[6]
             product_image_url = row[7]
             
-            # Busca extras do item
-            extras_sql = """
-                SELECT 
-                    cie.ID,
-                    cie.INGREDIENT_ID,
-                    COALESCE(cie.DELTA, cie.QUANTITY) as DELTA,
-                    COALESCE(cie.UNIT_PRICE, COALESCE(i.ADDITIONAL_PRICE, i.PRICE)) as UNIT_PRICE,
-                    cie.TYPE,
-                    i.NAME as INGREDIENT_NAME
-                FROM CART_ITEM_EXTRAS cie
-                JOIN INGREDIENTS i ON cie.INGREDIENT_ID = i.ID
-                WHERE cie.CART_ITEM_ID = ?
-                ORDER BY cie.TYPE, i.NAME;
-            """
-            cur.execute(extras_sql, (item_id,))
+            # Processar extras do item (já buscados em batch)
             extras = []
             extras_total = 0.0
             base_modifications = []
             base_mods_total = 0.0
             
-            for extra_row in cur.fetchall():
-                row_id = extra_row[0]
-                ingredient_id = extra_row[1]
-                delta = int(extra_row[2] or 0)
-                unit_price = float(extra_row[3] or 0.0)
-                row_type = (extra_row[4] or 'extra').lower()
-                ingredient_name = extra_row[5]
+            for extra_row in extras_by_item.get(item_id, []):
+                # extra_row: [CART_ITEM_ID, ID, INGREDIENT_ID, DELTA, UNIT_PRICE, TYPE, INGREDIENT_NAME]
+                row_id = extra_row[1]
+                ingredient_id = extra_row[2]
+                delta = int(extra_row[3] or 0)
+                unit_price = float(extra_row[4] or 0.0)
+                row_type = (extra_row[5] or 'extra').lower()
+                ingredient_name = extra_row[6]
 
                 if row_type == 'extra':
                     extras.append({

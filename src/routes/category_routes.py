@@ -172,3 +172,24 @@ def get_categories_for_select_route():
     return jsonify({"error": "Falha ao buscar categorias"}), 500
 
 
+@category_bp.route('/with-products', methods=['GET'])
+def get_categories_with_products_route():
+    """
+    Retorna todas as categorias ativas com seus produtos já incluídos.
+    Útil para a tela inicial do mobile.
+    Query params:
+    - include_inactive: boolean (default: false) - Inclui produtos inativos
+    """
+    include_inactive = request.args.get('include_inactive', type=bool, default=False)
+    
+    result, error_code, message = category_service.get_categories_with_products(include_inactive=include_inactive)
+    
+    if result is not None:
+        return jsonify({"categories": result}), 200
+    
+    if error_code == "DATABASE_ERROR":
+        return jsonify({"error": message}), 500
+    
+    return jsonify({"error": "Falha ao buscar categorias com produtos"}), 500
+
+
