@@ -1,5 +1,28 @@
 import fdb
 from ..database import get_db_connection
+from datetime import datetime
+
+# OTIMIZAÇÃO DE PERFORMANCE: Cache em memória para listas de categorias
+_category_list_cache = {}
+_category_list_cache_timestamp = {}
+_category_list_cache_ttl = 600  # 10 minutos de TTL (categorias mudam menos frequentemente)
+
+def _invalidate_category_cache():
+    """Invalida cache de categorias forçando refresh na próxima chamada"""
+    global _category_list_cache, _category_list_cache_timestamp
+    _category_list_cache = {}
+    _category_list_cache_timestamp = {}
+
+def _get_category_cache_key(name_filter, page, page_size):
+    """Gera chave única para o cache baseada nos parâmetros"""
+    return f"{name_filter or ''}_{page}_{page_size}"
+
+def _is_category_cache_valid(cache_key):
+    """Verifica se o cache ainda é válido"""
+    if cache_key not in _category_list_cache_timestamp:
+        return False
+    elapsed = (datetime.now() - _category_list_cache_timestamp[cache_key]).total_seconds()
+    return elapsed < _category_list_cache_ttl
 
 
 def create_category(category_data):
@@ -23,6 +46,9 @@ def create_category(category_data):
         cur.execute("INSERT INTO CATEGORIES (NAME, DISPLAY_ORDER) VALUES (?, ?) RETURNING ID;", (name, next_order))
         new_id = cur.fetchone()[0]
         conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após criar categoria
+        _invalidate_category_cache()
 
         return ({"id": new_id, "name": name, "is_active": True, "display_order": next_order}, None, None)
     except fdb.Error as e:
@@ -34,12 +60,24 @@ def create_category(category_data):
 
 
 def list_categories(name_filter=None, page=1, page_size=10):
+    """
+    Lista categorias com cache em memória para melhor performance.
+    Cache TTL: 10 minutos. Invalidado automaticamente quando categorias são modificadas.
+    """
     # OTIMIZAÇÃO: Usar validador centralizado de paginação
     from ..utils.validators import validate_pagination_params
     try:
         page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
     except ValueError:
         page, page_size, offset = 1, 10, 0
+
+    # OTIMIZAÇÃO: Verifica cache antes de consultar banco
+    # Cache apenas para listagens sem filtro de nome
+    use_cache = not name_filter
+    cache_key = _get_category_cache_key(name_filter, page, page_size)
+    
+    if use_cache and _is_category_cache_valid(cache_key) and cache_key in _category_list_cache:
+        return _category_list_cache[cache_key]
 
     conn = None
     try:
@@ -73,7 +111,7 @@ def list_categories(name_filter=None, page=1, page_size=10):
         items = [{"id": row[0], "name": row[1], "display_order": row[2]} for row in cur.fetchall()]
 
         total_pages = (total + page_size - 1) // page_size
-        return {
+        result = {
             "items": items,
             "pagination": {
                 "total": total,
@@ -82,6 +120,13 @@ def list_categories(name_filter=None, page=1, page_size=10):
                 "total_pages": total_pages
             }
         }
+        
+        # OTIMIZAÇÃO: Salva resultado no cache se for cacheável
+        if use_cache:
+            _category_list_cache[cache_key] = result
+            _category_list_cache_timestamp[cache_key] = datetime.now()
+        
+        return result
     except fdb.Error as e:
         print(f"Erro ao listar categorias: {e}")
         return {
@@ -124,6 +169,16 @@ def update_category(category_id, update_data):
 
         cur.execute("UPDATE CATEGORIES SET NAME = ? WHERE ID = ? AND IS_ACTIVE = TRUE;", (name, category_id))
         conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após atualizar categoria
+        _invalidate_category_cache()
+        # Também invalida cache de produtos, pois produtos podem ter categoria associada
+        try:
+            from .product_service import _invalidate_product_cache
+            _invalidate_product_cache()
+        except:
+            pass
+        
         return (True, None, "Categoria atualizada com sucesso")
     except fdb.Error as e:
         if conn: conn.rollback()
@@ -161,6 +216,16 @@ def delete_category(category_id):
         
         if cur.rowcount > 0:
             conn.commit()
+            
+            # OTIMIZAÇÃO: Invalida cache após deletar categoria
+            _invalidate_category_cache()
+            # Também invalida cache de produtos, pois produtos foram desvinculados
+            try:
+                from .product_service import _invalidate_product_cache
+                _invalidate_product_cache()
+            except:
+                pass
+            
             message = f"Categoria '{category_name}' excluída com sucesso"
             if count_linked > 0:
                 message += f". {count_linked} produtos foram desvinculados da categoria."
@@ -215,6 +280,10 @@ def reorder_categories(category_orders):
             )
         
         conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após reordenar categorias
+        _invalidate_category_cache()
+        
         return (True, None, "Ordem das categorias atualizada com sucesso")
         
     except fdb.Error as e:
@@ -342,6 +411,10 @@ def move_category_to_position(category_id, new_position):
             )
         
         conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após mover categoria
+        _invalidate_category_cache()
+        
         return (True, None, f"Categoria movida para a posição {new_position}")
         
     except fdb.Error as e:

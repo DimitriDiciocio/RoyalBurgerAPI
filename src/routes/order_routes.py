@@ -141,9 +141,12 @@ def calculate_order_total_route():
     except ValueError as e:
         # Erro de validação - mensagem segura para o cliente
         return jsonify({"error": str(e)}), 400
-    except Exception:
-        # Log erro sem expor detalhes sensíveis
-        # TODO: Implementar logging adequado (ex: logger.error) em produção
+    except Exception as e:
+        # ALTERAÇÃO: Logging estruturado implementado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao calcular total do pedido: {e}", exc_info=True)
+        # Não expõe detalhes sensíveis ao cliente
         return jsonify({"error": "Erro ao processar solicitação"}), 500
 
 @order_bp.route('/', methods=['GET'])  

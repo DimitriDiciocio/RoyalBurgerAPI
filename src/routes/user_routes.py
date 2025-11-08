@@ -4,10 +4,15 @@ from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone
 from ..utils.validators import validate_birth_date, convert_br_date_to_iso
+# IMPLEMENTAÇÃO: Rate limiting para endpoints de autenticação (Recomendação #2)
+from ..middleware.rate_limiter import rate_limit
+import logging  # ALTERAÇÃO: Import centralizado para logging estruturado
 
 user_bp = Blueprint('users', __name__)
+logger = logging.getLogger(__name__)  # ALTERAÇÃO: Logger centralizado
 
 @user_bp.route('/login', methods=['POST'])
+@rate_limit(max_requests=5, window_seconds=60)  # IMPLEMENTAÇÃO: Rate limiting - 5 tentativas por minuto
 def login_route():
     data = request.get_json()
     email = data.get('email')
@@ -46,7 +51,9 @@ def login_route():
                         "cart_merge_warning": msg or "Não foi possível mesclar o carrinho"
                     }), 200
             except Exception as e:
-                print(f"Erro ao reivindicar carrinho convidado no login: {e}")
+                # ALTERAÇÃO: Logging estruturado ao invés de print
+                logger.error(f"Erro ao reivindicar carrinho convidado no login: {e}", exc_info=True)
+                # Não bloqueia o login: apenas anexa aviso
                 return jsonify({
                     "access_token": result,
                     "message": f"Bem-vindo, {full_name}",
@@ -96,6 +103,7 @@ def login_route():
 
 
 @user_bp.route('/request-password-reset', methods=['POST'])
+@rate_limit(max_requests=3, window_seconds=300)  # IMPLEMENTAÇÃO: Rate limiting - 3 tentativas por 5 minutos
 def request_password_reset_route():
     data = request.get_json()
     email = data.get('email')
@@ -119,6 +127,7 @@ def request_password_reset_route():
 
 
 @user_bp.route('/verify-reset-code', methods=['POST'])
+@rate_limit(max_requests=5, window_seconds=300)  # IMPLEMENTAÇÃO: Rate limiting - 5 tentativas por 5 minutos
 def verify_reset_code_route():
     """Verifica se o código de reset é válido"""
     data = request.get_json()
@@ -562,6 +571,7 @@ def check_email_availability_route():
 
 
 @user_bp.route('/request-email-verification', methods=['POST'])
+@rate_limit(max_requests=3, window_seconds=300)  # IMPLEMENTAÇÃO: Rate limiting - 3 tentativas por 5 minutos
 def request_email_verification_route():
     data = request.get_json()
     email = data.get('email')
@@ -695,6 +705,7 @@ def change_password_route():
 
 
 @user_bp.route('/verify-2fa', methods=['POST'])
+@rate_limit(max_requests=5, window_seconds=300)  # IMPLEMENTAÇÃO: Rate limiting - 5 tentativas por 5 minutos
 def verify_2fa_route():
     try:
         data = request.get_json()
@@ -732,7 +743,8 @@ def verify_2fa_route():
         }), 200
         
     except Exception as e:
-        print(f"Erro na verificação 2FA: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro na verificação 2FA: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -758,7 +770,8 @@ def toggle_2fa_route():
                 return jsonify({"error": message}), 400
             return jsonify({"message": message}), 200
     except Exception as e:
-        print(f"Erro ao alterar 2FA: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao alterar 2FA: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 @user_bp.route('/enable-2fa-confirm', methods=['POST'])
@@ -775,7 +788,8 @@ def enable_2fa_confirm_route():
             return jsonify({"error": message}), 400
         return jsonify({"message": message}), 200
     except Exception as e:
-        print(f"Erro ao confirmar 2FA: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao confirmar 2FA: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -789,7 +803,8 @@ def get_2fa_status_route():
         return jsonify({"two_factor_enabled": is_enabled}), 200
         
     except Exception as e:
-        print(f"Erro ao verificar status 2FA: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao verificar status 2FA: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -830,7 +845,8 @@ def request_email_change_route():
                 return jsonify({"error": message}), 400
                 
     except Exception as e:
-        print(f"Erro ao solicitar mudança de email: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao solicitar mudança de email: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -870,7 +886,8 @@ def verify_email_change_route():
                 return jsonify({"error": message}), 400
                 
     except Exception as e:
-        print(f"Erro ao verificar mudança de email: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao verificar mudança de email: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -896,7 +913,8 @@ def cancel_email_change_route():
                 return jsonify({"error": message}), 400
                 
     except Exception as e:
-        print(f"Erro ao cancelar mudança de email: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao cancelar mudança de email: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -922,7 +940,8 @@ def get_pending_email_change_route():
                 return jsonify({"error": message}), 400
                 
     except Exception as e:
-        print(f"Erro ao buscar mudança de email pendente: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao buscar mudança de email pendente: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -948,5 +967,6 @@ def cleanup_unverified_accounts_route():
         }), 200
         
     except Exception as e:
-        print(f"Erro na limpeza de contas não verificadas: {e}")
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro na limpeza de contas não verificadas: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500

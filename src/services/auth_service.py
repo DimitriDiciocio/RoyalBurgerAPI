@@ -1,12 +1,16 @@
 import bcrypt  
 import fdb  
+import logging  # ALTERAÇÃO: Adicionado logging estruturado
 from functools import wraps  
 from flask import jsonify  
 from datetime import datetime, timezone, timedelta
 import threading
 from ..database import get_db_connection  
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt
-from .two_factor_service import create_2fa_verification, verify_2fa_code, is_2fa_enabled  
+from .two_factor_service import create_2fa_verification, verify_2fa_code, is_2fa_enabled
+
+# ALTERAÇÃO: Logger estruturado para substituir prints
+logger = logging.getLogger(__name__)  
 
 def authenticate(email, password):  
     conn = None  
@@ -52,7 +56,8 @@ def authenticate(email, password):
         access_token = create_access_token(identity=identity, additional_claims=additional_claims)  
         return (access_token, None, None)  
     except fdb.Error as e:  
-        print(f"Erro de banco de dados na autenticação: {e}")  
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro de banco de dados na autenticação para email {email[:3]}***: {e}", exc_info=True)  
         return (None, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  
         if conn: conn.close()  
@@ -82,7 +87,8 @@ def add_token_to_blacklist(jti, expires_at):
         # OTIMIZAÇÃO: Invalida cache quando token é adicionado à blacklist
         _invalidate_token_cache(jti=jti)
     except fdb.Error as e:  
-        print(f"Erro ao adicionar token à blacklist: {e}")  
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao adicionar token à blacklist (JTI: {jti[:8]}***): {e}", exc_info=True)  
         if conn: conn.rollback()  
     finally:  
         if conn: conn.close()  
@@ -114,12 +120,13 @@ def verify_2fa_and_login(user_id, code):
         additional_claims = {"roles": [role], "full_name": full_name}
         access_token = create_access_token(identity=identity, additional_claims=additional_claims)
         
-        return (access_token, None, None)
+        return (access_token, None, None)  
         
-    except fdb.Error as e:
-        print(f"Erro ao criar token após 2FA: {e}")
-        return (None, "DATABASE_ERROR", "Erro interno do servidor")
-    finally:
+    except fdb.Error as e:  
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao criar token após 2FA para user_id {user_id}: {e}", exc_info=True)  
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")  
+    finally:  
         if conn: conn.close()
 
 # Cache em memória para tokens revogados (usando apenas Python padrão)
@@ -214,14 +221,16 @@ def is_token_revoked(jwt_payload):
                             return False
                             
                     except (ValueError, IndexError) as e:
-                        print(f"Erro ao processar timestamp de revogação: {e}")
+                        # ALTERAÇÃO: Logging estruturado
+                        logger.warning(f"Erro ao processar timestamp de revogação para user {user_sub}: {e}", exc_info=True)
                         # Se não conseguir extrair o timestamp, considera revogado por segurança
                         with _cache_lock:
                             _token_cache[cache_key] = (True, datetime.now())
                         return True
                         
             except fdb.Error as e:
-                print(f"Erro ao verificar revogação global do usuário {user_sub}: {e}")
+                # ALTERAÇÃO: Logging estruturado
+                logger.error(f"Erro ao verificar revogação global do usuário {user_sub}: {e}", exc_info=True)
                 # Em caso de erro, não considera revogado para não bloquear usuários
                 pass
         
@@ -230,7 +239,8 @@ def is_token_revoked(jwt_payload):
             _token_cache[cache_key] = (False, datetime.now())
         return False  
     except fdb.Error as e:  
-        print(f"Erro ao verificar a blacklist de tokens: {e}")  
+        # ALTERAÇÃO: Logging estruturado
+        logger.error(f"Erro ao verificar a blacklist de tokens (JTI: {jti[:8]}***): {e}", exc_info=True)  
         # Em caso de erro, não considera revogado para não bloquear usuários
         return False  
     finally:  
@@ -261,7 +271,8 @@ def revoke_all_tokens_for_user(user_id):
         if existing_revoke:
             # Remove o token de revogação antigo
             cur.execute("DELETE FROM TOKEN_BLACKLIST WHERE JTI = ?", (existing_revoke[0],))
-            print(f"Token de revogação antigo removido: {existing_revoke[0]}")
+            # ALTERAÇÃO: Logging estruturado
+            logger.info(f"Token de revogação antigo removido para user_id {user_id}")
         
         # OTIMIZAÇÃO: Invalida cache de tokens deste usuário antes de adicionar novo token de revogação
         _invalidate_token_cache(user_id=user_id)
@@ -270,10 +281,12 @@ def revoke_all_tokens_for_user(user_id):
         cur.execute("INSERT INTO TOKEN_BLACKLIST (JTI, EXPIRES_AT) VALUES (?, ?)", (special_jti, expires_at))
         
         conn.commit()
-        print(f"Tokens do usuário {user_id} revogados com sucesso. Token de revogação: {special_jti}")
+        # ALTERAÇÃO: Logging estruturado (não expõe JTI completo por segurança)
+        logger.info(f"Tokens do usuário {user_id} revogados com sucesso")
         return True
     except fdb.Error as e:
-        print(f"Erro ao revogar tokens do usuário {user_id}: {e}")
+        # ALTERAÇÃO: Logging estruturado
+        logger.error(f"Erro ao revogar tokens do usuário {user_id}: {e}", exc_info=True)
         if conn: conn.rollback()
         return False
     finally:
@@ -292,11 +305,13 @@ def clear_user_revoke_tokens(user_id):
         
         if deleted_count > 0:
             conn.commit()
-            print(f"Removidos {deleted_count} tokens de revogação antigos para o usuário {user_id}")
+            # ALTERAÇÃO: Logging estruturado
+            logger.info(f"Removidos {deleted_count} tokens de revogação antigos para o usuário {user_id}")
         
         return True
     except fdb.Error as e:
-        print(f"Erro ao limpar tokens de revogação do usuário {user_id}: {e}")
+        # ALTERAÇÃO: Logging estruturado
+        logger.error(f"Erro ao limpar tokens de revogação do usuário {user_id}: {e}", exc_info=True)
         if conn: conn.rollback()
         return False
     finally:

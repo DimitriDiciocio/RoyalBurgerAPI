@@ -452,9 +452,26 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
         if not stock_check[0]:
             return (False, "INSUFFICIENT_STOCK", stock_check[1])
         
+        # OTIMIZAÇÃO DE PERFORMANCE: Valida extras em batch ao invés de loop individual
         # Verifica e valida extras conforme regras do produto (PORTIONS=0, min/max)
         rules = _get_product_rules(cur, product_id)
+        
         if extras:
+            # Coleta todos os IDs de ingredientes primeiro
+            extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
+            
+            # Busca disponibilidade de todos os ingredientes de uma vez (1 query ao invés de N)
+            ingredient_availability = _batch_get_ingredient_availability(extra_ingredient_ids, quantity, cur)
+            
+            # Busca nomes de ingredientes de uma vez para mensagens de erro
+            ingredient_names = {}
+            if extra_ingredient_ids:
+                placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                cur.execute(f"SELECT ID, NAME FROM INGREDIENTS WHERE ID IN ({placeholders})", tuple(extra_ingredient_ids))
+                for row in cur.fetchall():
+                    ingredient_names[row[0]] = row[1]
+            
+            # Valida cada extra usando dados já carregados em batch
             for extra in extras:
                 ing_id = extra.get("ingredient_id")
                 qty = int(extra.get("quantity", 1))
@@ -466,20 +483,21 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 min_q = int(rule["min_quantity"] or 0)
                 max_q_rule = int(rule["max_quantity"]) if rule["max_quantity"] else None
                 
-                # Verifica disponibilidade em tempo real do ingrediente
-                from .product_service import get_ingredient_max_available_quantity
-                max_available_info = get_ingredient_max_available_quantity(
-                    ingredient_id=ing_id,
-                    max_quantity_from_rule=max_q_rule,
-                    item_quantity=quantity
-                )
+                # Obtém disponibilidade do cache em memória (já carregado em batch)
+                max_available_info = ingredient_availability.get(ing_id)
+                if not max_available_info:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Ingrediente '{ing_name}' não encontrado ou indisponível")
                 
                 max_q_available = max_available_info['max_available']
                 
-                # Usa o menor entre a regra e o estoque disponível
-                effective_max_q = max_q_available
+                # Aplica limite da regra se existir
                 if max_q_rule is not None and max_q_rule > 0:
-                    effective_max_q = min(max_q_rule, max_q_available)
+                    max_q_available = min(max_q_rule, max_q_available)
+                    # Atualiza limited_by se necessário
+                    if max_q_available == max_q_rule and max_available_info['max_available'] > max_q_rule:
+                        max_available_info['limited_by'] = 'rule'
                 
                 # Valida quantidade mínima
                 if qty < min_q:
@@ -487,18 +505,16 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                            f"Quantidade de extra abaixo do mínimo permitido [{min_q}]")
                 
                 # Valida quantidade máxima (considerando estoque)
-                if effective_max_q > 0 and qty > effective_max_q:
+                if max_q_available > 0 and qty > max_q_available:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "EXTRA_OUT_OF_RANGE", 
                            f"Quantidade de extra excede o disponível. "
-                           f"Máximo permitido: {effective_max_q} "
+                           f"Máximo permitido: {max_q_available} "
                            f"(limitado por {'regra' if max_available_info['limited_by'] == 'rule' else 'estoque'})")
                 
                 # Verifica se ingrediente está disponível
                 if not max_available_info['stock_info'] or max_q_available == 0:
-                    # Busca nome do ingrediente para mensagem de erro
-                    cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
-                    ing_name_row = cur.fetchone()
-                    ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
                            f"Ingrediente '{ing_name}' não disponível ou sem estoque")
                 
@@ -519,13 +535,15 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                         item_quantity=quantity
                     )
                 except ValueError as e:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
-                           f"Erro na conversão de unidades: {str(e)}")
+                           f"Erro na conversão de unidades para '{ing_name}': {str(e)}")
                 
                 # Compara com estoque disponível
                 if current_stock < required_quantity:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
-                           f"Estoque insuficiente para extra. "
+                           f"Estoque insuficiente para extra '{ing_name}'. "
                            f"Necessário: {required_quantity:.3f} {stock_unit}, "
                            f"Disponível: {current_stock:.3f} {stock_unit}")
         
@@ -545,31 +563,39 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 if not stock_check_total[0]:
                     return (False, "INSUFFICIENT_STOCK", stock_check_total[1])
                 
-                # Valida estoque para extras com a nova quantidade total
+                # OTIMIZAÇÃO: Valida estoque para extras com a nova quantidade total em batch
                 if extras:
+                    # Revalida disponibilidade com a nova quantidade total
+                    extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
+                    ingredient_availability_total = _batch_get_ingredient_availability(extra_ingredient_ids, new_total_quantity, cur)
+                    
+                    # Busca nomes de ingredientes de uma vez
+                    ingredient_names = {}
+                    if extra_ingredient_ids:
+                        placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                        cur.execute(f"SELECT ID, NAME FROM INGREDIENTS WHERE ID IN ({placeholders})", tuple(extra_ingredient_ids))
+                        for row in cur.fetchall():
+                            ingredient_names[row[0]] = row[1]
+                    
                     for extra in extras:
                         ing_id = extra.get("ingredient_id")
                         qty = int(extra.get("quantity", 1))
                         rule = rules.get(ing_id)
                         max_q_rule = int(rule["max_quantity"]) if rule and rule.get("max_quantity") else None
                         
-                        # Verifica disponibilidade em tempo real para a nova quantidade total
-                        from .product_service import get_ingredient_max_available_quantity
-                        max_available_info = get_ingredient_max_available_quantity(
-                            ingredient_id=ing_id,
-                            max_quantity_from_rule=max_q_rule,
-                            item_quantity=new_total_quantity
-                        )
-                        
-                        # Verifica estoque suficiente para a quantidade solicitada com conversão de unidades
-                        stock_info = max_available_info.get('stock_info')
-                        if not stock_info:
-                            cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
-                            ing_name_row = cur.fetchone()
-                            ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                        # Obtém disponibilidade do cache em memória
+                        max_available_info = ingredient_availability_total.get(ing_id)
+                        if not max_available_info or not max_available_info.get('stock_info'):
+                            ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Ingrediente '{ing_name}' não disponível ou sem estoque")
                         
+                        # Aplica limite da regra
+                        max_q_available = max_available_info['max_available']
+                        if max_q_rule is not None and max_q_rule > 0:
+                            max_q_available = min(max_q_rule, max_q_available)
+                        
+                        stock_info = max_available_info['stock_info']
                         base_portion_quantity = stock_info['base_portion_quantity']
                         base_portion_unit = stock_info['base_portion_unit']
                         stock_unit = stock_info['stock_unit']
@@ -585,17 +611,13 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                                 item_quantity=new_total_quantity  # ← Usa quantidade total
                             )
                         except ValueError as e:
-                            cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
-                            ing_name_row = cur.fetchone()
-                            ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                            ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
                         
                         # Compara com estoque disponível
                         if current_stock < required_quantity_total:
-                            cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
-                            ing_name_row = cur.fetchone()
-                            ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                            ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Estoque insuficiente para extra '{ing_name}'. "
                                    f"Necessário: {required_quantity_total:.3f} {stock_unit}, "
@@ -610,18 +632,30 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
             cur.execute(sql, (cart_id, product_id, quantity, notes))
             new_item_id = cur.fetchone()[0]
             
+            # OTIMIZAÇÃO: Busca preços de ingredientes em batch ao invés de queries individuais
             # Adiciona extras se fornecidos (TYPE='extra')
             if extras:
+                # Coleta IDs de ingredientes e busca preços de uma vez
+                extra_ingredient_ids = [ex.get("ingredient_id") for ex in extras if ex.get("ingredient_id")]
+                ingredient_prices = {}
+                if extra_ingredient_ids:
+                    placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                    cur.execute(
+                        f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders}) AND IS_AVAILABLE = TRUE;",
+                        tuple(extra_ingredient_ids)
+                    )
+                    for row in cur.fetchall():
+                        ingredient_prices[row[0]] = float(row[1] or 0.0)
+                
+                # Insere extras usando preços já carregados
                 for extra in extras:
                     ingredient_id = extra.get("ingredient_id")
                     extra_quantity = int(extra.get("quantity", 1))
                     if extra_quantity <= 0:
                         continue
-                    # Verifica se ingrediente existe e obtém preço
-                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
-                    rowp = cur.fetchone()
-                    if rowp:
-                        unit_price = float(rowp[0] or 0.0)
+                    
+                    unit_price = ingredient_prices.get(ingredient_id, 0.0)
+                    if unit_price > 0:  # Só insere se ingrediente existe e tem preço
                         sql_extra = (
                             "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) "
                             "VALUES (?, ?, ?, 'extra', ?, ?);"
@@ -631,23 +665,45 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
             # Adiciona modificações de base (TYPE='base')
             if base_modifications:
                 rules = _get_product_rules(cur, product_id)
+                # OTIMIZAÇÃO: Busca preços de ingredientes de base em batch
+                base_mod_ingredient_ids = []
+                for bm in base_modifications:
+                    try:
+                        ing_id = int(bm.get("ingredient_id"))
+                        delta = int(bm.get("delta", 0))
+                        rule = rules.get(ing_id)
+                        if rule and float(rule["portions"]) != 0.0 and delta != 0:
+                            base_mod_ingredient_ids.append(ing_id)
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                
+                base_mod_prices = {}
+                if base_mod_ingredient_ids:
+                    placeholders = ', '.join(['?' for _ in base_mod_ingredient_ids])
+                    cur.execute(
+                        f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders}) AND IS_AVAILABLE = TRUE;",
+                        tuple(base_mod_ingredient_ids)
+                    )
+                    for row in cur.fetchall():
+                        base_mod_prices[row[0]] = float(row[1] or 0.0)
+                
+                # Insere modificações de base usando preços já carregados
                 for bm in base_modifications:
                     try:
                         ing_id = int(bm.get("ingredient_id"))
                         delta = int(bm.get("delta", 0))
                     except (ValueError, TypeError, AttributeError):
-                        # Ignora modificações com formato inválido
                         continue
                     rule = rules.get(ing_id)
                     if not rule or float(rule["portions"]) == 0.0 or delta == 0:
                         continue
-                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ing_id,))
-                    rowp = cur.fetchone()
-                    unit_price = float(rowp[0] or 0.0) if rowp else 0.0
-                    cur.execute(
-                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
-                        (new_item_id, ing_id, delta, unit_price)
-                    )
+                    
+                    unit_price = base_mod_prices.get(ing_id, 0.0)
+                    if unit_price >= 0:  # Permite preço zero
+                        cur.execute(
+                            "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                            (new_item_id, ing_id, delta, unit_price)
+                        )
         
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
@@ -705,9 +761,26 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
         if not stock_check[0]:
             return (False, "INSUFFICIENT_STOCK", stock_check[1])
 
+        # OTIMIZAÇÃO DE PERFORMANCE: Valida extras em batch ao invés de loop individual
         # Verifica e valida extras conforme regras do produto (PORTIONS=0, min/max)
         rules = _get_product_rules(cur, product_id)
+        
         if extras:
+            # Coleta todos os IDs de ingredientes primeiro
+            extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
+            
+            # Busca disponibilidade de todos os ingredientes de uma vez (1 query ao invés de N)
+            ingredient_availability = _batch_get_ingredient_availability(extra_ingredient_ids, quantity, cur)
+            
+            # Busca nomes de ingredientes de uma vez para mensagens de erro
+            ingredient_names = {}
+            if extra_ingredient_ids:
+                placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                cur.execute(f"SELECT ID, NAME FROM INGREDIENTS WHERE ID IN ({placeholders})", tuple(extra_ingredient_ids))
+                for row in cur.fetchall():
+                    ingredient_names[row[0]] = row[1]
+            
+            # Valida cada extra usando dados já carregados em batch
             for extra in extras:
                 ing_id = extra.get("ingredient_id")
                 qty = int(extra.get("quantity", 1))
@@ -719,20 +792,21 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 min_q = int(rule["min_quantity"] or 0)
                 max_q_rule = int(rule["max_quantity"]) if rule["max_quantity"] else None
                 
-                # Verifica disponibilidade em tempo real do ingrediente
-                from .product_service import get_ingredient_max_available_quantity
-                max_available_info = get_ingredient_max_available_quantity(
-                    ingredient_id=ing_id,
-                    max_quantity_from_rule=max_q_rule,
-                    item_quantity=quantity
-                )
+                # Obtém disponibilidade do cache em memória (já carregado em batch)
+                max_available_info = ingredient_availability.get(ing_id)
+                if not max_available_info:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Ingrediente '{ing_name}' não encontrado ou indisponível")
                 
                 max_q_available = max_available_info['max_available']
                 
-                # Usa o menor entre a regra e o estoque disponível
-                effective_max_q = max_q_available
+                # Aplica limite da regra se existir
                 if max_q_rule is not None and max_q_rule > 0:
-                    effective_max_q = min(max_q_rule, max_q_available)
+                    max_q_available = min(max_q_rule, max_q_available)
+                    # Atualiza limited_by se necessário
+                    if max_q_available == max_q_rule and max_available_info['max_available'] > max_q_rule:
+                        max_available_info['limited_by'] = 'rule'
                 
                 # Valida quantidade mínima
                 if qty < min_q:
@@ -740,18 +814,16 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                            f"Quantidade de extra abaixo do mínimo permitido [{min_q}]")
                 
                 # Valida quantidade máxima (considerando estoque)
-                if effective_max_q > 0 and qty > effective_max_q:
+                if max_q_available > 0 and qty > max_q_available:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "EXTRA_OUT_OF_RANGE", 
                            f"Quantidade de extra excede o disponível. "
-                           f"Máximo permitido: {effective_max_q} "
+                           f"Máximo permitido: {max_q_available} "
                            f"(limitado por {'regra' if max_available_info['limited_by'] == 'rule' else 'estoque'})")
                 
                 # Verifica se ingrediente está disponível
                 if not max_available_info['stock_info'] or max_q_available == 0:
-                    # Busca nome do ingrediente para mensagem de erro
-                    cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ing_id,))
-                    ing_name_row = cur.fetchone()
-                    ing_name = ing_name_row[0] if ing_name_row else 'Ingrediente'
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
                            f"Ingrediente '{ing_name}' não disponível ou sem estoque")
                 
@@ -772,13 +844,15 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                         item_quantity=quantity
                     )
                 except ValueError as e:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
-                           f"Erro na conversão de unidades: {str(e)}")
+                           f"Erro na conversão de unidades para '{ing_name}': {str(e)}")
                 
                 # Compara com estoque disponível
                 if current_stock < required_quantity:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
-                           f"Estoque insuficiente para extra. "
+                           f"Estoque insuficiente para extra '{ing_name}'. "
                            f"Necessário: {required_quantity:.3f} {stock_unit}, "
                            f"Disponível: {current_stock:.3f} {stock_unit}")
 
@@ -798,43 +872,55 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 if not stock_check_total[0]:
                     return (False, "INSUFFICIENT_STOCK", stock_check_total[1])
                 
-                # Valida estoque para extras com a nova quantidade total
+                # OTIMIZAÇÃO: Valida estoque para extras com a nova quantidade total em batch
                 if extras:
+                    # Revalida disponibilidade com a nova quantidade total
+                    extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
+                    ingredient_availability_total = _batch_get_ingredient_availability(extra_ingredient_ids, new_total_quantity, cur)
+                    
+                    # Busca nomes de ingredientes de uma vez
+                    ingredient_names = {}
+                    if extra_ingredient_ids:
+                        placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                        cur.execute(f"SELECT ID, NAME FROM INGREDIENTS WHERE ID IN ({placeholders})", tuple(extra_ingredient_ids))
+                        for row in cur.fetchall():
+                            ingredient_names[row[0]] = row[1]
+                    
                     for extra in extras:
                         ing_id = extra.get("ingredient_id")
                         qty = int(extra.get("quantity", 1))
                         
-                        cur.execute("""
-                            SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, CURRENT_STOCK, NAME
-                            FROM INGREDIENTS
-                            WHERE ID = ? AND IS_AVAILABLE = TRUE
-                        """, (ing_id,))
-                        ing_info = cur.fetchone()
-                        if not ing_info:
-                            return (False, "INSUFFICIENT_STOCK", "Ingrediente do extra não encontrado ou indisponível")
+                        # Obtém disponibilidade do cache em memória
+                        max_available_info = ingredient_availability_total.get(ing_id)
+                        if not max_available_info or not max_available_info.get('stock_info'):
+                            ing_name = ingredient_names.get(ing_id, 'Ingrediente')
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Ingrediente '{ing_name}' não disponível ou sem estoque")
                         
-                        base_portion_quantity = ing_info[0] or 1
-                        base_portion_unit = ing_info[1] or 'un'
-                        stock_unit = ing_info[2] or 'un'
-                        current_stock = ing_info[3] or 0
-                        ing_name = ing_info[4]
+                        stock_info = max_available_info['stock_info']
+                        base_portion_quantity = stock_info['base_portion_quantity']
+                        base_portion_unit = stock_info['base_portion_unit']
+                        stock_unit = stock_info['stock_unit']
+                        current_stock = stock_info['current_stock']
                         
                         # Calcula consumo para a NOVA quantidade total
                         try:
                             required_quantity_total = stock_service.calculate_consumption_in_stock_unit(
                                 portions=qty,
-                                base_portion_quantity=base_portion_quantity,
-                                base_portion_unit=base_portion_unit,
-                                stock_unit=stock_unit,
+                                base_portion_quantity=float(base_portion_quantity),
+                                base_portion_unit=str(base_portion_unit),
+                                stock_unit=str(stock_unit),
                                 item_quantity=new_total_quantity  # ← Usa quantidade total
                             )
                         except ValueError as e:
+                            ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Erro na conversão de unidades para extra '{ing_name}': {str(e)}")
                         
                         current_stock_decimal = Decimal(str(current_stock))
                         
                         if current_stock_decimal < required_quantity_total:
+                            ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                             return (False, "INSUFFICIENT_STOCK", 
                                    f"Estoque insuficiente para extra '{ing_name}'. "
                                    f"Necessário: {required_quantity_total:.3f} {stock_unit}, "
@@ -847,16 +933,29 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
             cur.execute(sql, (cart_id, product_id, quantity, notes))
             new_item_id = cur.fetchone()[0]
 
+            # OTIMIZAÇÃO: Busca preços de ingredientes em batch
             if extras:
+                # Coleta IDs de ingredientes e busca preços de uma vez
+                extra_ingredient_ids = [ex.get("ingredient_id") for ex in extras if ex.get("ingredient_id")]
+                ingredient_prices = {}
+                if extra_ingredient_ids:
+                    placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                    cur.execute(
+                        f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders}) AND IS_AVAILABLE = TRUE;",
+                        tuple(extra_ingredient_ids)
+                    )
+                    for row in cur.fetchall():
+                        ingredient_prices[row[0]] = float(row[1] or 0.0)
+                
+                # Insere extras usando preços já carregados
                 for extra in extras:
                     ingredient_id = extra.get("ingredient_id")
                     extra_quantity = int(extra.get("quantity", 1))
                     if extra_quantity <= 0:
                         continue
-                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
-                    rowp = cur.fetchone()
-                    if rowp:
-                        unit_price = float(rowp[0] or 0.0)
+                    
+                    unit_price = ingredient_prices.get(ingredient_id, 0.0)
+                    if unit_price > 0:  # Só insere se ingrediente existe e tem preço
                         cur.execute(
                             "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);",
                             (new_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price)
@@ -864,23 +963,45 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
 
             if base_modifications:
                 rules = _get_product_rules(cur, product_id)
+                # OTIMIZAÇÃO: Busca preços de ingredientes de base em batch
+                base_mod_ingredient_ids = []
+                for bm in base_modifications:
+                    try:
+                        ing_id = int(bm.get("ingredient_id"))
+                        delta = int(bm.get("delta", 0))
+                        rule = rules.get(ing_id)
+                        if rule and float(rule["portions"]) != 0.0 and delta != 0:
+                            base_mod_ingredient_ids.append(ing_id)
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                
+                base_mod_prices = {}
+                if base_mod_ingredient_ids:
+                    placeholders = ', '.join(['?' for _ in base_mod_ingredient_ids])
+                    cur.execute(
+                        f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders}) AND IS_AVAILABLE = TRUE;",
+                        tuple(base_mod_ingredient_ids)
+                    )
+                    for row in cur.fetchall():
+                        base_mod_prices[row[0]] = float(row[1] or 0.0)
+                
+                # Insere modificações de base usando preços já carregados
                 for bm in base_modifications:
                     try:
                         ing_id = int(bm.get("ingredient_id"))
                         delta = int(bm.get("delta", 0))
                     except (ValueError, TypeError, AttributeError):
-                        # Ignora modificações com formato inválido
                         continue
                     rule = rules.get(ing_id)
                     if not rule or float(rule["portions"]) == 0.0 or delta == 0:
                         continue
-                    cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ing_id,))
-                    rowp = cur.fetchone()
-                    unit_price = float(rowp[0] or 0.0) if rowp else 0.0
-                    cur.execute(
-                        "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
-                        (new_item_id, ing_id, delta, unit_price)
-                    )
+                    
+                    unit_price = base_mod_prices.get(ing_id, 0.0)
+                    if unit_price >= 0:  # Permite preço zero
+                        cur.execute(
+                            "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
+                            (new_item_id, ing_id, delta, unit_price)
+                        )
 
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
@@ -895,6 +1016,9 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
 def find_identical_cart_item(cart_id, product_id, extras, notes, base_modifications=None):
     """
     Verifica se já existe um item idêntico no carrinho (mesmo produto e mesmos extras)
+    
+    OTIMIZAÇÃO DE PERFORMANCE: Busca todos os extras de todos os itens de uma vez,
+    evitando N+1 queries quando há múltiplos itens do mesmo produto.
     """
     conn = None
     try:
@@ -906,41 +1030,65 @@ def find_identical_cart_item(cart_id, product_id, extras, notes, base_modificati
         cur.execute(sql, (cart_id, product_id))
         items = cur.fetchall()
         
+        if not items:
+            return None
+        
+        # OTIMIZAÇÃO: Busca todos os extras de todos os itens de uma vez (evita N+1)
+        item_ids = [item[0] for item in items]
+        placeholders = ', '.join(['?' for _ in item_ids])
+        cur.execute(
+            f"""
+            SELECT CART_ITEM_ID, INGREDIENT_ID, COALESCE(DELTA, QUANTITY) AS DELTA, TYPE 
+            FROM CART_ITEM_EXTRAS 
+            WHERE CART_ITEM_ID IN ({placeholders})
+            ORDER BY CART_ITEM_ID, TYPE, INGREDIENT_ID;
+            """,
+            tuple(item_ids)
+        )
+        all_extras_rows = cur.fetchall()
+        
+        # Agrupa extras por cart_item_id
+        extras_by_item = {}
+        for row in all_extras_rows:
+            item_id = row[0]
+            if item_id not in extras_by_item:
+                extras_by_item[item_id] = {'extras': [], 'base': []}
+            row_type = (row[3] or 'extra').lower()
+            if row_type == 'extra':
+                extras_by_item[item_id]['extras'].append((row[1], int(row[2])))
+            elif row_type == 'base' and int(row[2]) != 0:
+                extras_by_item[item_id]['base'].append((row[1], int(row[2])))
+        
+        # Normaliza listas de extras desejados
+        wanted_extras = []
+        for ex in (extras or []):
+            try:
+                wanted_extras.append((int(ex.get("ingredient_id")), int(ex.get("quantity", 1))))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        wanted_extras.sort()
+
+        wanted_base = []
+        for bm in (base_modifications or []):
+            try:
+                d = int(bm.get("delta", 0))
+                if d != 0:
+                    wanted_base.append((int(bm.get("ingredient_id")), d))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        wanted_base.sort()
+        
+        # Compara cada item com os extras desejados
         for item_id, existing_notes in items:
-            # Busca todas as linhas (extras e base) e normaliza
-            cur.execute(
-                "SELECT INGREDIENT_ID, COALESCE(DELTA, QUANTITY) AS DELTA, TYPE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? ORDER BY TYPE, INGREDIENT_ID;",
-                (item_id,)
-            )
-            rows = cur.fetchall()
-            existing_extras = [(r[0], int(r[1])) for r in rows if (r[2] or 'extra').lower() == 'extra']
-            existing_base = [(r[0], int(r[1])) for r in rows if (r[2] or 'extra').lower() == 'base' and int(r[1]) != 0]
-
-            wanted_extras = []
-            for ex in (extras or []):
-                try:
-                    wanted_extras.append((int(ex.get("ingredient_id")), int(ex.get("quantity", 1))))
-                except (ValueError, TypeError, AttributeError):
-                    # Ignora extras com formato inválido
-                    continue
-            wanted_extras.sort()
-
-            wanted_base = []
-            for bm in (base_modifications or []):
-                try:
-                    d = int(bm.get("delta", 0))
-                    if d != 0:
-                        wanted_base.append((int(bm.get("ingredient_id")), d))
-                except (ValueError, TypeError, AttributeError):
-                    # Ignora modificações com formato inválido
-                    continue
-            wanted_base.sort()
+            item_extras_data = extras_by_item.get(item_id, {'extras': [], 'base': []})
+            existing_extras = sorted(item_extras_data['extras'])
+            existing_base = sorted(item_extras_data['base'])
 
             extras_match = (existing_extras == wanted_extras)
             base_match = (existing_base == wanted_base)
 
             if extras_match and base_match and (existing_notes or "") == (notes or ""):
-                    return item_id
+                return item_id
         
         return None
         
@@ -1375,6 +1523,89 @@ def _get_product_rules(cur, product_id):
             "max_quantity": int(row[3] or 0)
         }
     return rules
+
+
+def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur):
+    """
+    OTIMIZAÇÃO DE PERFORMANCE: Busca disponibilidade de múltiplos ingredientes em uma única query.
+    Evita N+1 queries quando validando extras em batch.
+    
+    Args:
+        ingredient_ids: Lista de IDs de ingredientes
+        item_quantity: Quantidade de itens do produto
+        cur: Cursor do banco de dados
+    
+    Returns:
+        dict: {ingredient_id: max_available_info}
+    """
+    if not ingredient_ids:
+        return {}
+    
+    from .product_service import get_ingredient_max_available_quantity
+    
+    # Busca informações de todos os ingredientes de uma vez
+    placeholders = ', '.join(['?' for _ in ingredient_ids])
+    cur.execute(f"""
+        SELECT 
+            ID, NAME, CURRENT_STOCK, STOCK_UNIT, BASE_PORTION_QUANTITY, 
+            BASE_PORTION_UNIT, IS_AVAILABLE
+        FROM INGREDIENTS
+        WHERE ID IN ({placeholders})
+    """, tuple(ingredient_ids))
+    
+    ingredients_data = {}
+    for row in cur.fetchall():
+        ing_id, name, current_stock, stock_unit, base_portion_quantity, base_portion_unit, is_available = row
+        
+        if not is_available:
+            ingredients_data[ing_id] = {
+                'max_available': 0,
+                'limited_by': 'unavailable',
+                'stock_info': {
+                    'current_stock': Decimal(str(current_stock or 0)),
+                    'stock_unit': stock_unit or 'un',
+                    'base_portion_quantity': Decimal(str(base_portion_quantity or 1)),
+                    'base_portion_unit': base_portion_unit or 'un'
+                }
+            }
+            continue
+        
+        # Calcula quantidade máxima usando a mesma lógica de get_ingredient_max_available_quantity
+        # mas sem criar nova conexão
+        current_stock_decimal = Decimal(str(current_stock or 0))
+        base_portion_quantity_decimal = Decimal(str(base_portion_quantity or 1))
+        stock_unit_str = stock_unit or 'un'
+        base_portion_unit_str = base_portion_unit or 'un'
+        
+        max_from_stock = 0
+        if current_stock_decimal > 0:
+            try:
+                from .stock_service import _convert_unit
+                stock_in_base_unit = _convert_unit(
+                    current_stock_decimal,
+                    stock_unit_str,
+                    base_portion_unit_str
+                )
+                
+                if base_portion_quantity_decimal > 0:
+                    max_portions_from_stock = stock_in_base_unit / base_portion_quantity_decimal
+                    max_from_stock = int(max_portions_from_stock // item_quantity)
+            except Exception as e:
+                logger.warning(f"Erro ao calcular quantidade máxima para ingrediente {ing_id}: {e}")
+                max_from_stock = 0
+        
+        ingredients_data[ing_id] = {
+            'max_available': max_from_stock,
+            'limited_by': 'stock' if max_from_stock > 0 else 'none',
+            'stock_info': {
+                'current_stock': current_stock_decimal,
+                'stock_unit': stock_unit_str,
+                'base_portion_quantity': base_portion_quantity_decimal,
+                'base_portion_unit': base_portion_unit_str
+            }
+        }
+    
+    return ingredients_data
 
 
 def _check_product_stock_availability(cur, product_id, quantity):

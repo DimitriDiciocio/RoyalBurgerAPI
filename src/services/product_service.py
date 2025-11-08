@@ -2,7 +2,9 @@ import fdb
 from ..database import get_db_connection
 from . import groups_service, stock_service
 from ..utils.image_handler import get_product_image_url
-from decimal import Decimal  
+from decimal import Decimal
+from datetime import datetime
+from functools import lru_cache  
 
 def create_product(product_data):  
     name = product_data.get('name')  
@@ -70,7 +72,11 @@ def create_product(product_data):
                     (new_product_id, ingredient_id, portions, min_quantity, max_quantity)
                 )
 
-        conn.commit()  
+        conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após criar produto
+        _invalidate_product_cache()
+        
         return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id}, None, None)  
     except fdb.Error as e:  
         print(f"Erro ao criar produto: {e}")  
@@ -309,7 +315,7 @@ def check_product_availability(product_id, quantity=1):
             conn.close()
 
 
-def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1):
+def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1, cur=None):
     """
     Calcula a quantidade máxima disponível de um ingrediente extra baseado em:
     1. MAX_QUANTITY definido na regra do produto (se fornecido)
@@ -317,10 +323,14 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
     
     Retorna a menor quantidade entre os dois limites.
     
+    OTIMIZAÇÃO DE PERFORMANCE: Aceita cursor opcional para reutilizar conexão existente,
+    evitando múltiplas conexões ao banco quando chamada em loops.
+    
     Args:
         ingredient_id: ID do ingrediente
         max_quantity_from_rule: MAX_QUANTITY da regra do produto (None se não limitado)
         item_quantity: Quantidade de itens do produto (padrão: 1)
+        cur: Cursor opcional para reutilizar conexão (se None, cria nova conexão)
     
     Returns:
         dict: {
@@ -335,9 +345,14 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
         }
     """
     conn = None
+    should_close_conn = False
+    
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        # Se cursor não foi fornecido, cria nova conexão
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close_conn = True
         
         # Busca informações do ingrediente
         cur.execute("""
@@ -445,13 +460,51 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
             'stock_info': None
         }
     finally:
-        if conn:
+        # Fecha conexão apenas se foi criada nesta função
+        if should_close_conn and conn:
             conn.close()
 
+# OTIMIZAÇÃO DE PERFORMANCE: Cache em memória para listas de produtos
+# Cache é invalidado quando produtos são criados/atualizados/deletados
+_product_list_cache = {}
+_product_list_cache_timestamp = {}
+_product_list_cache_ttl = 300  # 5 minutos de TTL
+
+def _invalidate_product_cache():
+    """Invalida cache de produtos forçando refresh na próxima chamada"""
+    global _product_list_cache, _product_list_cache_timestamp
+    _product_list_cache = {}
+    _product_list_cache_timestamp = {}
+
+def _get_cache_key(name_filter, category_id, page, page_size, include_inactive):
+    """Gera chave única para o cache baseada nos parâmetros"""
+    return f"{name_filter or ''}_{category_id or ''}_{page}_{page_size}_{include_inactive}"
+
+def _is_cache_valid(cache_key):
+    """Verifica se o cache ainda é válido"""
+    if cache_key not in _product_list_cache_timestamp:
+        return False
+    elapsed = (datetime.now() - _product_list_cache_timestamp[cache_key]).total_seconds()
+    return elapsed < _product_list_cache_ttl
+
 def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False):  
+    """
+    Lista produtos com cache em memória para melhor performance.
+    Cache TTL: 5 minutos. Invalidado automaticamente quando produtos são modificados.
+    """
     page = max(int(page or 1), 1)  
     page_size = max(int(page_size or 10), 1)  
     offset = (page - 1) * page_size  
+    
+    # OTIMIZAÇÃO: Verifica cache antes de consultar banco
+    # Nota: Cache desabilitado para filtros de nome (busca dinâmica) e produtos inativos
+    # Cache apenas para listagens padrão (sem filtro de nome, apenas ativos)
+    use_cache = not name_filter and not include_inactive
+    cache_key = _get_cache_key(name_filter, category_id, page, page_size, include_inactive)
+    
+    if use_cache and _is_cache_valid(cache_key) and cache_key in _product_list_cache:
+        return _product_list_cache[cache_key]
+    
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -575,7 +628,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             items.append(item)  
         
         total_pages = (total + page_size - 1) // page_size  
-        return {  
+        result = {  
             "items": items,  
             "pagination": {  
                 "total": total,  
@@ -583,7 +636,14 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 "page_size": page_size,  
                 "total_pages": total_pages  
             }  
-        }  
+        }
+        
+        # OTIMIZAÇÃO: Salva resultado no cache se for cacheável
+        if use_cache:
+            _product_list_cache[cache_key] = result
+            _product_list_cache_timestamp[cache_key] = datetime.now()
+        
+        return result
     except fdb.Error as e:  
         print(f"Erro ao listar produtos: {e}")  
         return {  
@@ -635,11 +695,13 @@ def get_product_by_id(product_id):
                 ing_id = r[0]
                 max_quantity_rule = int(r[4]) if r[4] is not None else None
                 
+                # OTIMIZAÇÃO: Passa cursor para reutilizar conexão existente
                 # Calcula quantidade máxima disponível baseada no estoque e na regra
                 max_available_info = get_ingredient_max_available_quantity(
                     ingredient_id=ing_id,
                     max_quantity_from_rule=max_quantity_rule,
-                    item_quantity=1  # Por padrão, verifica para 1 item
+                    item_quantity=1,  # Por padrão, verifica para 1 item
+                    cur=cur  # Reutiliza conexão existente
                 )
                 
                 # Se é um ingrediente extra (portions = 0), usa max_available calculado
@@ -814,6 +876,9 @@ def update_product(product_id, update_data):
 
         conn.commit()
         
+        # OTIMIZAÇÃO: Invalida cache após atualizar produto
+        _invalidate_product_cache()
+        
         # Se o preço foi atualizado, recalcula os descontos das promoções após o commit
         if price_updated:
             try:
@@ -850,7 +915,11 @@ def deactivate_product(product_id):
         # Atualiza o produto para inativo
         sql = "UPDATE PRODUCTS SET IS_ACTIVE = FALSE WHERE ID = ?;"  
         cur.execute(sql, (product_id,))  
-        conn.commit()  
+        conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após inativar produto
+        _invalidate_product_cache()
+        
         return True  # Sempre retorna True se o produto existe
     except fdb.Error as e:  
         print(f"Erro ao inativar produto: {e}")  
@@ -902,6 +971,10 @@ def reactivate_product(product_id):
         sql = "UPDATE PRODUCTS SET IS_ACTIVE = TRUE WHERE ID = ?;"  
         cur.execute(sql, (product_id,))
         conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após reativar produto
+        _invalidate_product_cache()
+        
         return True  # Sempre retorna True se o produto existe
     except fdb.Error as e:  
         print(f"Erro ao reativar produto: {e}")  
@@ -1227,6 +1300,9 @@ def delete_product(product_id):
             return (False, "DELETE_FAILED", "Falha ao excluir o produto")
         
         conn.commit()
+        
+        # OTIMIZAÇÃO: Invalida cache após deletar produto
+        _invalidate_product_cache()
         
         # 10. Remover imagem do produto se existir
         try:

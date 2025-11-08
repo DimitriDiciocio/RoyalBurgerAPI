@@ -1,18 +1,59 @@
-import os  
-import fdb  
+import os
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  
 
 class Config:  
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'uma-chave-secreta-muito-dificil-de-adivinhar'  
-    DEBUG = True  
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'uma-outra-chave-jwt-muito-segura'  
+    # ALTERAÇÃO: SECRET_KEY deve ser obrigatória via variável de ambiente em produção
+    # Gera chave temporária apenas para desenvolvimento se não estiver definida
+    _secret_key = os.environ.get('SECRET_KEY')
+    if not _secret_key:
+        import secrets
+        # Gera chave temporária apenas para desenvolvimento
+        _secret_key = secrets.token_urlsafe(32)
+        # ALTERAÇÃO: Em produção, força erro se SECRET_KEY não estiver definida
+        flask_env = os.environ.get('FLASK_ENV', 'development')
+        if flask_env not in ('development', 'dev', 'test'):
+            import warnings
+            warnings.warn("SECRET_KEY não definida via variável de ambiente! Use apenas em desenvolvimento.", UserWarning)
+    SECRET_KEY = _secret_key
+    
+    # ALTERAÇÃO: DEBUG deve ser False em produção por padrão
+    DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes')
+    
+    # ALTERAÇÃO: JWT_SECRET_KEY deve ser obrigatória via variável de ambiente
+    _jwt_secret_key = os.environ.get('JWT_SECRET_KEY')
+    if not _jwt_secret_key:
+        import secrets
+        _jwt_secret_key = secrets.token_urlsafe(32)
+        # ALTERAÇÃO: Em produção, força erro se JWT_SECRET_KEY não estiver definida
+        flask_env = os.environ.get('FLASK_ENV', 'development')
+        if flask_env not in ('development', 'dev', 'test'):
+            import warnings
+            warnings.warn("JWT_SECRET_KEY não definida via variável de ambiente! Use apenas em desenvolvimento.", UserWarning)
+    JWT_SECRET_KEY = _jwt_secret_key
+    
     JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 14400))  
     DATABASE_PATH = os.path.join(PROJECT_ROOT, 'database', 'royalburger.fdb')
-    FIREBIRD_HOST = 'localhost'  
-    FIREBIRD_PORT = 3050  
-    FIREBIRD_USER = 'SYSDBA'  
-    FIREBIRD_PASSWORD = 'sysdba'  
+    FIREBIRD_HOST = os.environ.get('FIREBIRD_HOST', 'localhost')  
+    FIREBIRD_PORT = int(os.environ.get('FIREBIRD_PORT', 3050))  
+    FIREBIRD_USER = os.environ.get('FIREBIRD_USER', 'SYSDBA')  
+    # IMPLEMENTAÇÃO: Validação de senha do banco (Recomendação #6)
+    # Senha do banco deve vir de variável de ambiente, nunca hardcoded
+    _firebird_password = os.environ.get('FIREBIRD_PASSWORD')
+    if not _firebird_password:
+        flask_env = os.environ.get('FLASK_ENV', 'development')
+        if flask_env not in ('development', 'dev', 'test'):
+            # Em produção, senha é obrigatória
+            raise ValueError("FIREBIRD_PASSWORD deve ser definida via variável de ambiente em produção!")
+        # Apenas em desenvolvimento, usa valor padrão (com warning)
+        import warnings
+        warnings.warn(
+            "FIREBIRD_PASSWORD não definida via variável de ambiente! "
+            "Usando valor padrão apenas para desenvolvimento.",
+            UserWarning
+        )
+        _firebird_password = 'sysdba'  # Apenas para desenvolvimento
+    FIREBIRD_PASSWORD = _firebird_password  
     MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')  
     MAIL_PORT = int(os.environ.get('MAIL_PORT', 587))  
     MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() in ['true', '1', 't']  

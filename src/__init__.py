@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from flask_jwt_extended import JWTManager  
 from flask_socketio import SocketIO  
 from flask_mail import Mail  
+import os  # ALTERAÇÃO: Import necessário para CORS_ALLOWED_ORIGINS
 load_dotenv()  
 from .config import Config  
 import src.services.auth_service as auth_service  
@@ -19,11 +20,16 @@ def create_app():
     
     # Configuração para permitir multipart/form-data
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB  
-    # CORS: Permitir origens para web (localhost) e mobile (IPs locais)
-    # Em produção, especificar origens exatas
+    # ALTERAÇÃO: CORS configurado de forma mais segura
+    # Em produção, especificar origens exatas via variável de ambiente
+    allowed_origins = os.environ.get('CORS_ALLOWED_ORIGINS', '*')
+    if allowed_origins != '*':
+        # Se não for wildcard, converte string separada por vírgulas em lista
+        allowed_origins = [origin.strip() for origin in allowed_origins.split(',')]
+    
     CORS(app, resources={
         r"/api/*": {
-            "origins": ["*"],  # Permitir todas as origens (ajustar em produção)
+            "origins": allowed_origins,  # ALTERAÇÃO: Configurável via env, não hardcoded "*"
             "methods": ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
             "allow_headers": ['Content-Type', 'Authorization', 'Content-Disposition'],
             "supports_credentials": True
@@ -114,20 +120,23 @@ def create_app():
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')  
     from .sockets import chat_events  
     
-    # Handler global para requisições OPTIONS (preflight)
+    # ALTERAÇÃO: Handler de preflight melhorado - usa configuração de CORS centralizada
+    # TODO: REVISAR - Este handler pode ser redundante se CORS estiver configurado corretamente acima
     @app.before_request
     def handle_preflight():
         from flask import request, make_response
         if request.method == "OPTIONS":
             response = make_response()
-            # Verifica a origem da requisição
+            # ALTERAÇÃO: Usa mesma configuração de CORS que o decorator principal
             origin = request.headers.get('Origin')
-            allowed_origins = ["http://127.0.0.1:5500", "http://localhost:5500", "http://127.0.0.1:5000"]
+            cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS', '*')
             
-            if origin in allowed_origins:
-                response.headers.add("Access-Control-Allow-Origin", origin)
+            if cors_origins == '*' or origin in cors_origins.split(','):
+                # Permite origem se estiver na lista ou se CORS permite todas
+                response.headers.add("Access-Control-Allow-Origin", origin or '*')
             else:
-                response.headers.add("Access-Control-Allow-Origin", "http://127.0.0.1:5500")
+                # Fallback seguro: não permite origem não autorizada
+                response.headers.add("Access-Control-Allow-Origin", cors_origins.split(',')[0] if cors_origins != '*' else '*')
             
             response.headers.add('Access-Control-Allow-Headers', "Content-Type, Authorization, Content-Disposition")
             response.headers.add('Access-Control-Allow-Methods', "GET, POST, PUT, DELETE, PATCH, OPTIONS")
@@ -143,6 +152,111 @@ def create_app():
             # Não faz nada, deixa o Flask processar normalmente
             pass
     
+    # IMPLEMENTAÇÃO: Headers de segurança HTTP (Recomendação #1)
+    @app.after_request
+    def set_security_headers(response):
+        """
+        Adiciona headers de segurança HTTP em todas as respostas.
+        Protege contra XSS, clickjacking, MIME sniffing e força HTTPS.
+        """
+        # Previne MIME type sniffing
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        
+        # Previne clickjacking
+        response.headers['X-Frame-Options'] = 'DENY'
+        
+        # Proteção XSS (navegadores antigos)
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        
+        # HSTS - força HTTPS (apenas em produção)
+        if os.environ.get('FLASK_ENV') not in ('development', 'dev', 'test'):
+            response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains; preload'
+        
+        # Content Security Policy básica (ajustar conforme necessário)
+        # TODO: REVISAR - Ajustar CSP conforme políticas de segurança da aplicação
+        csp_policy = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "font-src 'self' data:; "
+            "connect-src 'self';"
+        )
+        response.headers['Content-Security-Policy'] = csp_policy
+        
+        # Referrer Policy
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        
+        # Permissions Policy (antes Feature-Policy)
+        response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+        
+        return response
+    
+    # IMPLEMENTAÇÃO: Handler global de erros (Recomendação #4)
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    @app.errorhandler(400)
+    def bad_request(error):
+        """Handler para erros 400 (Bad Request)"""
+        return {"error": "Requisição inválida", "code": "BAD_REQUEST"}, 400
+    
+    @app.errorhandler(401)
+    def unauthorized(error):
+        """Handler para erros 401 (Unauthorized)"""
+        return {"error": "Não autorizado", "code": "UNAUTHORIZED"}, 401
+    
+    @app.errorhandler(403)
+    def forbidden(error):
+        """Handler para erros 403 (Forbidden)"""
+        return {"error": "Acesso negado", "code": "FORBIDDEN"}, 403
+    
+    @app.errorhandler(404)
+    def not_found(error):
+        """Handler para erros 404 (Not Found)"""
+        return {"error": "Recurso não encontrado", "code": "NOT_FOUND"}, 404
+    
+    @app.errorhandler(405)
+    def method_not_allowed(error):
+        """Handler para erros 405 (Method Not Allowed)"""
+        return {"error": "Método não permitido", "code": "METHOD_NOT_ALLOWED"}, 405
+    
+    @app.errorhandler(409)
+    def conflict(error):
+        """Handler para erros 409 (Conflict)"""
+        return {"error": "Conflito na requisição", "code": "CONFLICT"}, 409
+    
+    @app.errorhandler(422)
+    def unprocessable_entity(error):
+        """Handler para erros 422 (Unprocessable Entity)"""
+        return {"error": "Entidade não processável", "code": "UNPROCESSABLE_ENTITY"}, 422
+    
+    @app.errorhandler(500)
+    def internal_error(error):
+        """Handler para erros 500 (Internal Server Error)"""
+        logger.error(f"Erro interno do servidor: {error}", exc_info=True)
+        # Não expõe detalhes do erro ao cliente em produção
+        if app.config.get('DEBUG'):
+            return {"error": str(error), "code": "INTERNAL_ERROR"}, 500
+        return {"error": "Erro interno do servidor", "code": "INTERNAL_ERROR"}, 500
+    
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        """
+        Handler global para exceções não tratadas.
+        Captura todas as exceções que não foram tratadas especificamente.
+        """
+        logger.error(f"Exceção não tratada: {type(e).__name__}: {e}", exc_info=True)
+        
+        # Se for erro HTTP conhecido, delega para handlers específicos
+        if hasattr(e, 'code') and e.code:
+            return e
+        
+        # Para outros erros, retorna 500
+        if app.config.get('DEBUG'):
+            return {"error": str(e), "code": "UNHANDLED_EXCEPTION", "type": type(e).__name__}, 500
+        return {"error": "Erro interno do servidor", "code": "UNHANDLED_EXCEPTION"}, 500
+    
     # Inicialização e cleanup do pool de conexões
     # O pool é criado automaticamente na primeira chamada de get_db_connection()
     # Fechamos o pool ao encerrar o app para shutdown graceful
@@ -151,13 +265,15 @@ def create_app():
     
     def close_db_pool():
         """Fecha todas as conexões do pool ao encerrar aplicação"""
+        import logging
+        logger = logging.getLogger(__name__)
         try:
             pool = get_pool()
             if pool:
                 pool.close_all()
-                print("Pool de conexões fechado com sucesso.")
+                logger.info("Pool de conexões fechado com sucesso.")
         except Exception as e:
-            print(f"Erro ao fechar pool de conexões: {e}")
+            logger.error(f"Erro ao fechar pool de conexões: {e}", exc_info=True)
     
     atexit.register(close_db_pool)
     
@@ -171,7 +287,7 @@ def create_app():
         """
         Serve arquivos de upload de forma segura
         """
-        from flask import send_from_directory, abort
+        from flask import abort, request
         import os
         
         try:
@@ -236,7 +352,9 @@ def create_app():
             return response
             
         except Exception as e:
-            print(f"Erro ao servir upload: {e}")
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Erro ao servir upload: {e}", exc_info=True)
             abort(500)
     
     return app  
