@@ -958,6 +958,9 @@ def update_product_image_url(product_id, image_url):
         if conn: conn.close()
 
 
+import logging
+logger = logging.getLogger(__name__)
+
 def reactivate_product(product_id):  
     conn = None  
     try:  
@@ -980,7 +983,8 @@ def reactivate_product(product_id):
         
         return True  # Sempre retorna True se o produto existe
     except fdb.Error as e:  
-        print(f"Erro ao reativar produto: {e}")  
+        # Uso de logger estruturado evita prints e expõe stack de forma controlada
+        logger.exception("Erro ao reativar produto")
         if conn: conn.rollback()  
         return False  
     finally:  

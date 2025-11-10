@@ -26,16 +26,30 @@ def create_app():
     
     # Configuração para permitir multipart/form-data
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB  
-    # ALTERAÇÃO: CORS configurado de forma mais segura
+    # AJUSTE: CORS configurado de forma mais segura
     # Em produção, especificar origens exatas via variável de ambiente
+    # Exemplo: CORS_ALLOWED_ORIGINS=https://royalburger.com,https://www.royalburger.com
+    # Em desenvolvimento, usar '*' é aceitável
     allowed_origins = os.environ.get('CORS_ALLOWED_ORIGINS', '*')
+    flask_env = os.environ.get('FLASK_ENV', 'development')
+    
+    # AJUSTE: Em produção, não permitir wildcard '*' por segurança
+    if allowed_origins == '*' and flask_env not in ('development', 'dev', 'test'):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "CORS_ALLOWED_ORIGINS está como '*' em produção! "
+            "Configure origens exatas via variável de ambiente para maior segurança. "
+            "Exemplo: CORS_ALLOWED_ORIGINS=https://royalburger.com,https://www.royalburger.com"
+        )
+    
     if allowed_origins != '*':
         # Se não for wildcard, converte string separada por vírgulas em lista
         allowed_origins = [origin.strip() for origin in allowed_origins.split(',')]
     
     CORS(app, resources={
         r"/api/*": {
-            "origins": allowed_origins,  # ALTERAÇÃO: Configurável via env, não hardcoded "*"
+            "origins": allowed_origins,  # AJUSTE: Configurável via env, não hardcoded "*"
             "methods": ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
             "allow_headers": ['Content-Type', 'Authorization', 'Content-Disposition'],
             "supports_credentials": True

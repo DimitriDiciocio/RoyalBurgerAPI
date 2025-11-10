@@ -935,8 +935,17 @@ def get_order_details(order_id, user_id, user_role):
 
         # CORREÇÃO: Evitar query N+1 - buscar todos os extras de uma vez
         # Primeiro busca todos os itens
+        # Inclui PRODUCT_ID e imagem do produto para evitar roundtrips no frontend
         sql_items = """
-            SELECT oi.ID, oi.QUANTITY, oi.UNIT_PRICE, p.NAME, p.DESCRIPTION
+            SELECT
+                oi.ID,
+                oi.QUANTITY,
+                oi.UNIT_PRICE,
+                p.NAME,
+                p.DESCRIPTION,
+                oi.PRODUCT_ID,
+                p.IMAGE_URL,
+                NULL AS IMAGE_HASH -- REVISAR: adicionar coluna real se existir
             FROM ORDER_ITEMS oi
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
             WHERE oi.ORDER_ID = ?;
@@ -987,6 +996,9 @@ def get_order_details(order_id, user_id, user_role):
                 "unit_price": item_row[2],
                 "product_name": item_row[3],
                 "product_description": item_row[4],
+                "product_id": item_row[5],                 # adicionado
+                "product_image_url": item_row[6],          # adicionado
+                "product_image_hash": item_row[7],         # adicionado (pode ser None)
                 "extras": extras_dict.get(order_item_id, {}).get('extras', []),
                 "base_modifications": extras_dict.get(order_item_id, {}).get('base_modifications', [])
             }
