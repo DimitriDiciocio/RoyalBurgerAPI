@@ -153,11 +153,24 @@ def calculate_order_total_route():
 @require_role('customer')  
 def get_my_orders_route():  
     claims = get_jwt()  
-    user_id = int(claims.get('sub'))
+    # ALTERAÇÃO: Validação segura de user_id para evitar ValueError/TypeError
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
     
-    # OTIMIZAÇÃO: Suportar parâmetros de paginação
+    # ALTERAÇÃO: Validação de parâmetros de paginação para evitar valores inválidos
     page = request.args.get('page', 1, type=int)
     page_size = request.args.get('page_size', 50, type=int)
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 50
+    if page_size > 100:  # Limite máximo para evitar sobrecarga
+        page_size = 100
     
     result = order_service.get_orders_by_user_id(user_id, page=page, page_size=page_size)
     
@@ -171,9 +184,15 @@ def get_my_orders_route():
 @order_bp.route('/all', methods=['GET'])  
 @require_role('admin', 'manager')  
 def get_all_orders_route():  
-    # OTIMIZAÇÃO: Suportar parâmetros de paginação (seção 1.9)
+    # ALTERAÇÃO: Validação de parâmetros de paginação para evitar valores inválidos
     page = request.args.get('page', 1, type=int)
     page_size = request.args.get('page_size', 50, type=int)
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 50
+    if page_size > 100:  # Limite máximo para evitar sobrecarga
+        page_size = 100
     orders = order_service.get_all_orders(page=page, page_size=page_size)  
     return jsonify(orders), 200  
 
@@ -192,7 +211,14 @@ def update_order_status_route(order_id):
 @jwt_required()  
 def get_order_details_route(order_id):  
     claims = get_jwt()  
-    user_id = int(claims.get('sub'))  
+    # ALTERAÇÃO: Validação segura de user_id para evitar ValueError/TypeError
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
     user_roles = claims.get('roles', [])  
     order = order_service.get_order_details(order_id, user_id, user_roles)  
     if order:  
@@ -204,7 +230,14 @@ def get_order_details_route(order_id):
 @require_role('customer', 'manager')  
 def cancel_order_route(order_id):  
     claims = get_jwt()  
-    user_id = int(claims.get('sub'))  
+    # ALTERAÇÃO: Validação segura de user_id para evitar ValueError/TypeError
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
     user_roles = claims.get('roles', [])
     
     # Verifica se é gerente (manager ou admin)
@@ -228,7 +261,14 @@ def cancel_order_route(order_id):
 @require_role('admin', 'manager')
 def print_kitchen_ticket_route(order_id):
     claims = get_jwt()
-    user_id = int(claims.get('sub'))
+    # ALTERAÇÃO: Validação segura de user_id (mesmo que não seja usado, mantém consistência)
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
     # Admin/manager podem visualizar e imprimir qualquer pedido
     order = order_service.get_order_details(order_id, user_id, claims.get('roles', []))
     if not order:
@@ -254,7 +294,14 @@ def reprint_kitchen_ticket_event_route(order_id):
     Emite o evento de reimpressão no WebSocket para o agente de impressão.
     """
     claims = get_jwt()
-    user_id = int(claims.get('sub'))
+    # ALTERAÇÃO: Validação segura de user_id (mesmo que não seja usado, mantém consistência)
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
     order = order_service.get_order_details(order_id, user_id, claims.get('roles', []))
     if not order:
         return jsonify({"error": "Pedido não encontrado"}), 404
@@ -272,7 +319,14 @@ def reprint_kitchen_ticket_event_route(order_id):
 @require_role('admin', 'manager')
 def get_kitchen_ticket_pdf_route(order_id):
     claims = get_jwt()
-    user_id = int(claims.get('sub'))
+    # ALTERAÇÃO: Validação segura de user_id (mesmo que não seja usado, mantém consistência)
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
     order = order_service.get_order_details(order_id, user_id, claims.get('roles', []))
     if not order:
         return jsonify({"error": "Pedido não encontrado"}), 404

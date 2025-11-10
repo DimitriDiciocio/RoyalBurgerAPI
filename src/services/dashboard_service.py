@@ -3,9 +3,38 @@ import logging
 from datetime import datetime, date, timedelta
 from ..database import get_db_connection
 
-logger = logging.getLogger(__name__)  
+logger = logging.getLogger(__name__)
+
+# OTIMIZAÇÃO DE PERFORMANCE: Cache de métricas do dashboard
+_dashboard_metrics_cache = None
+_dashboard_cache_timestamp = None
+_dashboard_cache_ttl = 60  # 1 minuto de TTL (métricas mudam frequentemente)
+
+def _is_dashboard_cache_valid():
+    """Verifica se o cache de métricas ainda é válido"""
+    global _dashboard_cache_timestamp
+    if _dashboard_cache_timestamp is None:
+        return False
+    elapsed = (datetime.now() - _dashboard_cache_timestamp).total_seconds()
+    return elapsed < _dashboard_cache_ttl
+
+def _invalidate_dashboard_cache():
+    """Invalida o cache de métricas forçando refresh na próxima chamada"""
+    global _dashboard_metrics_cache, _dashboard_cache_timestamp
+    _dashboard_metrics_cache = None
+    _dashboard_cache_timestamp = None  
 
 def get_dashboard_metrics():  
+    """
+    Retorna métricas do dashboard com cache de 1 minuto para melhor performance.
+    Métricas são atualizadas frequentemente, então TTL curto é apropriado.
+    """
+    global _dashboard_metrics_cache, _dashboard_cache_timestamp
+    
+    # OTIMIZAÇÃO: Verifica cache antes de consultar banco
+    if _is_dashboard_cache_valid() and _dashboard_metrics_cache is not None:
+        return _dashboard_metrics_cache
+    
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -17,6 +46,7 @@ def get_dashboard_metrics():
         end_datetime = datetime.combine(today + timedelta(days=1), datetime.min.time())
         
         # OTIMIZAÇÃO: Query única consolidada para métricas principais (substitui 6 queries)
+        # NOTA: Esta query já está otimizada, mas pode ser melhorada com índices em CREATED_AT e STATUS
         metrics_query = """
             SELECT
                 -- Total de pedidos hoje
@@ -70,6 +100,7 @@ def get_dashboard_metrics():
         order_distribution = {row[0]: row[1] for row in cur.fetchall()}
         
         # Query separada para pedidos recentes (usando FIRST ao invés de LIMIT no Firebird)
+        # OTIMIZAÇÃO: Limita a 5 pedidos para reduzir tamanho da resposta
         cur.execute("""
             SELECT FIRST 5 ID, TOTAL_AMOUNT, STATUS, ORDER_TYPE, CREATED_AT
             FROM ORDERS 
@@ -85,7 +116,7 @@ def get_dashboard_metrics():
                 "created_at": row[4].isoformat() if row[4] else None
             })
         
-        return {  
+        result = {  
             "total_orders_today": metrics_row[0] or 0,
             "revenue_today": float(metrics_row[1]) if metrics_row[1] else 0.0,
             "average_ticket": round(float(metrics_row[2]) if metrics_row[2] else 0.0, 2),
@@ -97,6 +128,12 @@ def get_dashboard_metrics():
             "order_distribution": order_distribution,
             "recent_orders": recent_orders
         }
+        
+        # OTIMIZAÇÃO: Salva resultado no cache
+        _dashboard_metrics_cache = result
+        _dashboard_cache_timestamp = datetime.now()
+        
+        return result
     except fdb.Error as e:  
         logger.error(f"Erro ao buscar métricas do dashboard: {e}", exc_info=True)  
         return {  

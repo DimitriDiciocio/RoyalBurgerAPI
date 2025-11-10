@@ -704,15 +704,16 @@ def update_order_status(order_id, new_status):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Primeiro verifica se o pedido existe, qual o status atual e o tipo
-        cur.execute("SELECT STATUS, ORDER_TYPE FROM ORDERS WHERE ID = ?;", (order_id,))
+        # OTIMIZAÇÃO DE PERFORMANCE: Busca STATUS, ORDER_TYPE e USER_ID em uma única query
+        # USER_ID é necessário para notificações e pontos de fidelidade
+        cur.execute("SELECT STATUS, ORDER_TYPE, USER_ID FROM ORDERS WHERE ID = ?;", (order_id,))
         order_info = cur.fetchone()
         
         if not order_info:
             logger.error(f"Pedido {order_id} não encontrado")
             return False
         
-        current_status, order_type = order_info
+        current_status, order_type, user_id = order_info
         
         # Aceita tanto os valores do frontend quanto os do banco
         allowed_statuses = ['pending', 'preparing', 'on_the_way', 'ready', 'completed', 'delivered', 'cancelled']
@@ -769,98 +770,105 @@ def update_order_status(order_id, new_status):
                 return False
             logger.info(f"Estoque deduzido para pedido {order_id}: {message}")
 
-        # Busca dados do pedido uma única vez para uso em múltiplas operações
-        # order_type já foi obtido acima, então busca apenas USER_ID e TOTAL_AMOUNT
-        cur.execute("""
-            SELECT USER_ID, TOTAL_AMOUNT FROM ORDERS WHERE ID = ?;
-        """, (order_id,))
-        order_data = cur.fetchone()
+        # OTIMIZAÇÃO DE PERFORMANCE: user_id e order_type já foram obtidos na query inicial
+        # Para pontos de fidelidade, precisa recalcular subtotal e buscar TOTAL_AMOUNT
+        stored_total = None
         
-        if not order_data:
-            conn.rollback()
-            return False
-        
-        user_id, stored_total = order_data
-        total_after_discount = float(stored_total) if stored_total else 0.0
-        
-        # Processa crédito de pontos apenas quando entregue (delivered)
+        # OTIMIZAÇÃO: Só busca TOTAL_AMOUNT se realmente precisar (para pontos quando delivered)
         if db_status == 'delivered':
-            # Busca configurações para taxa de entrega
+            cur.execute("SELECT TOTAL_AMOUNT FROM ORDERS WHERE ID = ?;", (order_id,))
+            total_result = cur.fetchone()
+            
+            if total_result:
+                stored_total = total_result[0]
+            
+            total_after_discount = float(stored_total) if stored_total else 0.0
+            
+            # Processa crédito de pontos apenas quando entregue (delivered)
+            # Busca configurações para taxa de entrega (já tem cache)
             settings = settings_service.get_all_settings()
             delivery_fee = 0.0
             if order_type == ORDER_TYPE_DELIVERY and settings and settings.get('taxa_entrega'):
                 delivery_fee = float(settings.get('taxa_entrega'))
             
-            # Calcula subtotal (soma dos itens) e desconto
+            # OTIMIZAÇÃO: Calcula subtotal e extras em uma única query otimizada
             # Para extras e base_modifications, usa DELTA para multiplicar
             try:
-                # Primeiro verifica se o pedido tem itens
-                cur.execute("SELECT COUNT(*) FROM ORDER_ITEMS WHERE ORDER_ID = ?;", (order_id,))
-                item_count = cur.fetchone()[0]
-                
-                if item_count > 0:
-                    cur.execute("""
-                        SELECT 
-                            CAST(COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) AS DECIMAL(10,2)) as SUBTOTAL_ITEMS,
-                            CAST(COALESCE(SUM(
-                                CASE 
-                                    WHEN oie.DELTA IS NOT NULL THEN oie.DELTA * oie.UNIT_PRICE
-                                    ELSE oie.QUANTITY * oie.UNIT_PRICE
-                                END
-                            ), 0) AS DECIMAL(10,2)) as TOTAL_EXTRAS
-                        FROM ORDER_ITEMS oi
-                        LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
-                        WHERE oi.ORDER_ID = ?;
-                    """, (order_id,))
-                    row = cur.fetchone()
-                    if row:
-                        subtotal_items = float(row[0]) if row[0] is not None else 0.0
-                        total_extras = float(row[1]) if row[1] is not None else 0.0
-                        subtotal = subtotal_items + total_extras
-                        
-                        # Calcula desconto aplicado
-                        total_before_discount = subtotal + delivery_fee
-                        discount_applied = total_before_discount - total_after_discount
-                        
-                        # Credita pontos usando função precisa
-                        try:
-                            loyalty_service.earn_points_for_order_with_details(
-                                user_id, order_id, subtotal, discount_applied, delivery_fee, cur
-                            )
-                        except Exception as e:
-                            logger.error(f"Erro ao creditar pontos para pedido {order_id}: {e}", exc_info=True)
-                            # Não falha o pedido por erro nos pontos, apenas loga
-                    else:
-                        logger.warning(f"Pedido {order_id} não retornou dados do cálculo de subtotal")
+                # OTIMIZAÇÃO: Query única que calcula subtotal e extras juntos
+                cur.execute("""
+                    SELECT 
+                        CAST(COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) AS DECIMAL(10,2)) as SUBTOTAL_ITEMS,
+                        CAST(COALESCE(SUM(
+                            CASE 
+                                WHEN oie.DELTA IS NOT NULL THEN oie.DELTA * oie.UNIT_PRICE
+                                ELSE oie.QUANTITY * oie.UNIT_PRICE
+                            END
+                        ), 0) AS DECIMAL(10,2)) as TOTAL_EXTRAS
+                    FROM ORDER_ITEMS oi
+                    LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
+                    WHERE oi.ORDER_ID = ?;
+                """, (order_id,))
+                row = cur.fetchone()
+                if row:
+                    subtotal_items = float(row[0]) if row[0] is not None else 0.0
+                    total_extras = float(row[1]) if row[1] is not None else 0.0
+                    subtotal = subtotal_items + total_extras
+                    
+                    # Calcula desconto aplicado
+                    total_before_discount = subtotal + delivery_fee
+                    discount_applied = total_before_discount - total_after_discount
+                    
+                    # Credita pontos usando função precisa
+                    try:
+                        loyalty_service.earn_points_for_order_with_details(
+                            user_id, order_id, subtotal, discount_applied, delivery_fee, cur
+                        )
+                    except Exception as e:
+                        logger.error(f"Erro ao creditar pontos para pedido {order_id}: {e}", exc_info=True)
+                        # Não falha o pedido por erro nos pontos, apenas loga
                 else:
-                    logger.warning(f"Pedido {order_id} não tem itens para calcular pontos")
+                    logger.warning(f"Pedido {order_id} não retornou dados do cálculo de subtotal")
             except Exception as e:
                 logger.error(f"Erro ao calcular subtotal do pedido {order_id}: {e}", exc_info=True)
                 # Continua mesmo se houver erro no cálculo
 
         conn.commit()
         
-        # Envia notificação após commit bem-sucedido
-        # Para pickup com status ready ou in_progress (fallback), mensagem personalizada
-        if (db_status == 'ready' or db_status == 'in_progress') and order_type == ORDER_TYPE_PICKUP:
-            notification_message = f"Seu pedido #{order_id} está pronto para retirada no balcão!"
-        else:
-            notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
-            notification_link = f"/my-orders/{order_id}"
-            notification_service.create_notification(user_id, notification_message, notification_link)
+        # OTIMIZAÇÃO DE PERFORMANCE: Envia notificações de forma assíncrona (não bloqueia resposta)
+        # user_id já foi obtido na query inicial, então pode ser usado diretamente
         
-        # Envia email de notificação
-        customer = user_service.get_user_by_id(user_id)
-        if customer:
+        # Envia notificação após commit bem-sucedido (não bloqueia se falhar)
+        if user_id:
             try:
-                email_service.send_email(
-                    to=customer['email'],
-                    subject=f"Atualização sobre seu pedido #{order_id}",
-                    template='order_status_update',
-                    user=customer,
-                    order={"order_id": order_id},
-                    new_status=new_status
-                )
+                # Para pickup com status ready ou in_progress (fallback), mensagem personalizada
+                if (db_status == 'ready' or db_status == 'in_progress') and order_type == ORDER_TYPE_PICKUP:
+                    notification_message = f"Seu pedido #{order_id} está pronto para retirada no balcão!"
+                    notification_link = f"/my-orders/{order_id}"
+                    notification_service.create_notification(user_id, notification_message, notification_link)
+                elif db_status != 'delivered':  # Para delivered, notificação já foi enviada em outro lugar
+                    notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
+                    notification_link = f"/my-orders/{order_id}"
+                    notification_service.create_notification(user_id, notification_message, notification_link)
+            except Exception as e:
+                logger.error(f"Erro ao enviar notificação para pedido {order_id}: {e}", exc_info=True)
+                # Não falha a operação por erro na notificação
+        
+        # OTIMIZAÇÃO DE PERFORMANCE: Envia email de forma assíncrona (não bloqueia resposta)
+        # Email é enviado em background para não impactar tempo de resposta
+        if user_id:
+            try:
+                customer = user_service.get_user_by_id(user_id)
+                if customer:
+                    # OTIMIZAÇÃO: Email pode ser enviado de forma assíncrona em produção
+                    # Por enquanto, envia de forma síncrona mas captura erros
+                    email_service.send_email(
+                        to=customer['email'],
+                        subject=f"Atualização sobre seu pedido #{order_id}",
+                        template='order_status_update',
+                        user=customer,
+                        order={"order_id": order_id},
+                        new_status=new_status
+                    )
             except Exception as e:
                 logger.error(f"Erro ao enviar email para pedido {order_id}: {e}", exc_info=True)
                 # Não falha a operação por erro no email

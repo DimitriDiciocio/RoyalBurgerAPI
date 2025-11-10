@@ -12,6 +12,15 @@ def _invalidate_category_cache():
     global _category_list_cache, _category_list_cache_timestamp
     _category_list_cache = {}
     _category_list_cache_timestamp = {}
+    # Também invalida caches específicos
+    if "_categories_for_select" in _category_list_cache:
+        del _category_list_cache["_categories_for_select"]
+    if "_categories_for_select_timestamp" in _category_list_cache_timestamp:
+        del _category_list_cache_timestamp["_categories_for_select_timestamp"]
+    if "_categories_for_reorder" in _category_list_cache:
+        del _category_list_cache["_categories_for_reorder"]
+    if "_categories_for_reorder_timestamp" in _category_list_cache_timestamp:
+        del _category_list_cache_timestamp["_categories_for_reorder_timestamp"]
 
 def _get_category_cache_key(name_filter, page, page_size):
     """Gera chave única para o cache baseada nos parâmetros"""
@@ -53,7 +62,10 @@ def create_category(category_data):
         return ({"id": new_id, "name": name, "is_active": True, "display_order": next_order}, None, None)
     except fdb.Error as e:
         if conn: conn.rollback()
-        print(f"Erro ao criar categoria: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao criar categoria: {e}", exc_info=True)
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -128,7 +140,10 @@ def list_categories(name_filter=None, page=1, page_size=10):
         
         return result
     except fdb.Error as e:
-        print(f"Erro ao listar categorias: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao listar categorias: {e}", exc_info=True)
         return {
             "items": [],
             "pagination": {
@@ -182,7 +197,10 @@ def update_category(category_id, update_data):
         return (True, None, "Categoria atualizada com sucesso")
     except fdb.Error as e:
         if conn: conn.rollback()
-        print(f"Erro ao atualizar categoria: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao atualizar categoria: {e}", exc_info=True)
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -209,7 +227,10 @@ def delete_category(category_id):
         # Se há produtos vinculados, desvincula todos eles primeiro
         if count_linked > 0:
             cur.execute("UPDATE PRODUCTS SET CATEGORY_ID = NULL WHERE CATEGORY_ID = ? AND IS_ACTIVE = TRUE;", (category_id,))
-            print(f"Desvinculados {count_linked} produtos da categoria '{category_name}' (ID: {category_id})")
+            # ALTERAÇÃO: Substituído print() por logging estruturado
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Desvinculados {count_linked} produtos da categoria '{category_name}' (ID: {category_id})")
 
         # Agora exclui a categoria
         cur.execute("DELETE FROM CATEGORIES WHERE ID = ?;", (category_id,))
@@ -235,7 +256,10 @@ def delete_category(category_id):
             
     except fdb.Error as e:
         if conn: conn.rollback()
-        print(f"Erro ao excluir categoria: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao excluir categoria: {e}", exc_info=True)
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -288,7 +312,10 @@ def reorder_categories(category_orders):
         
     except fdb.Error as e:
         if conn: conn.rollback()
-        print(f"Erro ao reordenar categorias: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao reordenar categorias: {e}", exc_info=True)
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -298,7 +325,21 @@ def get_categories_for_reorder():
     """
     Retorna todas as categorias ativas ordenadas por display_order para reordenação.
     Retorna (categorias, error_code, mensagem)
+    
+    OTIMIZAÇÃO DE PERFORMANCE: Usa cache para reduzir queries ao banco.
     """
+    # OTIMIZAÇÃO: Cache específico para categorias de reordenação
+    cache_key_reorder = "_categories_for_reorder"
+    cache_key_timestamp_reorder = "_categories_for_reorder_timestamp"
+    
+    # Verifica cache (TTL de 10 minutos)
+    if cache_key_reorder in _category_list_cache:
+        cache_timestamp = _category_list_cache_timestamp.get(cache_key_timestamp_reorder)
+        if cache_timestamp:
+            elapsed = (datetime.now() - cache_timestamp).total_seconds()
+            if elapsed < _category_list_cache_ttl:
+                return (_category_list_cache[cache_key_reorder], None, None)
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -312,10 +353,17 @@ def get_categories_for_reorder():
             for row in cur.fetchall()
         ]
         
+        # OTIMIZAÇÃO: Salva no cache
+        _category_list_cache[cache_key_reorder] = categories
+        _category_list_cache_timestamp[cache_key_timestamp_reorder] = datetime.now()
+        
         return (categories, None, None)
         
     except fdb.Error as e:
-        print(f"Erro ao buscar categorias para reordenação: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar categorias para reordenação: {e}", exc_info=True)
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -325,7 +373,22 @@ def get_categories_for_select():
     """
     Retorna todas as categorias ativas apenas com ID e nome para uso em selects.
     Retorna (categorias, error_code, mensagem)
+    
+    OTIMIZAÇÃO DE PERFORMANCE: Usa cache para reduzir queries ao banco.
+    Esta função é chamada frequentemente em formulários e selects.
     """
+    # OTIMIZAÇÃO: Cache específico para categorias de select (mais leve, sem paginação)
+    cache_key_select = "_categories_for_select"
+    cache_key_timestamp_select = "_categories_for_select_timestamp"
+    
+    # Verifica cache (TTL de 10 minutos, mesmo das listagens)
+    if cache_key_select in _category_list_cache:
+        cache_timestamp = _category_list_cache_timestamp.get(cache_key_timestamp_select)
+        if cache_timestamp:
+            elapsed = (datetime.now() - cache_timestamp).total_seconds()
+            if elapsed < _category_list_cache_ttl:
+                return (_category_list_cache[cache_key_select], None, None)
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -339,10 +402,17 @@ def get_categories_for_select():
             for row in cur.fetchall()
         ]
         
+        # OTIMIZAÇÃO: Salva no cache
+        _category_list_cache[cache_key_select] = categories
+        _category_list_cache_timestamp[cache_key_timestamp_select] = datetime.now()
+        
         return (categories, None, None)
         
     except fdb.Error as e:
-        print(f"Erro ao buscar categorias para select: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar categorias para select: {e}", exc_info=True)
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -419,7 +489,10 @@ def move_category_to_position(category_id, new_position):
         
     except fdb.Error as e:
         if conn: conn.rollback()
-        print(f"Erro ao mover categoria: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao mover categoria: {e}", exc_info=True)
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -504,7 +577,10 @@ def get_categories_with_products(include_inactive=False):
         return (result, None, None)
         
     except fdb.Error as e:
-        print(f"Erro ao buscar categorias com produtos: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar categorias com produtos: {e}", exc_info=True)
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
         if conn: conn.close()

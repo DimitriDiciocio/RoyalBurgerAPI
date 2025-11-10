@@ -79,7 +79,10 @@ def create_product(product_data):
         
         return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id}, None, None)  
     except fdb.Error as e:  
-        print(f"Erro ao criar produto: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao criar produto: {e}", exc_info=True)
         if conn: conn.rollback()  
         return (None, "DATABASE_ERROR", "Erro interno do servidor")  
     except ValueError as ve:

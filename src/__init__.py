@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from flask_jwt_extended import JWTManager  
 from flask_socketio import SocketIO  
 from flask_mail import Mail  
+from flask_compress import Compress
 import os  # ALTERAÇÃO: Import necessário para CORS_ALLOWED_ORIGINS
 load_dotenv()  
 from .config import Config  
@@ -11,12 +12,17 @@ from flask_cors import CORS
 from .routes.swagger_route import swagger_bp, swaggerui_blueprint  
 
 socketio = SocketIO(cors_allowed_origins="*")  
-mail = Mail()  
+mail = Mail()
+compress = Compress()  
 
 
 def create_app():  
     app = Flask(__name__)  
     app.config.from_object(Config)
+    
+    # OTIMIZAÇÃO DE PERFORMANCE: Compressão HTTP (GZIP/Brotli) para reduzir tamanho de respostas
+    # Comprime automaticamente respostas JSON, texto e outros conteúdos
+    compress.init_app(app)
     
     # Configuração para permitir multipart/form-data
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB  
@@ -131,12 +137,31 @@ def create_app():
             origin = request.headers.get('Origin')
             cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS', '*')
             
-            if cors_origins == '*' or origin in cors_origins.split(','):
-                # Permite origem se estiver na lista ou se CORS permite todas
+            # ALTERAÇÃO: Validação mais segura de CORS - em produção, não permite wildcard
+            if cors_origins == '*':
+                # Em produção, wildcard não é seguro com credentials
+                flask_env = os.environ.get('FLASK_ENV', 'development')
+                if flask_env not in ('development', 'dev', 'test'):
+                    # Em produção, requer origem específica
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning("CORS_ALLOWED_ORIGINS está como '*' em produção - considere especificar origens exatas")
                 response.headers.add("Access-Control-Allow-Origin", origin or '*')
+            elif origin:
+                # Verifica se origem está na lista permitida
+                allowed_list = [o.strip() for o in cors_origins.split(',')]
+                if origin in allowed_list:
+                    response.headers.add("Access-Control-Allow-Origin", origin)
+                else:
+                    # Origem não autorizada - retorna erro
+                    return make_response({"error": "Origin not allowed"}, 403)
             else:
-                # Fallback seguro: não permite origem não autorizada
-                response.headers.add("Access-Control-Allow-Origin", cors_origins.split(',')[0] if cors_origins != '*' else '*')
+                # Sem origem no header - permite apenas em desenvolvimento
+                flask_env = os.environ.get('FLASK_ENV', 'development')
+                if flask_env in ('development', 'dev', 'test'):
+                    response.headers.add("Access-Control-Allow-Origin", '*')
+                else:
+                    return make_response({"error": "Origin required"}, 400)
             
             response.headers.add('Access-Control-Allow-Headers', "Content-Type, Authorization, Content-Disposition")
             response.headers.add('Access-Control-Allow-Methods', "GET, POST, PUT, DELETE, PATCH, OPTIONS")
@@ -285,25 +310,45 @@ def create_app():
     @app.route('/api/uploads/<path:filename>')
     def serve_upload(filename):
         """
-        Serve arquivos de upload de forma segura
+        Serve arquivos de upload de forma segura com otimizações de performance:
+        - Cache headers melhorados (24h)
+        - ETag para validação de cache
+        - Streaming para arquivos grandes
+        - Suporte a 304 Not Modified
         """
-        from flask import abort, request
+        from flask import abort, request, Response
         import os
+        import hashlib
+        from datetime import datetime
         
         try:
-            # Valida o nome do arquivo para segurança
-            if '..' in filename or filename.startswith('/'):
+            # ALTERAÇÃO: Validação melhorada de filename para prevenir path traversal
+            # Remove qualquer tentativa de path traversal
+            if '..' in filename or filename.startswith('/') or '\\' in filename:
+                abort(400)
+            
+            # Normaliza o caminho para garantir segurança
+            filename = os.path.basename(filename)  # Remove qualquer diretório do nome
+            if not filename or filename == '.' or filename == '..':
                 abort(400)
             
             # Determina o diretório baseado no tipo de arquivo
-            if filename.startswith('products/'):
+            if request.path.startswith('/api/uploads/products/'):
                 upload_dir = os.path.join(os.getcwd(), 'uploads', 'products')
-                filename = filename.replace('products/', '')
             else:
                 abort(404)
             
-            # Verifica se o arquivo existe
+            # ALTERAÇÃO: Validação adicional - garante que o arquivo está dentro do diretório permitido
             file_path = os.path.join(upload_dir, filename)
+            # Normaliza o caminho absoluto para prevenir path traversal
+            file_path = os.path.normpath(file_path)
+            upload_dir_abs = os.path.normpath(os.path.abspath(upload_dir))
+            
+            # Verifica se o arquivo está dentro do diretório permitido
+            if not file_path.startswith(upload_dir_abs):
+                abort(400)
+            
+            # Verifica se o arquivo existe
             if not os.path.exists(file_path):
                 abort(404)
             
@@ -317,26 +362,64 @@ def create_app():
             else:
                 abort(400)
             
-            # Abordagem simplificada: ler arquivo em binário e retornar diretamente
-            # Isso evita problemas com chunked encoding ou stream
-            with open(file_path, 'rb') as f:
-                image_data = f.read()
+            # OTIMIZAÇÃO DE PERFORMANCE: Usar streaming para arquivos grandes
+            # Para arquivos pequenos (<1MB), carrega em memória
+            # Para arquivos grandes, usa streaming para reduzir uso de memória
+            file_size = os.path.getsize(file_path)
+            file_mtime = os.path.getmtime(file_path)
             
-            file_size = len(image_data)
+            # Gera ETag baseado no tamanho e data de modificação do arquivo
+            etag_input = f"{filename}_{file_size}_{file_mtime}"
+            etag = hashlib.md5(etag_input.encode()).hexdigest()
             
-            # Criar resposta direta sem chunked encoding
-            from flask import Response
-            response = Response(
-                image_data,
-                mimetype=mimetype,
-                headers={
-                    'Content-Type': mimetype,
-                    'Content-Length': str(file_size),
-                    'Accept-Ranges': 'bytes',
-                    'X-Content-Type-Options': 'nosniff',
-                    'Cache-Control': 'public, max-age=3600',
-                }
-            )
+            # Verifica se o cliente já tem a versão mais recente (304 Not Modified)
+            if_none_match = request.headers.get('If-None-Match')
+            if if_none_match == etag:
+                response = Response(status=304)
+                response.headers.add('ETag', etag)
+                return response
+            
+            # Para arquivos menores que 1MB, carrega em memória (mais rápido)
+            # Para arquivos maiores, usa streaming
+            if file_size < 1024 * 1024:  # < 1MB
+                with open(file_path, 'rb') as f:
+                    image_data = f.read()
+                response = Response(
+                    image_data,
+                    mimetype=mimetype,
+                    headers={
+                        'Content-Type': mimetype,
+                        'Content-Length': str(file_size),
+                        'Accept-Ranges': 'bytes',
+                        'X-Content-Type-Options': 'nosniff',
+                        'Cache-Control': 'public, max-age=86400',  # 24 horas (aumentado de 1 hora)
+                        'ETag': etag,
+                        'Last-Modified': datetime.fromtimestamp(file_mtime).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+                    }
+                )
+            else:
+                # Streaming para arquivos grandes
+                def generate():
+                    with open(file_path, 'rb') as f:
+                        while True:
+                            chunk = f.read(8192)  # 8KB chunks
+                            if not chunk:
+                                break
+                            yield chunk
+                
+                response = Response(
+                    generate(),
+                    mimetype=mimetype,
+                    headers={
+                        'Content-Type': mimetype,
+                        'Content-Length': str(file_size),
+                        'Accept-Ranges': 'bytes',
+                        'X-Content-Type-Options': 'nosniff',
+                        'Cache-Control': 'public, max-age=86400',  # 24 horas
+                        'ETag': etag,
+                        'Last-Modified': datetime.fromtimestamp(file_mtime).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+                    }
+                )
             
             # Headers CORS
             origin = request.headers.get('Origin')

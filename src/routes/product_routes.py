@@ -173,9 +173,14 @@ def update_product_route(product_id):
             try:
                 import json
                 data['ingredients'] = json.loads(request.form.get('ingredients'))
-                print(f"📦 Ingredientes recebidos do form: {len(data['ingredients'])} itens")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Ingredientes recebidos do form: {len(data['ingredients'])} itens")
             except (ValueError, TypeError, json.JSONDecodeError) as e:
-                print(f"❌ Erro ao fazer parse dos ingredientes: {e}")
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Erro ao fazer parse dos ingredientes: {e}", exc_info=True)
                 return jsonify({"error": "Formato inválido para ingredientes"}), 400
     
     # Verifica se há arquivo de imagem ou se deve remover a imagem
@@ -476,25 +481,64 @@ def get_product_image_route(product_id):
         if not os.path.exists(file_path):
             return jsonify({"error": "Arquivo de imagem não encontrado"}), 404
         
-        # Abordagem simplificada: ler arquivo em binário e retornar diretamente
-        # Isso evita problemas com chunked encoding ou stream
-        with open(file_path, 'rb') as f:
-            image_data = f.read()
+        # OTIMIZAÇÃO DE PERFORMANCE: Usar streaming para arquivos grandes
+        # Melhorar headers de cache com ETag e Last-Modified
+        import hashlib
+        from datetime import datetime
         
-        file_size = len(image_data)
+        file_size = os.path.getsize(file_path)
+        file_mtime = os.path.getmtime(file_path)
         
-        # Criar resposta direta sem chunked encoding
-        response = Response(
-            image_data,
-            mimetype='image/jpeg',
-            headers={
-                'Content-Type': 'image/jpeg',
-                'Content-Length': str(file_size),
-                'Accept-Ranges': 'bytes',
-                'X-Content-Type-Options': 'nosniff',
-                'Cache-Control': 'public, max-age=3600',
-            }
-        )
+        # Gera ETag baseado no tamanho e data de modificação do arquivo
+        etag_input = f"{filename}_{file_size}_{file_mtime}"
+        etag = hashlib.md5(etag_input.encode()).hexdigest()
+        
+        # Verifica se o cliente já tem a versão mais recente (304 Not Modified)
+        if_none_match = request.headers.get('If-None-Match')
+        if if_none_match == etag:
+            return Response(status=304, headers={'ETag': etag})
+        
+        # Para arquivos menores que 1MB, carrega em memória (mais rápido)
+        # Para arquivos maiores, usa streaming
+        if file_size < 1024 * 1024:  # < 1MB
+            with open(file_path, 'rb') as f:
+                image_data = f.read()
+            response = Response(
+                image_data,
+                mimetype='image/jpeg',
+                headers={
+                    'Content-Type': 'image/jpeg',
+                    'Content-Length': str(file_size),
+                    'Accept-Ranges': 'bytes',
+                    'X-Content-Type-Options': 'nosniff',
+                    'Cache-Control': 'public, max-age=86400',  # 24 horas (aumentado de 1 hora)
+                    'ETag': etag,
+                    'Last-Modified': datetime.fromtimestamp(file_mtime).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+                }
+            )
+        else:
+            # Streaming para arquivos grandes
+            def generate():
+                with open(file_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(8192)  # 8KB chunks
+                        if not chunk:
+                            break
+                        yield chunk
+            
+            response = Response(
+                generate(),
+                mimetype='image/jpeg',
+                headers={
+                    'Content-Type': 'image/jpeg',
+                    'Content-Length': str(file_size),
+                    'Accept-Ranges': 'bytes',
+                    'X-Content-Type-Options': 'nosniff',
+                    'Cache-Control': 'public, max-age=86400',  # 24 horas
+                    'ETag': etag,
+                    'Last-Modified': datetime.fromtimestamp(file_mtime).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+                }
+            )
         
         # Headers CORS
         origin = request.headers.get('Origin')
@@ -510,7 +554,10 @@ def get_product_image_route(product_id):
         return response
         
     except Exception as e:
-        print(f"Erro ao servir imagem: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao servir imagem: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao carregar imagem"}), 500
 
 
