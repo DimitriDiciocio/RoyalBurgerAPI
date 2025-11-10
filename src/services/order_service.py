@@ -660,6 +660,7 @@ def get_all_orders(page=1, page_size=50):
                 address_str = "Endereço não informado"
             
             orders.append({
+                "id": row[0],  # Adicionado para compatibilidade com frontend
                 "order_id": row[0], "status": row[1], "confirmation_code": row[2],
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
                 "order_type": order_type,
