@@ -12,13 +12,19 @@ def list_products_route():
     category_id = request.args.get('category_id', type=int)  
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
-    include_inactive = request.args.get('include_inactive', type=bool, default=False)  
+    # Corrigir interpretação de parâmetro booleano
+    # Flask interpreta qualquer string não vazia como True quando usa type=bool
+    # Então precisamos verificar explicitamente
+    include_inactive_param = request.args.get('include_inactive', '').lower()
+    include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
     result = product_service.list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)  
     return jsonify(result), 200  
 
 @product_bp.route('/<int:product_id>', methods=['GET'])  
 def get_product_by_id_route(product_id):  
-    product = product_service.get_product_by_id(product_id)  
+    # Aceita parâmetro quantity opcional para calcular max_available corretamente
+    quantity = request.args.get('quantity', type=int, default=1)
+    product = product_service.get_product_by_id(product_id, quantity=quantity)  
     if product:  
         return jsonify(product), 200  
     return jsonify({"msg": "Produto não encontrado"}), 404
@@ -311,7 +317,9 @@ def search_products_route():
     category_id = request.args.get('category_id', type=int)  
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
-    include_inactive = request.args.get('include_inactive', type=bool, default=False)  
+    # Corrigir interpretação de parâmetro booleano
+    include_inactive_param = request.args.get('include_inactive', '').lower()
+    include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False  
     result = product_service.search_products(name=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)  
     return jsonify(result), 200
 
@@ -383,7 +391,9 @@ def get_products_by_category_route(category_id):
     """
     page = request.args.get('page', type=int, default=1)
     page_size = request.args.get('page_size', type=int, default=10)
-    include_inactive = request.args.get('include_inactive', type=bool, default=False)
+    # Corrigir interpretação de parâmetro booleano
+    include_inactive_param = request.args.get('include_inactive', '').lower()
+    include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
     
     result, error_code, error_message = product_service.get_products_by_category_id(
         category_id=category_id, 

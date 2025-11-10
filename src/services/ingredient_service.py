@@ -89,7 +89,7 @@ def create_ingredient(data):
     finally:  
         if conn: conn.close()  
 
-def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10):  
+def list_ingredients(name_filter=None, status_filter=None, category_filter=None, page=1, page_size=10):  
     # OTIMIZAÇÃO: Usar validador centralizado de paginação
     from ..utils.validators import validate_pagination_params
     try:
@@ -105,6 +105,9 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
         if name_filter:  
             where.append("UPPER(NAME) LIKE UPPER(?)")  
             params.append(f"%{name_filter}%")  
+        if category_filter:  
+            where.append("UPPER(CATEGORY) = UPPER(?)")  
+            params.append(category_filter)  
         if status_filter == 'low_stock':  
             where.append("CURRENT_STOCK <= MIN_STOCK_THRESHOLD AND CURRENT_STOCK > 0")  
         elif status_filter == 'out_of_stock':  

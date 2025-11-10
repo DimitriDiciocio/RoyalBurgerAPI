@@ -230,8 +230,14 @@ def _add_order_items(order_id, items, cur):
         # Insere extras (TYPE='extra')
         if 'extras' in item and item['extras']:
             for extra in item['extras']:
-                extra_id = extra['ingredient_id']
-                extra_qty = extra.get('quantity', 1)
+                extra_id = extra.get('ingredient_id')
+                extra_qty = int(extra.get('quantity', 1))
+                
+                # IMPORTANTE: Não insere extras com quantidade 0 ou negativa
+                if extra_qty <= 0:
+                    logger.warning(f"[_add_order_items] Pulando extra com quantidade inválida: ingredient_id={extra_id}, quantity={extra_qty}")
+                    continue
+                
                 # Proteção: usa .get() para evitar KeyError se ingrediente foi removido
                 extra_price = extra_prices.get(extra_id)
                 if extra_price is None:
@@ -239,6 +245,8 @@ def _add_order_items(order_id, items, cur):
                 
                 # Garante que o preço é float
                 extra_price = float(extra_price)
+                
+                logger.info(f"[_add_order_items] Inserindo extra: order_item_id={new_order_item_id}, ingredient_id={extra_id}, quantity={extra_qty}, price={extra_price}")
                 
                 sql_extra = "INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);"
                 cur.execute(sql_extra, (new_order_item_id, extra_id, extra_qty, extra_qty, extra_price))
@@ -1175,9 +1183,9 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if order_type == ORDER_TYPE_DELIVERY:
             if not address_id:
                 return (None, "INVALID_ADDRESS", "address_id é obrigatório para pedidos de entrega")
-        cur.execute("SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;", (address_id, user_id))
-        if not cur.fetchone():
-            return (None, "INVALID_ADDRESS", "Endereço não encontrado ou não pertence ao usuário.")
+            cur.execute("SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;", (address_id, user_id))
+            if not cur.fetchone():
+                return (None, "INVALID_ADDRESS", "Endereço não encontrado ou não pertence ao usuário.")
         
         # Gera código de confirmação
         confirmation_code = _generate_confirmation_code()
@@ -1301,7 +1309,13 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             # Insere extras do item (TYPE='extra')
             for extra in item.get("extras", []):
                 ex_id = extra["ingredient_id"]
-                ex_qty = extra.get("quantity", 1)
+                ex_qty = int(extra.get("quantity", 1))
+                
+                # IMPORTANTE: Não insere extras com quantidade 0 ou negativa
+                if ex_qty <= 0:
+                    logger.warning(f"[create_order_from_cart] Pulando extra com quantidade inválida: ingredient_id={ex_id}, quantity={ex_qty}")
+                    continue
+                
                 # CORREÇÃO: Valida se ingrediente existe antes de inserir
                 ex_price = extra_prices.get(ex_id)
                 if ex_price is None:
@@ -1309,6 +1323,8 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                 
                 # Garante que o preço é float
                 ex_price_float = float(ex_price)
+                
+                logger.info(f"[create_order_from_cart] Inserindo extra: order_item_id={order_item_id}, ingredient_id={ex_id}, quantity={ex_qty}, price={ex_price_float}")
                 
                 sql_extra = """
                     INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)

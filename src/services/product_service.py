@@ -531,18 +531,18 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        where_clauses = [] if include_inactive else ["IS_ACTIVE = TRUE"]  
+        where_clauses = [] if include_inactive else ["p.IS_ACTIVE = TRUE"]  
         params = []  
         if name_filter:  
-            where_clauses.append("UPPER(NAME) LIKE UPPER(?)")  
+            where_clauses.append("UPPER(p.NAME) LIKE UPPER(?)")  
             params.append(f"%{name_filter}%")  
         if category_id:  
-            where_clauses.append("CATEGORY_ID = ?")  
+            where_clauses.append("p.CATEGORY_ID = ?")  
             params.append(category_id)  
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"  
         # total  
         # ALTERAÇÃO: Query parametrizada - where_sql é construído de forma segura (apenas cláusulas fixas)
-        cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
+        cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql.replace('p.', '')};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         # page - Query com sintaxe FIRST/SKIP do Firebird
         # OTIMIZAÇÃO: Incluir nome da categoria via LEFT JOIN para evitar N+1
@@ -690,7 +690,17 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         if conn: conn.close()  
 
 
-def get_product_by_id(product_id):  
+def get_product_by_id(product_id, quantity=1):  
+    """
+    Obtém produto por ID com cálculo de quantidade máxima de extras baseado no estoque.
+    
+    Args:
+        product_id: ID do produto
+        quantity: Quantidade do produto (padrão: 1) - usado para calcular max_available dos extras
+    
+    Returns:
+        dict: Dados do produto com ingredientes e max_quantity já calculado
+    """
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -726,29 +736,40 @@ def get_product_by_id(product_id):
                 ing_id = r[0]
                 max_quantity_rule = int(r[4]) if r[4] is not None else None
                 
-                # OTIMIZAÇÃO: Passa cursor para reutilizar conexão existente
-                # Calcula quantidade máxima disponível baseada no estoque e na regra
+                # IMPORTANTE: Calcula quantidade máxima disponível considerando a quantidade do produto
+                # Isso garante que o max_available seja calculado corretamente para a quantidade solicitada
                 max_available_info = get_ingredient_max_available_quantity(
                     ingredient_id=ing_id,
                     max_quantity_from_rule=max_quantity_rule,
-                    item_quantity=1,  # Por padrão, verifica para 1 item
+                    item_quantity=quantity,  # Usa a quantidade do produto passada como parâmetro
                     cur=cur  # Reutiliza conexão existente
                 )
                 
                 # Se é um ingrediente extra (portions = 0), usa max_available calculado
+                # IMPORTANTE: max_available é a quantidade máxima de EXTRAS disponíveis (sem incluir min_quantity)
+                # Para o mobile, precisamos retornar a quantidade TOTAL máxima (min_quantity + max_available)
                 # Se não, mantém max_quantity da regra
                 portions = float(r[2]) if r[2] is not None else 0.0
                 if portions == 0.0:  # É um ingrediente extra
-                    effective_max_quantity = max_available_info['max_available']
+                    min_qty = int(r[3]) if r[3] is not None else 0
+                    max_available_extras = max_available_info['max_available']
+                    # Se max_available é 0, não há estoque para extras adicionais
+                    # Se max_available > 0, a quantidade total máxima é min_quantity + max_available
+                    if max_available_extras > 0:
+                        effective_max_quantity = min_qty + max_available_extras
+                    else:
+                        # Sem estoque para extras, só permite o mínimo
+                        effective_max_quantity = min_qty
                 else:  # É ingrediente da base, não tem limite de quantidade extra
                     effective_max_quantity = max_quantity_rule if max_quantity_rule else None
                 
                 ingredients_data.append({
+                    "id": ing_id,  # Adiciona id para compatibilidade com mobile
                     "ingredient_id": ing_id,
                     "name": r[1],
                     "portions": portions,
                     "min_quantity": int(r[3]) if r[3] is not None else 0,
-                    "max_quantity": effective_max_quantity,  # Usa quantidade máxima disponível
+                    "max_quantity": effective_max_quantity,  # Já calculado considerando quantity do produto
                     "max_quantity_rule": max_quantity_rule,  # Mantém a regra original para referência
                     "additional_price": float(r[5]) if r[5] is not None else 0.0,
                     "is_available": bool(r[6]),
@@ -1058,21 +1079,30 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         category_name = category_row[1]
         
         # Monta a query para buscar produtos
-        where_clauses = ["CATEGORY_ID = ?"]
+        # IMPORTANTE: Sempre usar prefixo p. para evitar ambiguidade com tabela CATEGORIES no JOIN
+        where_clauses = ["p.CATEGORY_ID = ?"]
         params = [category_id]
         
         if not include_inactive:
-            where_clauses.append("IS_ACTIVE = TRUE")
+            where_clauses.append("p.IS_ACTIVE = TRUE")
             
         where_sql = " AND ".join(where_clauses)
         
         # Conta total de produtos na categoria
         # ALTERAÇÃO: Query parametrizada - where_sql é construído de forma segura (apenas cláusulas fixas)
-        cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
+        # Remove prefixo p. para a query de COUNT que não usa JOIN
+        # IMPORTANTE: Garantir que IS_ACTIVE seja referenciado corretamente na query de COUNT
+        # Construir query de COUNT de forma explícita para evitar ambiguidade
+        count_where_clauses = ["CATEGORY_ID = ?"]
+        if not include_inactive:
+            count_where_clauses.append("IS_ACTIVE = TRUE")
+        count_where_sql = " AND ".join(count_where_clauses)
+        cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {count_where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         
         # Busca os produtos paginados - Query com sintaxe FIRST/SKIP do Firebird
         # OTIMIZAÇÃO: Incluir nome da categoria via LEFT JOIN para evitar N+1
+        # IMPORTANTE: Especificar explicitamente p.IS_ACTIVE para evitar ambiguidade com c.IS_ACTIVE
         query = f"""
             SELECT FIRST {page_size} SKIP {offset} 
                 p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.COST_PRICE, 
@@ -1080,7 +1110,7 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                 COALESCE(c.NAME, 'Sem categoria') as CATEGORY_NAME
             FROM PRODUCTS p
             LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID
-            WHERE {where_sql} 
+            WHERE {where_sql}
             ORDER BY p.NAME
         """
         cur.execute(query, tuple(params))  
@@ -1098,31 +1128,54 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         if product_ids:
             try:
                 placeholders = ', '.join(['?' for _ in product_ids])
+                # Query melhorada: busca informações detalhadas sobre ingredientes indisponíveis
                 availability_query = f"""
                     SELECT 
                         pi.PRODUCT_ID,
                         MIN(CASE WHEN i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock' THEN 0 ELSE 1 END) as all_available,
-                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock
+                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock,
+                        COUNT(pi.INGREDIENT_ID) as ingredient_count
                     FROM PRODUCT_INGREDIENTS pi
                     JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
                     WHERE pi.PRODUCT_ID IN ({placeholders})
                     GROUP BY pi.PRODUCT_ID
                 """
                 cur.execute(availability_query, tuple(product_ids))
+                products_with_ingredients = set()
                 for row in cur.fetchall():
                     product_id = row[0]
                     all_av = row[1]
                     has_low = row[2]
+                    ingredient_count = row[3]
+                    products_with_ingredients.add(product_id)
+                    
+                    # Log para debug quando produto está indisponível
+                    if all_av == 0:
+                        # Busca quais ingredientes estão indisponíveis para log
+                        cur.execute("""
+                            SELECT i.ID, i.NAME, i.IS_AVAILABLE, i.STOCK_STATUS
+                            FROM PRODUCT_INGREDIENTS pi
+                            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                            WHERE pi.PRODUCT_ID = ? AND (i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock')
+                        """, (product_id,))
+                        unavailable_ingredients = cur.fetchall()
+                        logger.warning(f"[get_products_by_category_id] Produto {product_id} marcado como unavailable. Ingredientes indisponíveis: {[f'{ing[1]} (ID:{ing[0]}, IS_AVAILABLE:{ing[2]}, STOCK_STATUS:{ing[3]})' for ing in unavailable_ingredients]}")
+                    
                     if all_av == 0:
                         availability_map[product_id] = "unavailable"
                     elif has_low == 1:
                         availability_map[product_id] = "low_stock"
                     else:
                         availability_map[product_id] = "available"
+                
+                # Produtos sem ingredientes são considerados disponíveis (não dependem de estoque)
+                for product_id in product_ids:
+                    if product_id not in products_with_ingredients:
+                        availability_map[product_id] = "available"
+                        logger.debug(f"[get_products_by_category_id] Produto {product_id} sem ingredientes cadastrados, marcado como available")
             except Exception as e:
                 # ALTERAÇÃO: Substituído print() por logging estruturado
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Erro ao buscar disponibilidade em batch: {e}", exc_info=True)
+                logger.error(f"Erro ao buscar disponibilidade em batch: {e}", exc_info=True)
         
         # OTIMIZAÇÃO: Busca todos os ingredientes de uma vez
         if product_ids:
@@ -1203,8 +1256,11 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
-        logger = logging.getLogger(__name__)
-        logger.error(f"Erro ao buscar produtos por categoria: {e}", exc_info=True)  
+        logger.error(f"Erro ao buscar produtos por categoria (Firebird): {e}", exc_info=True)  
+        return (None, "DATABASE_ERROR", "Erro interno do servidor")
+    except Exception as e:
+        # Captura qualquer outra exceção não relacionada ao banco de dados
+        logger.error(f"Erro ao buscar produtos por categoria: {e}", exc_info=True)
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:  
         if conn: conn.close()

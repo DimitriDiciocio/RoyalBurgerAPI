@@ -180,7 +180,9 @@ def get_categories_with_products_route():
     Query params:
     - include_inactive: boolean (default: false) - Inclui produtos inativos
     """
-    include_inactive = request.args.get('include_inactive', type=bool, default=False)
+    # Corrigir interpretação de parâmetro booleano
+    include_inactive_param = request.args.get('include_inactive', '').lower()
+    include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
     
     result, error_code, message = category_service.get_categories_with_products(include_inactive=include_inactive)
     

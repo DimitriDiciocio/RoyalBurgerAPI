@@ -118,6 +118,7 @@ def get_cart_items(cart_id):
                 cie.CART_ITEM_ID,
                 cie.ID,
                 cie.INGREDIENT_ID,
+                cie.QUANTITY,
                 COALESCE(cie.DELTA, cie.QUANTITY) as DELTA,
                 COALESCE(cie.UNIT_PRICE, COALESCE(i.ADDITIONAL_PRICE, i.PRICE)) as UNIT_PRICE,
                 cie.TYPE,
@@ -156,29 +157,32 @@ def get_cart_items(cart_id):
             base_mods_total = 0.0
             
             for extra_row in extras_by_item.get(item_id, []):
-                # extra_row: [CART_ITEM_ID, ID, INGREDIENT_ID, DELTA, UNIT_PRICE, TYPE, INGREDIENT_NAME]
+                # extra_row: [CART_ITEM_ID, ID, INGREDIENT_ID, QUANTITY, DELTA, UNIT_PRICE, TYPE, INGREDIENT_NAME]
                 row_id = extra_row[1]
                 ingredient_id = extra_row[2]
-                delta = int(extra_row[3] or 0)
-                unit_price = float(extra_row[4] or 0.0)
-                row_type = (extra_row[5] or 'extra').lower()
-                ingredient_name = extra_row[6]
+                quantity = int(extra_row[3] or 0)  # QUANTITY é a quantidade total
+                delta = int(extra_row[4] or 0)  # DELTA pode ser diferente para base_modifications
+                unit_price = float(extra_row[5] or 0.0)
+                row_type = (extra_row[6] or 'extra').lower()
+                ingredient_name = extra_row[7]
 
                 if row_type == 'extra':
+                    # Para extras, QUANTITY é a quantidade total (incluindo min_quantity)
                     extras.append({
                         "id": row_id,
                         "ingredient_id": ingredient_id,
-                        "quantity": delta,
+                        "quantity": quantity,  # Usa QUANTITY (quantidade total)
                         "ingredient_name": ingredient_name,
                         "ingredient_price": unit_price
                     })
-                    if delta > 0:
-                        extras_total += unit_price * delta
+                    if quantity > 0:
+                        extras_total += unit_price * quantity
                 else:  # base
                     base_modifications.append({
                         "ingredient_id": ingredient_id,
                         "delta": delta,
-                        "ingredient_name": ingredient_name
+                        "ingredient_name": ingredient_name,
+                        "ingredient_price": unit_price  # Incluir preço para exibição no mobile
                     })
                     if delta > 0:
                         base_mods_total += unit_price * delta
@@ -509,19 +513,34 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                     return (False, "EXTRA_OUT_OF_RANGE", 
                            f"Quantidade de extra abaixo do mínimo permitido [{min_q}]")
                 
+                # IMPORTANTE: qty é a quantidade TOTAL (incluindo min_quantity)
+                # max_q_available é a quantidade máxima de EXTRAS disponíveis (sem incluir min_quantity)
+                # Então a quantidade total máxima permitida é: min_q + max_q_available
+                max_total_qty = min_q + max_q_available
+                
                 # Valida quantidade máxima (considerando estoque)
-                if max_q_available > 0 and qty > max_q_available:
+                # Se max_q_available > 0, há estoque para extras adicionais
+                if max_q_available > 0 and qty > max_total_qty:
                     ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "EXTRA_OUT_OF_RANGE", 
                            f"Quantidade de extra excede o disponível. "
-                           f"Máximo permitido: {max_q_available} "
+                           f"Máximo permitido: {max_total_qty} (mínimo: {min_q} + extras: {max_q_available}) "
                            f"(limitado por {'regra' if max_available_info['limited_by'] == 'rule' else 'estoque'})")
                 
                 # Verifica se ingrediente está disponível
-                if not max_available_info['stock_info'] or max_q_available == 0:
+                # Se max_q_available é 0, não há estoque para extras adicionais (mas pode ter min_q > 0)
+                # Se não tem stock_info, ingrediente não está disponível
+                if not max_available_info['stock_info']:
                     ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
                            f"Ingrediente '{ing_name}' não disponível ou sem estoque")
+                
+                # Se max_q_available é 0 e qty > min_q, não há estoque suficiente
+                if max_q_available == 0 and qty > min_q:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Ingrediente '{ing_name}' não tem estoque suficiente para a quantidade solicitada. "
+                           f"Máximo permitido: {min_q}")
                 
                 # Verifica estoque suficiente para a quantidade solicitada com conversão de unidades
                 stock_info = max_available_info['stock_info']
@@ -638,6 +657,7 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
             # OTIMIZAÇÃO: Busca preços de ingredientes em batch ao invés de queries individuais
             # Adiciona extras se fornecidos (TYPE='extra')
             if extras:
+                logger.info(f"[add_item_to_cart] Processando {len(extras)} extras para item {new_item_id}")
                 # Coleta IDs de ingredientes e busca preços de uma vez
                 extra_ingredient_ids = [ex.get("ingredient_id") for ex in extras if ex.get("ingredient_id")]
                 ingredient_prices = {}
@@ -651,10 +671,14 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                         ingredient_prices[row[0]] = float(row[1] or 0.0)
                 
                 # Insere extras usando preços já carregados
+                extras_inserted = 0
                 for extra in extras:
                     ingredient_id = extra.get("ingredient_id")
                     extra_quantity = int(extra.get("quantity", 1))
+                    
+                    # IMPORTANTE: Valida quantidade antes de inserir
                     if extra_quantity <= 0:
+                        logger.warning(f"[add_item_to_cart] Extra com quantidade inválida: ingredient_id={ingredient_id}, qty={extra_quantity}, extra_data={extra}")
                         continue
                     
                     unit_price = ingredient_prices.get(ingredient_id, 0.0)
@@ -664,6 +688,12 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                             "VALUES (?, ?, ?, 'extra', ?, ?);"
                         )
                         cur.execute(sql_extra, (new_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price))
+                        extras_inserted += 1
+                        logger.info(f"[add_item_to_cart] Extra inserido: item_id={new_item_id}, ingredient_id={ingredient_id}, quantity={extra_quantity}, price={unit_price}")
+                    else:
+                        logger.warning(f"[add_item_to_cart] Extra não inserido - preço zero ou ingrediente não encontrado: ingredient_id={ingredient_id}, unit_price={unit_price}, quantity={extra_quantity}")
+                
+                logger.info(f"[add_item_to_cart] Total de extras inseridos: {extras_inserted} de {len(extras)}")
 
             # Adiciona modificações de base (TYPE='base')
             if base_modifications:
@@ -816,19 +846,34 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                     return (False, "EXTRA_OUT_OF_RANGE", 
                            f"Quantidade de extra abaixo do mínimo permitido [{min_q}]")
                 
+                # IMPORTANTE: qty é a quantidade TOTAL (incluindo min_quantity)
+                # max_q_available é a quantidade máxima de EXTRAS disponíveis (sem incluir min_quantity)
+                # Então a quantidade total máxima permitida é: min_q + max_q_available
+                max_total_qty = min_q + max_q_available
+                
                 # Valida quantidade máxima (considerando estoque)
-                if max_q_available > 0 and qty > max_q_available:
+                # Se max_q_available > 0, há estoque para extras adicionais
+                if max_q_available > 0 and qty > max_total_qty:
                     ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "EXTRA_OUT_OF_RANGE", 
                            f"Quantidade de extra excede o disponível. "
-                           f"Máximo permitido: {max_q_available} "
+                           f"Máximo permitido: {max_total_qty} (mínimo: {min_q} + extras: {max_q_available}) "
                            f"(limitado por {'regra' if max_available_info['limited_by'] == 'rule' else 'estoque'})")
                 
                 # Verifica se ingrediente está disponível
-                if not max_available_info['stock_info'] or max_q_available == 0:
+                # Se max_q_available é 0, não há estoque para extras adicionais (mas pode ter min_q > 0)
+                # Se não tem stock_info, ingrediente não está disponível
+                if not max_available_info['stock_info']:
                     ing_name = ingredient_names.get(ing_id, 'Ingrediente')
                     return (False, "INSUFFICIENT_STOCK", 
                            f"Ingrediente '{ing_name}' não disponível ou sem estoque")
+                
+                # Se max_q_available é 0 e qty > min_q, não há estoque suficiente
+                if max_q_available == 0 and qty > min_q:
+                    ing_name = ingredient_names.get(ing_id, 'Ingrediente')
+                    return (False, "INSUFFICIENT_STOCK", 
+                           f"Ingrediente '{ing_name}' não tem estoque suficiente para a quantidade solicitada. "
+                           f"Máximo permitido: {min_q}")
                 
                 # Verifica estoque suficiente para a quantidade solicitada com conversão de unidades
                 stock_info = max_available_info['stock_info']
@@ -1573,40 +1618,33 @@ def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur):
             }
             continue
         
-        # Calcula quantidade máxima usando a mesma lógica de get_ingredient_max_available_quantity
-        # mas sem criar nova conexão
-        current_stock_decimal = Decimal(str(current_stock or 0))
-        base_portion_quantity_decimal = Decimal(str(base_portion_quantity or 1))
-        stock_unit_str = stock_unit or 'un'
-        base_portion_unit_str = base_portion_unit or 'un'
-        
-        max_from_stock = 0
-        if current_stock_decimal > 0:
-            try:
-                from .stock_service import _convert_unit
-                stock_in_base_unit = _convert_unit(
-                    current_stock_decimal,
-                    stock_unit_str,
-                    base_portion_unit_str
-                )
-                
-                if base_portion_quantity_decimal > 0:
-                    max_portions_from_stock = stock_in_base_unit / base_portion_quantity_decimal
-                    max_from_stock = int(max_portions_from_stock // item_quantity)
-            except Exception as e:
-                logger.warning(f"Erro ao calcular quantidade máxima para ingrediente {ing_id}: {e}")
-                max_from_stock = 0
-        
-        ingredients_data[ing_id] = {
-            'max_available': max_from_stock,
-            'limited_by': 'stock' if max_from_stock > 0 else 'none',
-            'stock_info': {
-                'current_stock': current_stock_decimal,
-                'stock_unit': stock_unit_str,
-                'base_portion_quantity': base_portion_quantity_decimal,
-                'base_portion_unit': base_portion_unit_str
+        # IMPORTANTE: Para extras (portions = 0), usa get_ingredient_max_available_quantity
+        # que já calcula corretamente considerando estoque e quantidade do produto
+        # Como não temos max_quantity_from_rule aqui, passa None (será aplicado depois na validação)
+        try:
+            max_available_info = get_ingredient_max_available_quantity(
+                ingredient_id=ing_id,
+                max_quantity_from_rule=None,  # Será aplicado na validação individual
+                item_quantity=item_quantity,
+                base_portions=0,  # Extras sempre têm portions = 0
+                cur=cur  # Reutiliza conexão existente
+            )
+            
+            ingredients_data[ing_id] = max_available_info
+        except Exception as e:
+            logger.warning(f"Erro ao calcular quantidade máxima para ingrediente {ing_id}: {e}", exc_info=True)
+            # Fallback: retorna disponibilidade zero em caso de erro
+            current_stock_decimal = Decimal(str(current_stock or 0))
+            ingredients_data[ing_id] = {
+                'max_available': 0,
+                'limited_by': 'error',
+                'stock_info': {
+                    'current_stock': current_stock_decimal,
+                    'stock_unit': stock_unit or 'un',
+                    'base_portion_quantity': Decimal(str(base_portion_quantity or 1)),
+                    'base_portion_unit': base_portion_unit or 'un'
+                }
             }
-        }
     
     return ingredients_data
 
