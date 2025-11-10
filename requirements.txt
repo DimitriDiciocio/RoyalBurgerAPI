@@ -12,6 +12,7 @@ PyYAML
 requests
 python-dateutil
 Pillow
+flask_compress
 fpdf2
 pywin32; platform_system == "Windows"
 python-socketio
