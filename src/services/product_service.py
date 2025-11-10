@@ -109,7 +109,9 @@ def _get_image_hash(image_url):
             hash_input = f"{filename}_{file_mtime}_{file_size}"
             return hashlib.md5(hash_input.encode()).hexdigest()[:8]
     except Exception as e:
-        print(f"Erro ao gerar hash da imagem: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Erro ao gerar hash da imagem: {e}", exc_info=True)
     return None
 
 def _get_product_availability_status(product_id, cur):
@@ -146,7 +148,9 @@ def _get_product_availability_status(product_id, cur):
             return "available"
             
     except Exception as e:
-        print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao verificar disponibilidade do produto {product_id}: {e}", exc_info=True)
         return "unknown"
 
 
@@ -306,7 +310,9 @@ def check_product_availability(product_id, quantity=1):
         }
         
     except Exception as e:
-        print(f"Erro ao verificar disponibilidade do produto {product_id}: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao verificar disponibilidade do produto {product_id}: {e}", exc_info=True)
         return {
             'is_available': False,
             'status': 'unknown',
@@ -318,7 +324,7 @@ def check_product_availability(product_id, quantity=1):
             conn.close()
 
 
-def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1, cur=None):
+def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1, base_portions=0, cur=None):
     """
     Calcula a quantidade máxima disponível de um ingrediente extra baseado em:
     1. MAX_QUANTITY definido na regra do produto (se fornecido)
@@ -333,11 +339,12 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
         ingredient_id: ID do ingrediente
         max_quantity_from_rule: MAX_QUANTITY da regra do produto (None se não limitado)
         item_quantity: Quantidade de itens do produto (padrão: 1)
+        base_portions: Porções base do ingrediente no produto (padrão: 0 para extras)
         cur: Cursor opcional para reutilizar conexão (se None, cria nova conexão)
     
     Returns:
         dict: {
-            'max_available': int,  # Quantidade máxima disponível
+            'max_available': int,  # Quantidade máxima de porções extras disponíveis
             'limited_by': str,  # 'rule' ou 'stock' ou 'both'
             'stock_info': {
                 'current_stock': Decimal,
@@ -408,14 +415,24 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
                     base_portion_unit_str
                 )
                 
-                # Calcula quantas porções base cabem no estoque disponível
-                # Divide pelo item_quantity para ter a quantidade por item
+                # AJUSTE: Calcula quantas porções extras podem ser adicionadas
+                # Considera as porções base já incluídas no produto
+                # Fórmula: (base_portions + extras) * base_portion_quantity * item_quantity <= current_stock
+                # Então: extras <= (current_stock / (base_portion_quantity * item_quantity)) - base_portions
                 if base_portion_quantity_decimal > 0:
-                    max_portions_from_stock = stock_in_base_unit / base_portion_quantity_decimal
-                    # Arredonda para baixo e converte para int
-                    max_from_stock = int(max_portions_from_stock // item_quantity)
+                    # Quantidade total de porções (base + extras) que cabem no estoque
+                    total_portions_available = stock_in_base_unit / base_portion_quantity_decimal
+                    # Divide pela quantidade de itens para ter por item
+                    portions_per_item = total_portions_available / item_quantity
+                    # Subtrai as porções base para obter apenas as extras disponíveis
+                    base_portions_decimal = Decimal(str(base_portions or 0))
+                    max_extras_per_item = portions_per_item - base_portions_decimal
+                    # Arredonda para baixo e converte para int (não pode ser negativo)
+                    max_from_stock = max(0, int(max_extras_per_item))
             except Exception as e:
-                print(f"Erro ao calcular quantidade máxima do estoque para ingrediente {ingredient_id}: {e}")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Erro ao calcular quantidade máxima do estoque para ingrediente {ingredient_id}: {e}", exc_info=True)
                 max_from_stock = 0
         
         # Determina o limite final (menor entre regra e estoque)
@@ -456,7 +473,9 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
         }
         
     except Exception as e:
-        print(f"Erro ao calcular quantidade máxima disponível do ingrediente {ingredient_id}: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao calcular quantidade máxima disponível do ingrediente {ingredient_id}: {e}", exc_info=True)
         return {
             'max_available': 0,
             'limited_by': 'error',
@@ -522,6 +541,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             params.append(category_id)  
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"  
         # total  
+        # ALTERAÇÃO: Query parametrizada - where_sql é construído de forma segura (apenas cláusulas fixas)
         cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         # page - Query com sintaxe FIRST/SKIP do Firebird
@@ -573,7 +593,9 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                     else:
                         availability_map[product_id] = "available"
             except Exception as e:
-                print(f"Erro ao buscar disponibilidade em batch: {e}")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Erro ao buscar disponibilidade em batch: {e}", exc_info=True)
         
         # OTIMIZAÇÃO: Busca todos os ingredientes de uma vez
         if product_ids:
@@ -597,7 +619,9 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                         "max_quantity": int(row[4]) if row[4] is not None else 0
                     })
             except Exception as e:
-                print(f"Erro ao buscar ingredientes em batch: {e}")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Erro ao buscar ingredientes em batch: {e}", exc_info=True)
         
         # Processa os produtos com os dados já carregados
         for row in product_rows:
@@ -619,7 +643,9 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 try:
                     item["image_hash"] = _get_image_hash(row[7])
                 except Exception as e:
-                    print(f"Erro ao gerar hash da imagem: {e}")
+                    # ALTERAÇÃO: Substituído print() por logging estruturado
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Erro ao gerar hash da imagem: {e}", exc_info=True)
                     item["image_hash"] = None
             
             # Adiciona status de disponibilidade (já carregado em batch)
@@ -648,7 +674,9 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         
         return result
     except fdb.Error as e:  
-        print(f"Erro ao listar produtos: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao listar produtos: {e}", exc_info=True)  
         return {  
             "items": [],  
             "pagination": {  
@@ -732,7 +760,9 @@ def get_product_by_id(product_id):
             return product
         return None  
     except fdb.Error as e:  
-        print(f"Erro ao buscar produto por ID: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar produto por ID: {e}", exc_info=True)  
         return None  
     finally:  
         if conn: conn.close()  
@@ -838,6 +868,8 @@ def update_product(product_id, update_data):
             # Deletar removidos
             to_delete = current_ids - desired_ids
             if to_delete:
+                # ALTERAÇÃO: Construção segura de placeholders - apenas IDs validados são usados
+                # to_delete contém apenas IDs de ingredientes já validados no loop anterior
                 placeholders = ', '.join(['?' for _ in to_delete])
                 cur.execute(
                     f"DELETE FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID IN ({placeholders})",
@@ -888,12 +920,16 @@ def update_product(product_id, update_data):
                 from . import promotion_service
                 promotion_service.recalculate_promotion_discount_value(product_id)
             except Exception as e:
-                print(f"Erro ao recalcular desconto da promoção: {e}")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Erro ao recalcular desconto da promoção: {e}", exc_info=True)
                 # Não falha a atualização do produto se o recálculo falhar
         
         return (True, None, "Produto atualizado com sucesso")  
     except fdb.Error as e:  
-        print(f"Erro ao atualizar produto: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao atualizar produto: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     except ValueError as ve:
@@ -925,7 +961,9 @@ def deactivate_product(product_id):
         
         return True  # Sempre retorna True se o produto existe
     except fdb.Error as e:  
-        print(f"Erro ao inativar produto: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao inativar produto: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return False  
     finally:  
@@ -951,7 +989,9 @@ def update_product_image_url(product_id, image_url):
         conn.commit()
         return True
     except fdb.Error as e:
-        print(f"Erro ao atualizar URL da imagem: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao atualizar URL da imagem: {e}", exc_info=True)
         if conn: conn.rollback()
         return False
     finally:
@@ -1027,6 +1067,7 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         where_sql = " AND ".join(where_clauses)
         
         # Conta total de produtos na categoria
+        # ALTERAÇÃO: Query parametrizada - where_sql é construído de forma segura (apenas cláusulas fixas)
         cur.execute(f"SELECT COUNT(*) FROM PRODUCTS WHERE {where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         
@@ -1079,7 +1120,9 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                     else:
                         availability_map[product_id] = "available"
             except Exception as e:
-                print(f"Erro ao buscar disponibilidade em batch: {e}")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Erro ao buscar disponibilidade em batch: {e}", exc_info=True)
         
         # OTIMIZAÇÃO: Busca todos os ingredientes de uma vez
         if product_ids:
@@ -1103,7 +1146,9 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                         "max_quantity": int(row[4]) if row[4] is not None else 0
                     })
             except Exception as e:
-                print(f"Erro ao buscar ingredientes em batch: {e}")
+                # ALTERAÇÃO: Substituído print() por logging estruturado
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Erro ao buscar ingredientes em batch: {e}", exc_info=True)
         
         # Processa os produtos com os dados já carregados
         for row in product_rows:
@@ -1125,7 +1170,9 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                 try:
                     item["image_hash"] = _get_image_hash(row[7])
                 except Exception as e:
-                    print(f"Erro ao gerar hash da imagem: {e}")
+                    # ALTERAÇÃO: Substituído print() por logging estruturado
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Erro ao gerar hash da imagem: {e}", exc_info=True)
                     item["image_hash"] = None
             
             # Adiciona status de disponibilidade (já carregado em batch)
@@ -1155,7 +1202,9 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         return (result, None, None)
         
     except fdb.Error as e:  
-        print(f"Erro ao buscar produtos por categoria: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar produtos por categoria: {e}", exc_info=True)  
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     finally:  
         if conn: conn.close()
@@ -1192,7 +1241,9 @@ def get_menu_summary():
             "average_preparation_time": round(avg_prep_time, 1)
         }
     except fdb.Error as e:  
-        print(f"Erro ao buscar resumo do cardápio: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar resumo do cardápio: {e}", exc_info=True)  
         return {  
             "total_items": 0,
             "average_price": 0.0,
@@ -1316,7 +1367,9 @@ def delete_product(product_id):
             from ..utils.image_handler import delete_product_image
             delete_product_image(product_id)
         except Exception as e:
-            print(f"Aviso: Erro ao remover imagem do produto {product_id}: {e}")
+            # ALTERAÇÃO: Substituído print() por logging estruturado
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Erro ao remover imagem do produto {product_id}: {e}", exc_info=True)
         
         return (True, None, {
             "message": f"Produto '{product_name}' excluído permanentemente",
@@ -1330,12 +1383,16 @@ def delete_product(product_id):
         })
         
     except fdb.Error as e:
-        print(f"Erro ao excluir produto: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao excluir produto: {e}", exc_info=True)
         if conn: 
             conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     except Exception as e:
-        print(f"Erro geral ao excluir produto: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro geral ao excluir produto: {e}", exc_info=True)
         if conn: 
             conn.rollback()
         return (False, "GENERAL_ERROR", "Erro interno do servidor")
@@ -1392,7 +1449,9 @@ def apply_group_to_product(product_id, group_id, default_min_quantity=0, default
         conn.commit()
         return (added, None, None)
     except fdb.Error as e:
-        print(f"Erro ao aplicar grupo ao produto: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao aplicar grupo ao produto: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
@@ -1477,7 +1536,9 @@ def get_most_ordered_products(page=1, page_size=10):
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar produtos mais pedidos: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar produtos mais pedidos: {e}", exc_info=True)
         return {
             "items": [],
             "pagination": {
@@ -1564,7 +1625,9 @@ def get_recently_added_products(page=1, page_size=10):
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar produtos recentemente adicionados: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao buscar produtos recentemente adicionados: {e}", exc_info=True)
         return {
             "items": [],
             "pagination": {

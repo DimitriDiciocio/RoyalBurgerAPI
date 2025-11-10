@@ -1,5 +1,9 @@
 import fdb  
-from ..database import get_db_connection  
+import logging
+from ..database import get_db_connection
+
+# ALTERAÇÃO: Configurar logger estruturado para substituir print()
+logger = logging.getLogger(__name__)  
 
 def create_ingredient(data):  
     name = (data.get('name') or '').strip()  
@@ -73,7 +77,8 @@ def create_ingredient(data):
             "base_portion_unit": row[12] if row[12] else "un"
         }, None, None)
     except fdb.Error as e:  
-        print(f"Erro ao criar ingrediente: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao criar ingrediente: {e}", exc_info=True)  
         if conn: conn.rollback()  
         
         # Verificar se é erro de constraint de nome único
@@ -114,6 +119,7 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
             where.append("CURRENT_STOCK > MAX_STOCK AND MAX_STOCK > 0")  
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""  
         # total  
+        # ALTERAÇÃO: Query parametrizada - where_sql é construído de forma segura (apenas cláusulas fixas)
         cur.execute(f"SELECT COUNT(*) FROM INGREDIENTS{where_sql};", tuple(params))  
         total = cur.fetchone()[0] or 0  
         # page  
@@ -148,7 +154,8 @@ def list_ingredients(name_filter=None, status_filter=None, page=1, page_size=10)
             }  
         }  
     except fdb.Error as e:  
-        print(f"Erro ao buscar ingredientes: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao buscar ingredientes: {e}", exc_info=True)  
         return {  
             "items": [],  
             "pagination": {  
@@ -203,6 +210,8 @@ def update_ingredient(ingredient_id, data):
             cur.execute("SELECT 1 FROM INGREDIENTS WHERE UPPER(NAME) = UPPER(?) AND ID <> ?", (fields_to_update['name'], ingredient_id))  
             if cur.fetchone():  
                 return (False, "INGREDIENT_NAME_EXISTS", "Já existe um insumo com este nome")  
+        # ALTERAÇÃO: Construção segura de SQL - apenas campos permitidos são usados
+        # allowed_fields garante que apenas campos válidos entram na query
         set_parts = [f"{key.upper()} = ?" for key in fields_to_update]  
         values = list(fields_to_update.values())  
         values.append(ingredient_id)  
@@ -211,7 +220,8 @@ def update_ingredient(ingredient_id, data):
         conn.commit()  
         return (True, None, "Ingrediente atualizado com sucesso")  
     except fdb.Error as e:  
-        print(f"Erro ao atualizar ingrediente: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao atualizar ingrediente: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  
@@ -227,7 +237,8 @@ def update_ingredient_availability(ingredient_id, is_available):
         conn.commit()  
         return cur.rowcount > 0  
     except fdb.Error as e:  
-        print(f"Erro ao atualizar disponibilidade do ingrediente: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao atualizar disponibilidade do ingrediente: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return False  
     finally:  
@@ -263,11 +274,13 @@ def delete_ingredient(ingredient_id):
             return (False, "NO_ROWS_AFFECTED", "Nenhuma linha foi afetada na exclusão")
             
     except fdb.Error as e:  
-        print(f"Erro ao excluir ingrediente: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao excluir ingrediente: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     except Exception as e:
-        print(f"Erro geral ao excluir ingrediente: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro geral ao excluir ingrediente: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "GENERAL_ERROR", "Erro geral")
     finally:  
@@ -296,7 +309,8 @@ def add_ingredient_to_product(product_id, ingredient_id, portions):
         conn.commit()  
         return True  
     except fdb.Error as e:  
-        print(f"Erro ao associar ingrediente ao produto: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao associar ingrediente ao produto: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return False  
     finally:  
@@ -320,7 +334,8 @@ def update_product_ingredient(product_id, ingredient_id, portions=None):
         conn.commit()
         return (cur.rowcount > 0, None, "Vínculo atualizado com sucesso")
     except fdb.Error as e:
-        print(f"Erro ao atualizar vínculo: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao atualizar vínculo: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -336,7 +351,8 @@ def remove_ingredient_from_product(product_id, ingredient_id):
         conn.commit()  
         return cur.rowcount > 0  
     except fdb.Error as e:  
-        print(f"Erro ao remover associação de ingrediente: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao remover associação de ingrediente: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return False  
     finally:  
@@ -347,9 +363,10 @@ def get_ingredients_for_product(product_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
+        # AJUSTE: Incluir CURRENT_STOCK na query para validação de estoque
         sql = """
             SELECT i.ID, i.NAME, pi.PORTIONS, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT, 
-                   i.PRICE, i.IS_AVAILABLE, i.STOCK_UNIT,
+                   i.PRICE, i.IS_AVAILABLE, i.STOCK_UNIT, i.CURRENT_STOCK,
                    pi.MIN_QUANTITY, pi.MAX_QUANTITY
             FROM PRODUCT_INGREDIENTS pi
             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
@@ -358,6 +375,9 @@ def get_ingredients_for_product(product_id):
         cur.execute(sql, (product_id,))  
         items = []
         estimated_cost = 0.0
+        # AJUSTE: Importar função para calcular quantidade máxima disponível
+        from .product_service import get_ingredient_max_available_quantity
+        
         for row in cur.fetchall():
             ingredient_id = row[0]
             name = row[1]
@@ -367,8 +387,9 @@ def get_ingredients_for_product(product_id):
             price = float(row[5]) if row[5] is not None else 0.0
             is_available = row[6]
             stock_unit = row[7] if row[7] else "un"
-            min_quantity = int(row[8]) if row[8] is not None else 0
-            max_quantity = int(row[9]) if row[9] is not None else 0
+            current_stock = float(row[8]) if row[8] is not None else 0.0
+            min_quantity = int(row[9]) if row[9] is not None else 0
+            max_quantity = int(row[10]) if row[10] is not None else 0
             
             # Calcular quantidade real consumida baseada na porção
             actual_quantity = portions * base_portion_quantity
@@ -376,6 +397,16 @@ def get_ingredients_for_product(product_id):
             portion_cost = price * base_portion_quantity
             # Calcular custo total da linha (custo por porção * número de porções)
             line_cost = portion_cost * portions
+            
+            # AJUSTE: Calcular quantidade máxima disponível baseada no estoque
+            # Passa as porções base do ingrediente no produto para cálculo correto
+            max_available_info = get_ingredient_max_available_quantity(
+                ingredient_id=ingredient_id,
+                max_quantity_from_rule=max_quantity if max_quantity > 0 else None,
+                item_quantity=1,  # Por padrão, verifica para 1 item
+                base_portions=portions,  # AJUSTE: Passar porções base do produto
+                cur=cur  # Reutiliza conexão existente
+            )
             
             items.append({
                 "ingredient_id": ingredient_id,
@@ -391,12 +422,18 @@ def get_ingredients_for_product(product_id):
                 "is_available": is_available,
                 "line_cost": round(line_cost, 2),
                 "min_quantity": min_quantity,
-                "max_quantity": max_quantity
+                "max_quantity": max_quantity,
+                # AJUSTE: Adicionar informações de estoque para validação
+                "current_stock": round(current_stock, 3),
+                "max_available": max_available_info.get('max_available', 0),
+                "limited_by": max_available_info.get('limited_by', 'rule'),
+                "stock_info": max_available_info.get('stock_info')
             })
             estimated_cost += line_cost
         return {"items": items, "estimated_cost": round(estimated_cost, 2)}  
     except fdb.Error as e:  
-        print(f"Erro ao buscar ingredientes do produto: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao buscar ingredientes do produto: {e}", exc_info=True)  
         return {"items": [], "estimated_cost": 0.0}  
     finally:  
         if conn: conn.close()  
@@ -419,7 +456,8 @@ def adjust_ingredient_stock(ingredient_id, change_amount):
         conn.commit()  
         return (True, None, f"Estoque ajustado de {current_stock} para {new_stock}")  
     except fdb.Error as e:  
-        print(f"Erro ao ajustar estoque: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao ajustar estoque: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  
@@ -449,7 +487,8 @@ def add_ingredient_quantity(ingredient_id, quantity_to_add):
         conn.commit()  
         return (True, None, f"Estoque atualizado de {current_stock} para {new_stock} (+{quantity_to_add})")  
     except fdb.Error as e:  
-        print(f"Erro ao adicionar quantidade ao estoque: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao adicionar quantidade ao estoque: {e}", exc_info=True)  
         if conn: conn.rollback()  
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     finally:  
@@ -479,7 +518,8 @@ def check_ingredient_name_exists(name):
         return (False, None)
         
     except fdb.Error as e:
-        print(f"Erro ao verificar nome do ingrediente: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao verificar nome do ingrediente: {e}", exc_info=True)
         return (False, None)
     finally:
         if conn: conn.close()  
@@ -512,7 +552,8 @@ def get_stock_summary():
             "in_stock_count": int(row[2]) if row and row[2] else 0
         }
     except fdb.Error as e:  
-        print(f"Erro ao buscar resumo de estoque: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao buscar resumo de estoque: {e}", exc_info=True)  
         return {  
             "total_stock_value": 0.0,
             "out_of_stock_count": 0,
@@ -555,7 +596,8 @@ def generate_purchase_order():
             "total_estimated_cost": total_estimated_cost
         }
     except fdb.Error as e:  
-        print(f"Erro ao gerar pedido de compra: {e}")  
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao gerar pedido de compra: {e}", exc_info=True)  
         return {"items": [], "total_items": 0, "total_estimated_cost": 0.0}  
     finally:  
         if conn: conn.close()
@@ -622,7 +664,8 @@ def consume_ingredients_for_product(product_id, quantity=1):
         return (True, None, f"Estoque consumido com sucesso para {quantity} unidade(s) do produto")
         
     except fdb.Error as e:
-        print(f"Erro ao consumir ingredientes: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao consumir ingredientes: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -679,7 +722,8 @@ def calculate_product_cost_by_portions(product_id):
         }
         
     except fdb.Error as e:
-        print(f"Erro ao calcular custo do produto: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao calcular custo do produto: {e}", exc_info=True)
         return {"total_cost": 0.0, "cost_breakdown": []}
     finally:
         if conn: conn.close()  
