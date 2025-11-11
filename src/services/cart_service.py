@@ -2109,8 +2109,10 @@ def claim_guest_cart(guest_cart_id, user_id):
                         (new_user_item_id, bm["ingredient_id"], bm["delta"], unit_price)
                     )
 
-        # Desativa o carrinho convidado após mesclar
-        cur.execute("UPDATE CARTS SET IS_ACTIVE = FALSE WHERE ID = ?;", (guest_cart_id,))
+        # Deleta o carrinho convidado após mesclar (os itens já foram copiados)
+        # Usa DELETE em vez de UPDATE para evitar violação da constraint UK_CARTS_USER_ACTIVE
+        # As foreign keys têm ON DELETE CASCADE, então os itens e extras serão deletados automaticamente
+        cur.execute("DELETE FROM CARTS WHERE ID = ?;", (guest_cart_id,))
         conn.commit()
         return (True, None, "Carrinho mesclado com sucesso")
     except fdb.Error as e:
