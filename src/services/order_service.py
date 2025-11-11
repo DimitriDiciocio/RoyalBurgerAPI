@@ -466,6 +466,15 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             # Adiciona itens ao pedido
             _add_order_items(new_order_id, items, cur)
             
+            # Deduz estoque quando o pedido é criado (usa cursor existente para manter transação)
+            success, error_code, message = stock_service.deduct_stock_for_order(new_order_id, cur)
+            if not success:
+                # Se falhou a dedução, reverte tudo
+                conn.rollback()
+                logger.error(f"Erro ao deduzir estoque para pedido {new_order_id}: {message}")
+                return (None, error_code, message)
+            logger.info(f"Estoque deduzido para pedido {new_order_id}: {message}")
+            
             conn.commit()
             
             # Notificação para cozinha
@@ -768,16 +777,9 @@ def update_order_status(order_id, new_status):
             else:
                 raise
 
-        # Deduz estoque quando o pedido é confirmado (status 'preparing')
-        if db_status == 'preparing':
-            success, error_code, message = stock_service.deduct_stock_for_order(order_id)
-            if not success:
-                # Se falhou a dedução, reverte o status
-                cur.execute("UPDATE ORDERS SET STATUS = 'pending' WHERE ID = ?;", (order_id,))
-                conn.commit()
-                logger.warning(f"Erro ao deduzir estoque para pedido {order_id}: {message}")
-                return False
-            logger.info(f"Estoque deduzido para pedido {order_id}: {message}")
+        # NOTA: Dedução de estoque foi movida para o momento da criação do pedido
+        # (create_order e create_order_from_cart) para garantir que o estoque seja
+        # reservado imediatamente quando o pedido é criado, não quando é confirmado
 
         # OTIMIZAÇÃO DE PERFORMANCE: user_id e order_type já foram obtidos na query inicial
         # Para pontos de fidelidade, precisa recalcular subtotal e buscar TOTAL_AMOUNT
@@ -1264,20 +1266,28 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
 
         # Preços dos extras do carrinho
+        # CORREÇÃO: Coletar todos os IDs de ingredientes extras únicos
         extra_ids = set()
         base_mod_ids = set()
         for it in cart_data["items"]:
             for ex in it.get("extras", []):
-                extra_ids.add(ex["ingredient_id"])
+                ex_id = ex.get("ingredient_id")
+                if ex_id:
+                    extra_ids.add(ex_id)
             for bm in it.get("base_modifications", []):
-                base_mod_ids.add(bm["ingredient_id"])
+                bm_id = bm.get("ingredient_id")
+                if bm_id:
+                    base_mod_ids.add(bm_id)
         
         extra_prices = {}
         if extra_ids:
             placeholders = ', '.join(['?' for _ in extra_ids])
-            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
+            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE, 0) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
             # Converte Decimal para float ao extrair do banco
             extra_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
+            logger.info(f"[create_order_from_cart] Preços de extras carregados: {len(extra_prices)} preços de {len(extra_ids)} ingredientes")
+        else:
+            logger.warning("[create_order_from_cart] Nenhum ingrediente extra encontrado nos itens do carrinho")
         
         base_mod_prices = {}
         if base_mod_ids:
@@ -1286,6 +1296,15 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             # Converte Decimal para float ao extrair do banco
             base_mod_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
 
+        # DEBUG: Log detalhado dos itens do carrinho
+        logger.info(f"[create_order_from_cart] Processando {len(cart_data['items'])} itens do carrinho")
+        for idx, item_debug in enumerate(cart_data["items"]):
+            logger.info(f"[create_order_from_cart] Item {idx}: product_id={item_debug.get('product_id')}, "
+                        f"quantity={item_debug.get('quantity')}, "
+                        f"extras_count={len(item_debug.get('extras', []))}, "
+                        f"extras={item_debug.get('extras', [])}, "
+                        f"base_modifications_count={len(item_debug.get('base_modifications', []))}")
+        
         # Copia itens do carrinho para o pedido (com preços)
         for item in cart_data["items"]:
             product_id = item["product_id"]
@@ -1307,30 +1326,58 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             order_item_id = cur.fetchone()[0]
 
             # Insere extras do item (TYPE='extra')
-            for extra in item.get("extras", []):
-                ex_id = extra["ingredient_id"]
+            extras_to_insert = item.get("extras", [])
+            logger.info(f"[create_order_from_cart] Item {order_item_id} (product_id={product_id}) tem {len(extras_to_insert)} extras: {extras_to_insert}")
+            
+            if not extras_to_insert:
+                logger.warning(f"[create_order_from_cart] ATENÇÃO: Item {order_item_id} (product_id={product_id}) não tem extras!")
+            
+            for extra in extras_to_insert:
+                ex_id = extra.get("ingredient_id")
                 ex_qty = int(extra.get("quantity", 1))
+                
+                # Validações
+                if not ex_id:
+                    logger.warning(f"[create_order_from_cart] Extra sem ingredient_id: {extra}")
+                    continue
                 
                 # IMPORTANTE: Não insere extras com quantidade 0 ou negativa
                 if ex_qty <= 0:
                     logger.warning(f"[create_order_from_cart] Pulando extra com quantidade inválida: ingredient_id={ex_id}, quantity={ex_qty}")
                     continue
                 
-                # CORREÇÃO: Valida se ingrediente existe antes de inserir
+                # CORREÇÃO: Valida se ingrediente existe e tem preço
                 ex_price = extra_prices.get(ex_id)
                 if ex_price is None:
-                    raise ValueError(f"Ingrediente {ex_id} não encontrado ou preço indisponível")
+                    # Tenta buscar preço diretamente do banco se não estiver no cache
+                    cur.execute(
+                        "SELECT COALESCE(ADDITIONAL_PRICE, PRICE, 0) FROM INGREDIENTS WHERE ID = ?",
+                        (ex_id,)
+                    )
+                    price_row = cur.fetchone()
+                    if price_row:
+                        ex_price = float(price_row[0] or 0.0)
+                        extra_prices[ex_id] = ex_price  # Adiciona ao cache
+                        logger.info(f"[create_order_from_cart] Preço do extra {ex_id} buscado diretamente: {ex_price}")
+                    else:
+                        logger.error(f"[create_order_from_cart] Ingrediente {ex_id} não encontrado no banco de dados")
+                        raise ValueError(f"Ingrediente {ex_id} não encontrado ou preço indisponível")
                 
                 # Garante que o preço é float
                 ex_price_float = float(ex_price)
                 
                 logger.info(f"[create_order_from_cart] Inserindo extra: order_item_id={order_item_id}, ingredient_id={ex_id}, quantity={ex_qty}, price={ex_price_float}")
                 
-                sql_extra = """
-                    INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
-                    VALUES (?, ?, ?, 'extra', ?, ?);
-                """
-                cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_qty, ex_price_float))
+                try:
+                    sql_extra = """
+                        INSERT INTO ORDER_ITEM_EXTRAS (ORDER_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE)
+                        VALUES (?, ?, ?, 'extra', ?, ?);
+                    """
+                    cur.execute(sql_extra, (order_item_id, ex_id, ex_qty, ex_qty, ex_price_float))
+                    logger.info(f"[create_order_from_cart] Extra inserido com sucesso: ingredient_id={ex_id}")
+                except Exception as e:
+                    logger.error(f"[create_order_from_cart] Erro ao inserir extra {ex_id}: {e}", exc_info=True)
+                    raise
             
             # Insere base_modifications do item (TYPE='base')
             for bm in item.get("base_modifications", []):
@@ -1350,6 +1397,15 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                         VALUES (?, ?, 0, 'base', ?, ?);
                     """
                     cur.execute(sql_base_mod, (order_item_id, bm_id, bm_delta, bm_price_float))
+        
+        # Deduz estoque quando o pedido é criado (usa cursor existente para manter transação)
+        success, error_code, message = stock_service.deduct_stock_for_order(order_id, cur)
+        if not success:
+            # Se falhou a dedução, reverte tudo
+            conn.rollback()
+            logger.error(f"Erro ao deduzir estoque para pedido {order_id}: {message}")
+            return (None, error_code, message)
+        logger.info(f"Estoque deduzido para pedido {order_id}: {message}")
         
         # Limpa o carrinho do usuário
         cart_id = cart_data["cart_id"]

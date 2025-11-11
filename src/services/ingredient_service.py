@@ -209,10 +209,28 @@ def update_ingredient(ingredient_id, data):
         if not cur.fetchone():  
             return (False, "INGREDIENT_NOT_FOUND", "Ingrediente não encontrado")  
         # nome único  
-        if 'name' in fields_to_update:  
+        if 'name' in fields_to_update:
             cur.execute("SELECT 1 FROM INGREDIENTS WHERE UPPER(NAME) = UPPER(?) AND ID <> ?", (fields_to_update['name'], ingredient_id))  
             if cur.fetchone():  
-                return (False, "INGREDIENT_NAME_EXISTS", "Já existe um insumo com este nome")  
+                return (False, "INGREDIENT_NAME_EXISTS", "Já existe um insumo com este nome")
+        
+        # CORREÇÃO: Se current_stock está sendo atualizado, recalcular STOCK_STATUS
+        if 'current_stock' in fields_to_update:
+            # Buscar MIN_STOCK_THRESHOLD e STOCK_STATUS atual
+            cur.execute("SELECT MIN_STOCK_THRESHOLD, STOCK_STATUS FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
+            threshold_row = cur.fetchone()
+            min_threshold = float(threshold_row[0]) if threshold_row and threshold_row[0] is not None else 0.0
+            current_status = threshold_row[1] if threshold_row and threshold_row[1] else 'ok'
+            new_stock = float(fields_to_update['current_stock'])
+            
+            # Recalcular STOCK_STATUS baseado no novo estoque
+            from ..services.stock_service import _determine_new_status
+            from decimal import Decimal
+            new_status = _determine_new_status(Decimal(str(new_stock)), Decimal(str(min_threshold)), current_status)
+            
+            # Adicionar STOCK_STATUS aos campos a atualizar
+            fields_to_update['stock_status'] = new_status
+        
         # ALTERAÇÃO: Construção segura de SQL - apenas campos permitidos são usados
         # allowed_fields garante que apenas campos válidos entram na query
         set_parts = [f"{key.upper()} = ?" for key in fields_to_update]  
@@ -221,7 +239,7 @@ def update_ingredient(ingredient_id, data):
         sql = f"UPDATE INGREDIENTS SET {', '.join(set_parts)} WHERE ID = ?;"  
         cur.execute(sql, tuple(values))  
         conn.commit()  
-        return (True, None, "Ingrediente atualizado com sucesso")  
+        return (True, None, "Ingrediente atualizado com sucesso")
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
         logger.error(f"Erro ao atualizar ingrediente: {e}", exc_info=True)  
@@ -411,6 +429,28 @@ def get_ingredients_for_product(product_id):
                 cur=cur  # Reutiliza conexão existente
             )
             
+            # IMPORTANTE: max_available já é o menor entre regra e estoque (calculado pela função)
+            # Para ingredientes base (portions > 0), max_available é o total de porções possíveis
+            # Para extras (portions = 0), max_available é apenas extras disponíveis (sem incluir min_quantity)
+            max_available_value = max_available_info.get('max_available', 0) if max_available_info else 0
+            
+            # Calcula max_quantity final: menor entre regra e estoque
+            if portions == 0.0:  # É ingrediente extra
+                # max_available é apenas extras, então precisa somar com min_quantity
+                max_from_stock_total = min_quantity + max_available_value if max_available_value > 0 else min_quantity
+                # Retorna o menor entre estoque e regra
+                if max_quantity > 0:
+                    effective_max_quantity = min(max_from_stock_total, max_quantity)
+                else:
+                    effective_max_quantity = max_from_stock_total
+            else:  # É ingrediente base
+                # max_available já é o total de porções possíveis (menor entre regra e estoque)
+                # Se há regra, compara com ela; senão usa o valor do estoque
+                if max_quantity > 0:
+                    effective_max_quantity = min(max_available_value, max_quantity)
+                else:
+                    effective_max_quantity = max_available_value if max_available_value > 0 else None
+            
             items.append({
                 "ingredient_id": ingredient_id,
                 "name": name,
@@ -425,12 +465,12 @@ def get_ingredients_for_product(product_id):
                 "is_available": is_available,
                 "line_cost": round(line_cost, 2),
                 "min_quantity": min_quantity,
-                "max_quantity": max_quantity,
+                "max_quantity": effective_max_quantity,  # Menor entre regra e estoque (já calculado)
                 # AJUSTE: Adicionar informações de estoque para validação
                 "current_stock": round(current_stock, 3),
-                "max_available": max_available_info.get('max_available', 0),
-                "limited_by": max_available_info.get('limited_by', 'rule'),
-                "stock_info": max_available_info.get('stock_info')
+                "max_available": max_available_value,  # Mantém para referência
+                "limited_by": max_available_info.get('limited_by', 'rule') if max_available_info else 'rule',
+                "stock_info": max_available_info.get('stock_info') if max_available_info else None
             })
             estimated_cost += line_cost
         return {"items": items, "estimated_cost": round(estimated_cost, 2)}  
@@ -447,17 +487,26 @@ def adjust_ingredient_stock(ingredient_id, change_amount):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        cur.execute("SELECT CURRENT_STOCK FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
+        # CORREÇÃO: Buscar também MIN_STOCK_THRESHOLD e STOCK_STATUS para recalcular status
+        cur.execute("SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
         row = cur.fetchone()  
         if not row:  
             return (False, "INGREDIENT_NOT_FOUND", "Ingrediente não encontrado")  
-        current_stock = float(row[0]) if row[0] is not None else 0.0  
+        current_stock = float(row[0]) if row[0] is not None else 0.0
+        min_threshold = float(row[1]) if row[1] is not None else 0.0
+        current_status = row[2] if row[2] else 'ok'
         new_stock = current_stock + change_amount  
         if new_stock < 0:  
-            return (False, "NEGATIVE_STOCK", "Não é possível ter estoque negativo")  
-        cur.execute("UPDATE INGREDIENTS SET CURRENT_STOCK = ? WHERE ID = ?", (new_stock, ingredient_id))  
+            return (False, "NEGATIVE_STOCK", "Não é possível ter estoque negativo")
+        
+        # CORREÇÃO: Recalcular STOCK_STATUS baseado no novo estoque
+        from ..services.stock_service import _determine_new_status
+        from decimal import Decimal
+        new_status = _determine_new_status(Decimal(str(new_stock)), Decimal(str(min_threshold)), current_status)
+        
+        cur.execute("UPDATE INGREDIENTS SET CURRENT_STOCK = ?, STOCK_STATUS = ? WHERE ID = ?", (new_stock, new_status, ingredient_id))  
         conn.commit()  
-        return (True, None, f"Estoque ajustado de {current_stock} para {new_stock}")  
+        return (True, None, f"Estoque ajustado de {current_stock} para {new_stock} (status: {new_status})")  
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
         logger.error(f"Erro ao ajustar estoque: {e}", exc_info=True)  
@@ -474,21 +523,29 @@ def add_ingredient_quantity(ingredient_id, quantity_to_add):
         conn = get_db_connection()  
         cur = conn.cursor()  
         
-        # Verifica se o ingrediente existe e busca o estoque atual
-        cur.execute("SELECT CURRENT_STOCK FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
+        # CORREÇÃO: Buscar também MIN_STOCK_THRESHOLD e STOCK_STATUS para recalcular status
+        cur.execute("SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
         row = cur.fetchone()  
         if not row:  
             return (False, "INGREDIENT_NOT_FOUND", "Ingrediente não encontrado")  
         
         current_stock = float(row[0]) if row[0] is not None else 0.0
+        min_threshold = float(row[1]) if row[1] is not None else 0.0
+        current_status = row[2] if row[2] else 'ok'
         
         if quantity_to_add < 0:  
             return (False, "INVALID_QUANTITY", "Quantidade a adicionar não pode ser negativa")  
         
         new_stock = current_stock + quantity_to_add
-        cur.execute("UPDATE INGREDIENTS SET CURRENT_STOCK = ? WHERE ID = ?", (new_stock, ingredient_id))  
+        
+        # CORREÇÃO: Recalcular STOCK_STATUS baseado no novo estoque
+        from ..services.stock_service import _determine_new_status
+        from decimal import Decimal
+        new_status = _determine_new_status(Decimal(str(new_stock)), Decimal(str(min_threshold)), current_status)
+        
+        cur.execute("UPDATE INGREDIENTS SET CURRENT_STOCK = ?, STOCK_STATUS = ? WHERE ID = ?", (new_stock, new_status, ingredient_id))  
         conn.commit()  
-        return (True, None, f"Estoque atualizado de {current_stock} para {new_stock} (+{quantity_to_add})")  
+        return (True, None, f"Estoque atualizado de {current_stock} para {new_stock} (+{quantity_to_add}, status: {new_status})")  
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
         logger.error(f"Erro ao adicionar quantidade ao estoque: {e}", exc_info=True)  
@@ -656,11 +713,31 @@ def consume_ingredients_for_product(product_id, quantity=1):
                 "new_stock": current_stock - total_consumption
             })
         
-        # Executar baixa de estoque para todos os ingredientes
+        # CORREÇÃO: Executar baixa de estoque para todos os ingredientes e atualizar STOCK_STATUS
+        from ..services.stock_service import _determine_new_status
+        from decimal import Decimal
+        
         for item in consumption_plan:
+            # Buscar MIN_STOCK_THRESHOLD e STOCK_STATUS atual
+            cur.execute("""
+                SELECT MIN_STOCK_THRESHOLD, STOCK_STATUS 
+                FROM INGREDIENTS 
+                WHERE ID = ?
+            """, (item["ingredient_id"],))
+            threshold_row = cur.fetchone()
+            min_threshold = float(threshold_row[0]) if threshold_row and threshold_row[0] is not None else 0.0
+            current_status = threshold_row[1] if threshold_row and threshold_row[1] else 'ok'
+            
+            # Recalcular STOCK_STATUS baseado no novo estoque
+            new_status = _determine_new_status(
+                Decimal(str(item["new_stock"])), 
+                Decimal(str(min_threshold)), 
+                current_status
+            )
+            
             cur.execute(
-                "UPDATE INGREDIENTS SET CURRENT_STOCK = ? WHERE ID = ?",
-                (item["new_stock"], item["ingredient_id"])
+                "UPDATE INGREDIENTS SET CURRENT_STOCK = ?, STOCK_STATUS = ? WHERE ID = ?",
+                (item["new_stock"], new_status, item["ingredient_id"])
             )
         
         conn.commit()

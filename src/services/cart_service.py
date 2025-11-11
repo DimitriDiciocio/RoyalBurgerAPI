@@ -485,12 +485,24 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 ing_id = extra.get("ingredient_id")
                 qty = int(extra.get("quantity", 1))
                 rule = rules.get(ing_id)
+                
+                # CORREÇÃO: Se o ingrediente não está nas regras do produto, verifica se ele existe e está disponível
+                # Permite adicionar ingredientes que não estão cadastrados como extras do produto
+                # (desde que não sejam da receita base)
                 if not rule:
-                    return (False, "EXTRA_NOT_ALLOWED", "Um ou mais extras não são permitidos para este produto")
-                if float(rule["portions"]) != 0.0:
-                    return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
-                min_q = int(rule["min_quantity"] or 0)
-                max_q_rule = int(rule["max_quantity"]) if rule["max_quantity"] else None
+                    # Verifica se o ingrediente existe e está disponível
+                    if ing_id not in ingredient_names:
+                        return (False, "EXTRA_NOT_ALLOWED", f"Ingrediente ID {ing_id} não encontrado")
+                    # Se não está nas regras, assume que pode ser adicionado como extra (portions=0)
+                    # Usa valores padrão: min=0, max=None (sem limite de regra)
+                    min_q = 0
+                    max_q_rule = None
+                else:
+                    # Se está nas regras, verifica se não é da receita base
+                    if float(rule["portions"]) != 0.0:
+                        return (False, "EXTRA_NOT_ALLOWED", "Um dos extras selecionados já faz parte da receita base")
+                    min_q = int(rule["min_quantity"] or 0)
+                    max_q_rule = int(rule["max_quantity"]) if rule["max_quantity"] else None
                 
                 # Obtém disponibilidade do cache em memória (já carregado em batch)
                 max_available_info = ingredient_availability.get(ing_id)
@@ -681,7 +693,19 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                         logger.warning(f"[add_item_to_cart] Extra com quantidade inválida: ingredient_id={ingredient_id}, qty={extra_quantity}, extra_data={extra}")
                         continue
                     
+                    # CORREÇÃO: Busca preço mesmo se não estava no batch inicial (para ingredientes não cadastrados como extras)
                     unit_price = ingredient_prices.get(ingredient_id, 0.0)
+                    if unit_price == 0.0:
+                        # Tenta buscar preço diretamente do banco
+                        cur.execute(
+                            "SELECT COALESCE(ADDITIONAL_PRICE, PRICE, 0) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE",
+                            (ingredient_id,)
+                        )
+                        price_row = cur.fetchone()
+                        if price_row:
+                            unit_price = float(price_row[0] or 0.0)
+                            ingredient_prices[ingredient_id] = unit_price  # Adiciona ao cache
+                    
                     if unit_price > 0:  # Só insere se ingrediente existe e tem preço
                         sql_extra = (
                             "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) "
@@ -1759,7 +1783,11 @@ def remove_cart_item(user_id, cart_item_id):
         if not cur.fetchone():
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no seu carrinho")
         
-        # Remove o item (cascade remove os extras automaticamente)
+        # CORREÇÃO: Remove explicitamente os extras antes de remover o item
+        # (garante remoção mesmo se não houver cascade configurado)
+        cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;", (cart_item_id,))
+        
+        # Remove o item
         sql = "DELETE FROM CART_ITEMS WHERE ID = ?;"
         cur.execute(sql, (cart_item_id,))
         
@@ -1795,6 +1823,11 @@ def remove_cart_item_by_cart(cart_id, cart_item_id):
         if not cur.fetchone():
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no carrinho informado")
 
+        # CORREÇÃO: Remove explicitamente os extras antes de remover o item
+        # (garante remoção mesmo se não houver cascade configurado)
+        cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;", (cart_item_id,))
+        
+        # Remove o item
         cur.execute("DELETE FROM CART_ITEMS WHERE ID = ?;", (cart_item_id,))
         conn.commit()
         return (True, None, "Item removido do carrinho com sucesso")

@@ -1,4 +1,5 @@
 import fdb  
+import logging
 from ..database import get_db_connection
 from . import groups_service, stock_service
 from ..utils.image_handler import get_product_image_url
@@ -117,12 +118,13 @@ def _get_image_hash(image_url):
 def _get_product_availability_status(product_id, cur):
     """Verifica o status de disponibilidade do produto baseado no estoque dos ingredientes"""
     try:
-        # Busca ingredientes do produto
+        # CORREÇÃO: Busca apenas ingredientes obrigatórios (portions > 0)
+        # Ingredientes extras (portions = 0) não afetam a disponibilidade do produto
         sql = """
             SELECT i.IS_AVAILABLE, i.STOCK_STATUS, i.CURRENT_STOCK, i.MIN_STOCK_THRESHOLD
             FROM PRODUCT_INGREDIENTS pi
             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
-            WHERE pi.PRODUCT_ID = ? AND i.IS_AVAILABLE = TRUE
+            WHERE pi.PRODUCT_ID = ? AND pi.PORTIONS > 0
         """
         cur.execute(sql, (product_id,))
         ingredients = cur.fetchall()
@@ -354,6 +356,9 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
             }
         }
     """
+    # IMPORTANTE: Definir logger no início da função para evitar UnboundLocalError
+    logger = logging.getLogger(__name__)
+    
     conn = None
     should_close_conn = False
     
@@ -415,23 +420,48 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
                     base_portion_unit_str
                 )
                 
+                # Log de debug para verificar conversão
+                logger.debug(
+                    f"[get_ingredient_max_available_quantity] Ingrediente {ingredient_id}: "
+                    f"Estoque original: {current_stock_decimal} {stock_unit_str} → "
+                    f"Convertido: {stock_in_base_unit} {base_portion_unit_str}"
+                )
+                
                 # AJUSTE: Calcula quantas porções extras podem ser adicionadas
                 # Considera as porções base já incluídas no produto
-                # Fórmula: (base_portions + extras) * base_portion_quantity * item_quantity <= current_stock
+                # Fórmula: (base_portions * item_quantity + extras * item_quantity) * base_portion_quantity <= current_stock
+                # Simplificando: (base_portions + extras) * base_portion_quantity * item_quantity <= current_stock
                 # Então: extras <= (current_stock / (base_portion_quantity * item_quantity)) - base_portions
                 if base_portion_quantity_decimal > 0:
-                    # Quantidade total de porções (base + extras) que cabem no estoque
+                    # Converte estoque para quantidade total de porções disponíveis
                     total_portions_available = stock_in_base_unit / base_portion_quantity_decimal
-                    # Divide pela quantidade de itens para ter por item
-                    portions_per_item = total_portions_available / item_quantity
-                    # Subtrai as porções base para obter apenas as extras disponíveis
+                    
+                    # CORREÇÃO: base_portions é por item, então calcula total de porções base
                     base_portions_decimal = Decimal(str(base_portions or 0))
-                    max_extras_per_item = portions_per_item - base_portions_decimal
-                    # Arredonda para baixo e converte para int (não pode ser negativo)
-                    max_from_stock = max(0, int(max_extras_per_item))
+                    total_base_portions = base_portions_decimal * Decimal(str(item_quantity))
+                    
+                    # Se base_portions > 0, é um ingrediente da base
+                    # Nesse caso, retorna o total de porções possíveis (não apenas extras)
+                    # Exemplo: estoque permite 2 porções, já usa 1 na base → retorna 2 (total), não 1 (extra)
+                    if base_portions_decimal > 0:
+                        # Para ingredientes base, retorna o total de porções possíveis
+                        # Arredonda para baixo o total de porções disponíveis
+                        max_from_stock = max(0, int(total_portions_available))
+                    else:
+                        # Para ingredientes extras (base_portions = 0), calcula apenas extras
+                        # Calcula quantas porções extras totais podem ser adicionadas
+                        max_extras_total = total_portions_available - total_base_portions
+                        
+                        # Divide pela quantidade de itens para ter extras disponíveis por item
+                        if item_quantity > 0:
+                            max_extras_per_item = max_extras_total / Decimal(str(item_quantity))
+                        else:
+                            max_extras_per_item = Decimal('0')
+                        
+                        # Arredonda para baixo e converte para int (não pode ser negativo)
+                        max_from_stock = max(0, int(max_extras_per_item))
             except Exception as e:
                 # ALTERAÇÃO: Substituído print() por logging estruturado
-                logger = logging.getLogger(__name__)
                 logger.warning(f"Erro ao calcular quantidade máxima do estoque para ingrediente {ingredient_id}: {e}", exc_info=True)
                 max_from_stock = 0
         
@@ -474,7 +504,6 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
         
     except Exception as e:
         # ALTERAÇÃO: Substituído print() por logging estruturado
-        logger = logging.getLogger(__name__)
         logger.error(f"Erro ao calcular quantidade máxima disponível do ingrediente {ingredient_id}: {e}", exc_info=True)
         return {
             'max_available': 0,
@@ -509,7 +538,7 @@ def _is_cache_valid(cache_key):
     elapsed = (datetime.now() - _product_list_cache_timestamp[cache_key]).total_seconds()
     return elapsed < _product_list_cache_ttl
 
-def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False):  
+def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False, filter_unavailable=True):  
     """
     Lista produtos com cache em memória para melhor performance.
     Cache TTL: 5 minutos. Invalidado automaticamente quando produtos são modificados.
@@ -574,11 +603,18 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 availability_query = f"""
                     SELECT 
                         pi.PRODUCT_ID,
-                        MIN(CASE WHEN i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock' THEN 0 ELSE 1 END) as all_available,
-                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock
+                        MIN(CASE 
+                            WHEN i.IS_AVAILABLE = FALSE 
+                                 OR i.STOCK_STATUS = 'out_of_stock' 
+                                 OR (i.CURRENT_STOCK IS NOT NULL AND i.CURRENT_STOCK = 0)
+                            THEN 0 
+                            ELSE 1 
+                        END) as all_available,
+                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK IS NOT NULL AND i.MIN_STOCK_THRESHOLD IS NOT NULL AND i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock
                     FROM PRODUCT_INGREDIENTS pi
                     JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
                     WHERE pi.PRODUCT_ID IN ({placeholders})
+                      AND pi.PORTIONS > 0
                     GROUP BY pi.PRODUCT_ID
                 """
                 cur.execute(availability_query, tuple(product_ids))
@@ -586,7 +622,37 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                     product_id = row[0]
                     all_av = row[1]
                     has_low = row[2]
-                    if all_av == 0:
+                    
+                    # CORREÇÃO: Tratar NULL como disponível (se não há ingredientes obrigatórios, considera disponível)
+                    # Se all_av for NULL, significa que não há ingredientes obrigatórios, então produto está disponível
+                    if all_av is None:
+                        availability_map[product_id] = "available"
+                    elif all_av == 0:
+                        # DEBUG: Buscar quais ingredientes obrigatórios estão indisponíveis
+                        cur.execute("""
+                            SELECT i.ID, i.NAME, i.IS_AVAILABLE, i.STOCK_STATUS, i.CURRENT_STOCK, pi.PORTIONS
+                            FROM PRODUCT_INGREDIENTS pi
+                            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                            WHERE pi.PRODUCT_ID = ? 
+                              AND pi.PORTIONS > 0
+                              AND (i.IS_AVAILABLE = FALSE 
+                                   OR i.STOCK_STATUS = 'out_of_stock' 
+                                   OR (i.CURRENT_STOCK IS NOT NULL AND i.CURRENT_STOCK = 0))
+                        """, (product_id,))
+                        unavailable_ingredients = cur.fetchall()
+                        if unavailable_ingredients:
+                            logger.warning(f"[list_products] Produto {product_id} marcado como unavailable. Ingredientes obrigatórios indisponíveis: {[f'{ing[1]} (ID:{ing[0]}, IS_AVAILABLE:{ing[2]}, STOCK_STATUS:{ing[3]}, CURRENT_STOCK:{ing[4]}, PORTIONS:{ing[5]})' for ing in unavailable_ingredients]}")
+                        else:
+                            # Se não encontrou ingredientes indisponíveis mas all_av = 0, pode ser problema na query
+                            logger.warning(f"[list_products] Produto {product_id} marcado como unavailable mas nenhum ingrediente obrigatório indisponível encontrado. Verificando todos os ingredientes obrigatórios...")
+                            cur.execute("""
+                                SELECT i.ID, i.NAME, i.IS_AVAILABLE, i.STOCK_STATUS, i.CURRENT_STOCK, pi.PORTIONS
+                                FROM PRODUCT_INGREDIENTS pi
+                                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                                WHERE pi.PRODUCT_ID = ? AND pi.PORTIONS > 0
+                            """, (product_id,))
+                            all_required = cur.fetchall()
+                            logger.warning(f"[list_products] Todos os ingredientes obrigatórios do produto {product_id}: {[f'{ing[1]} (ID:{ing[0]}, IS_AVAILABLE:{ing[2]}, STOCK_STATUS:{ing[3]}, CURRENT_STOCK:{ing[4]}, PORTIONS:{ing[5]})' for ing in all_required]}")
                         availability_map[product_id] = "unavailable"
                     elif has_low == 1:
                         availability_map[product_id] = "low_stock"
@@ -626,6 +692,17 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         # Processa os produtos com os dados já carregados
         for row in product_rows:
             product_id = row[0]
+            
+            # CORREÇÃO: Filtrar produtos indisponíveis apenas no GET (não desativa no banco)
+            # Verifica availability_status antes de adicionar à lista
+            # Aplica filtro apenas se filter_unavailable=True (usuários normais)
+            availability_status = availability_map.get(product_id, "unknown")
+            if filter_unavailable and availability_status == "unavailable":
+                # Produto indisponível - não incluir na listagem para usuários normais
+                # Mas não desativa no banco (IS_ACTIVE permanece TRUE)
+                # Administradores ainda veem todos os produtos
+                continue
+            
             item = {  
                 "id": product_id,  
                 "name": row[1],  
@@ -649,18 +726,29 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                     item["image_hash"] = None
             
             # Adiciona status de disponibilidade (já carregado em batch)
-            item["availability_status"] = availability_map.get(product_id, "unknown")
+            item["availability_status"] = availability_status
             
             # Adiciona ingredientes (já carregados em batch)
             item["ingredients"] = ingredients_map.get(product_id, [])
             
             items.append(item)  
         
-        total_pages = (total + page_size - 1) // page_size  
+        # CORREÇÃO: Ajustar total após filtrar produtos indisponíveis
+        # Se filter_unavailable=True, ajusta o total para refletir apenas produtos disponíveis
+        # Se filter_unavailable=False (admin), usa o total original
+        if filter_unavailable:
+            filtered_total = len(items)
+            total_pages = (filtered_total + page_size - 1) // page_size if filtered_total > 0 else 0
+            pagination_total = filtered_total
+        else:
+            # Admin vê todos os produtos, usa total original
+            total_pages = (total + page_size - 1) // page_size
+            pagination_total = total
+        
         result = {  
             "items": items,  
             "pagination": {  
-                "total": total,  
+                "total": pagination_total,
                 "page": page,  
                 "page_size": page_size,  
                 "total_pages": total_pages  
@@ -701,6 +789,9 @@ def get_product_by_id(product_id, quantity=1):
     Returns:
         dict: Dados do produto com ingredientes e max_quantity já calculado
     """
+    # IMPORTANTE: Definir logger no início da função para evitar UnboundLocalError
+    logger = logging.getLogger(__name__)
+    
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -723,7 +814,8 @@ def get_product_by_id(product_id, quantity=1):
             cur.execute(
                 """
                 SELECT pi.INGREDIENT_ID, i.NAME, pi.PORTIONS, pi.MIN_QUANTITY, pi.MAX_QUANTITY,
-                       i.ADDITIONAL_PRICE, i.IS_AVAILABLE
+                       i.ADDITIONAL_PRICE, i.IS_AVAILABLE, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT,
+                       i.STOCK_UNIT
                 FROM PRODUCT_INGREDIENTS pi
                 JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
                 WHERE pi.PRODUCT_ID = ?
@@ -731,37 +823,92 @@ def get_product_by_id(product_id, quantity=1):
                 """,
                 (product_id,)
             )
+            
+            ingredients_rows = cur.fetchall()
+            
+            # Para cada ingrediente extra, calcula a quantidade atual de ingredientes base que usam o mesmo ingrediente
+            # Isso será usado para ajustar o cálculo de max_available
             ingredients_data = []
-            for r in cur.fetchall():
+            for r in ingredients_rows:
                 ing_id = r[0]
                 max_quantity_rule = int(r[4]) if r[4] is not None else None
+                portions = float(r[2]) if r[2] is not None else 0.0
+                
+                # Para ingredientes extras, verifica se há ingredientes base que usam o mesmo ingrediente
+                # e calcula quanto estoque já está sendo usado
+                base_portions_for_calculation = Decimal('0')
+                if portions == 0.0:  # É ingrediente extra
+                    # Busca se há ingredientes base (portions > 0) que usam o mesmo ingrediente
+                    cur.execute("""
+                        SELECT pi.PORTIONS, i.BASE_PORTION_QUANTITY
+                        FROM PRODUCT_INGREDIENTS pi
+                        JOIN INGREDIENTS i ON i.ID = pi.INGREDIENT_ID
+                        WHERE pi.PRODUCT_ID = ? 
+                          AND pi.INGREDIENT_ID = ?
+                          AND pi.PORTIONS > 0
+                    """, (product_id, ing_id))
+                    base_ingredient_row = cur.fetchone()
+                    if base_ingredient_row:
+                        # Há ingrediente base que usa o mesmo ingrediente
+                        # base_portions é a quantidade de porções base POR ITEM do produto
+                        # Exemplo: se PORTIONS = 1.0, significa 1 porção base por item
+                        # Se quantity = 2, temos 2 porções base totais
+                        # A função get_ingredient_max_available_quantity() espera base_portions como quantidade POR ITEM
+                        # e multiplica internamente por item_quantity (linha 428)
+                        # Então passamos apenas base_portions (por item), sem multiplicar por quantity
+                        base_portions = float(base_ingredient_row[0]) if base_ingredient_row[0] is not None else 0.0
+                        base_portions_for_calculation = Decimal(str(base_portions))
+                    else:
+                        # Não há ingrediente base que usa o mesmo ingrediente
+                        base_portions_for_calculation = Decimal('0')
+                else:
+                    # Para ingredientes base (portions > 0), passa o próprio portions como base_portions
+                    # Isso faz a função retornar o total de porções possíveis (não apenas extras)
+                    base_portions_for_calculation = Decimal(str(portions))
                 
                 # IMPORTANTE: Calcula quantidade máxima disponível considerando a quantidade do produto
-                # Isso garante que o max_available seja calculado corretamente para a quantidade solicitada
+                # e a quantidade atual de ingredientes base que usam o mesmo ingrediente
                 max_available_info = get_ingredient_max_available_quantity(
                     ingredient_id=ing_id,
                     max_quantity_from_rule=max_quantity_rule,
                     item_quantity=quantity,  # Usa a quantidade do produto passada como parâmetro
+                    base_portions=float(base_portions_for_calculation),  # Para base: portions; Para extra: porções base que usam o mesmo ingrediente
                     cur=cur  # Reutiliza conexão existente
                 )
                 
-                # Se é um ingrediente extra (portions = 0), usa max_available calculado
-                # IMPORTANTE: max_available é a quantidade máxima de EXTRAS disponíveis (sem incluir min_quantity)
-                # Para o mobile, precisamos retornar a quantidade TOTAL máxima (min_quantity + max_available)
-                # Se não, mantém max_quantity da regra
-                portions = float(r[2]) if r[2] is not None else 0.0
-                if portions == 0.0:  # É um ingrediente extra
+                # IMPORTANTE: get_ingredient_max_available_quantity já retorna o menor entre regra e estoque
+                # Para ingredientes base (portions > 0), retorna o total de porções possíveis
+                # Para extras (portions = 0), retorna apenas extras disponíveis (sem incluir min_quantity)
+                
+                max_available_from_function = max_available_info.get('max_available', 0) if max_available_info else 0
+                
+                # Debug: log para ingredientes base problemáticos
+                if portions > 0 and ing_id == 28:
+                    logger.debug(
+                        f"[get_product_by_id] Ingrediente base {ing_id} (portions={portions}): "
+                        f"max_quantity_rule={max_quantity_rule}, "
+                        f"base_portions_for_calculation={base_portions_for_calculation}, "
+                        f"max_available_from_function={max_available_from_function}, "
+                        f"limited_by={max_available_info.get('limited_by') if max_available_info else 'N/A'}"
+                    )
+                
+                if portions == 0.0:  # É ingrediente extra
                     min_qty = int(r[3]) if r[3] is not None else 0
-                    max_available_extras = max_available_info['max_available']
-                    # Se max_available é 0, não há estoque para extras adicionais
-                    # Se max_available > 0, a quantidade total máxima é min_quantity + max_available
-                    if max_available_extras > 0:
-                        effective_max_quantity = min_qty + max_available_extras
+                    # max_available_from_function é apenas extras, então precisa somar com min_quantity
+                    max_from_stock_total = min_qty + max_available_from_function if max_available_from_function > 0 else min_qty
+                    
+                    # Retorna o menor entre: quantidade baseada no estoque e quantidade máxima da regra
+                    if max_quantity_rule is not None and max_quantity_rule > 0:
+                        # Compara quantidade baseada no estoque com a regra e retorna o menor
+                        effective_max_quantity = min(max_from_stock_total, max_quantity_rule)
                     else:
-                        # Sem estoque para extras, só permite o mínimo
-                        effective_max_quantity = min_qty
-                else:  # É ingrediente da base, não tem limite de quantidade extra
-                    effective_max_quantity = max_quantity_rule if max_quantity_rule else None
+                        # Sem limite de regra, usa apenas a quantidade baseada no estoque
+                        effective_max_quantity = max_from_stock_total
+                else:  # É ingrediente base
+                    # max_available_from_function já é o total de porções possíveis
+                    # A função get_ingredient_max_available_quantity já retorna o menor entre regra e estoque
+                    # Então podemos usar diretamente o valor retornado
+                    effective_max_quantity = max_available_from_function if max_available_from_function > 0 else None
                 
                 ingredients_data.append({
                     "id": ing_id,  # Adiciona id para compatibilidade com mobile
@@ -769,8 +916,7 @@ def get_product_by_id(product_id, quantity=1):
                     "name": r[1],
                     "portions": portions,
                     "min_quantity": int(r[3]) if r[3] is not None else 0,
-                    "max_quantity": effective_max_quantity,  # Já calculado considerando quantity do produto
-                    "max_quantity_rule": max_quantity_rule,  # Mantém a regra original para referência
+                    "max_quantity": effective_max_quantity,  # Menor entre regra e estoque (já calculado)
                     "additional_price": float(r[5]) if r[5] is not None else 0.0,
                     "is_available": bool(r[6]),
                     "availability_info": max_available_info if portions == 0.0 else None  # Info adicional para extras
@@ -782,7 +928,6 @@ def get_product_by_id(product_id, quantity=1):
         return None  
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
-        logger = logging.getLogger(__name__)
         logger.error(f"Erro ao buscar produto por ID: {e}", exc_info=True)  
         return None  
     finally:  
@@ -1018,10 +1163,6 @@ def update_product_image_url(product_id, image_url):
     finally:
         if conn: conn.close()
 
-
-import logging
-logger = logging.getLogger(__name__)
-
 def reactivate_product(product_id):  
     conn = None  
     try:  
@@ -1058,7 +1199,7 @@ def search_products(name=None, category_id=None, page=1, page_size=10, include_i
 
 
 
-def get_products_by_category_id(category_id, page=1, page_size=10, include_inactive=False):  
+def get_products_by_category_id(category_id, page=1, page_size=10, include_inactive=False, filter_unavailable=True):  
     """
     Busca produtos por ID da categoria específica
     """
@@ -1128,16 +1269,24 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         if product_ids:
             try:
                 placeholders = ', '.join(['?' for _ in product_ids])
-                # Query melhorada: busca informações detalhadas sobre ingredientes indisponíveis
+                # CORREÇÃO: Query melhorada - busca apenas ingredientes obrigatórios (portions > 0)
+                # Ingredientes extras (portions = 0) não afetam a disponibilidade do produto
                 availability_query = f"""
                     SELECT 
                         pi.PRODUCT_ID,
-                        MIN(CASE WHEN i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock' THEN 0 ELSE 1 END) as all_available,
-                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock,
+                        MIN(CASE 
+                            WHEN i.IS_AVAILABLE = FALSE 
+                                 OR i.STOCK_STATUS = 'out_of_stock' 
+                                 OR (i.CURRENT_STOCK IS NOT NULL AND i.CURRENT_STOCK = 0)
+                            THEN 0 
+                            ELSE 1 
+                        END) as all_available,
+                        MIN(CASE WHEN i.STOCK_STATUS = 'low' OR (i.CURRENT_STOCK IS NOT NULL AND i.MIN_STOCK_THRESHOLD IS NOT NULL AND i.CURRENT_STOCK <= i.MIN_STOCK_THRESHOLD) THEN 1 ELSE 0 END) as has_low_stock,
                         COUNT(pi.INGREDIENT_ID) as ingredient_count
                     FROM PRODUCT_INGREDIENTS pi
                     JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
                     WHERE pi.PRODUCT_ID IN ({placeholders})
+                      AND pi.PORTIONS > 0
                     GROUP BY pi.PRODUCT_ID
                 """
                 cur.execute(availability_query, tuple(product_ids))
@@ -1149,19 +1298,36 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                     ingredient_count = row[3]
                     products_with_ingredients.add(product_id)
                     
-                    # Log para debug quando produto está indisponível
-                    if all_av == 0:
-                        # Busca quais ingredientes estão indisponíveis para log
+                    # CORREÇÃO: Tratar NULL como disponível
+                    if all_av is None:
+                        availability_map[product_id] = "available"
+                    elif all_av == 0:
+                        # Log para debug quando produto está indisponível
+                        # CORREÇÃO: Busca apenas ingredientes obrigatórios indisponíveis para log
                         cur.execute("""
-                            SELECT i.ID, i.NAME, i.IS_AVAILABLE, i.STOCK_STATUS
+                            SELECT i.ID, i.NAME, i.IS_AVAILABLE, i.STOCK_STATUS, i.CURRENT_STOCK, pi.PORTIONS
                             FROM PRODUCT_INGREDIENTS pi
                             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
-                            WHERE pi.PRODUCT_ID = ? AND (i.IS_AVAILABLE = FALSE OR i.STOCK_STATUS = 'out_of_stock')
+                            WHERE pi.PRODUCT_ID = ? 
+                              AND pi.PORTIONS > 0
+                              AND (i.IS_AVAILABLE = FALSE 
+                                   OR i.STOCK_STATUS = 'out_of_stock' 
+                                   OR (i.CURRENT_STOCK IS NOT NULL AND i.CURRENT_STOCK = 0))
                         """, (product_id,))
                         unavailable_ingredients = cur.fetchall()
-                        logger.warning(f"[get_products_by_category_id] Produto {product_id} marcado como unavailable. Ingredientes indisponíveis: {[f'{ing[1]} (ID:{ing[0]}, IS_AVAILABLE:{ing[2]}, STOCK_STATUS:{ing[3]})' for ing in unavailable_ingredients]}")
-                    
-                    if all_av == 0:
+                        if unavailable_ingredients:
+                            logger.warning(f"[get_products_by_category_id] Produto {product_id} marcado como unavailable. Ingredientes obrigatórios indisponíveis: {[f'{ing[1]} (ID:{ing[0]}, IS_AVAILABLE:{ing[2]}, STOCK_STATUS:{ing[3]}, CURRENT_STOCK:{ing[4]}, PORTIONS:{ing[5]})' for ing in unavailable_ingredients]}")
+                        else:
+                            # Se não encontrou ingredientes indisponíveis mas all_av = 0, pode ser problema na query
+                            logger.warning(f"[get_products_by_category_id] Produto {product_id} marcado como unavailable mas nenhum ingrediente obrigatório indisponível encontrado. Verificando todos os ingredientes obrigatórios...")
+                            cur.execute("""
+                                SELECT i.ID, i.NAME, i.IS_AVAILABLE, i.STOCK_STATUS, i.CURRENT_STOCK, pi.PORTIONS
+                                FROM PRODUCT_INGREDIENTS pi
+                                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                                WHERE pi.PRODUCT_ID = ? AND pi.PORTIONS > 0
+                            """, (product_id,))
+                            all_required = cur.fetchall()
+                            logger.warning(f"[get_products_by_category_id] Todos os ingredientes obrigatórios do produto {product_id}: {[f'{ing[1]} (ID:{ing[0]}, IS_AVAILABLE:{ing[2]}, STOCK_STATUS:{ing[3]}, CURRENT_STOCK:{ing[4]}, PORTIONS:{ing[5]})' for ing in all_required]}")
                         availability_map[product_id] = "unavailable"
                     elif has_low == 1:
                         availability_map[product_id] = "low_stock"
@@ -1206,6 +1372,17 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
         # Processa os produtos com os dados já carregados
         for row in product_rows:
             product_id = row[0]
+            
+            # CORREÇÃO: Filtrar produtos indisponíveis apenas no GET (não desativa no banco)
+            # Verifica availability_status antes de adicionar à lista
+            # Aplica filtro apenas se filter_unavailable=True (usuários normais)
+            availability_status = availability_map.get(product_id, "unknown")
+            if filter_unavailable and availability_status == "unavailable":
+                # Produto indisponível - não incluir na listagem para usuários normais
+                # Mas não desativa no banco (IS_ACTIVE permanece TRUE)
+                # Administradores ainda veem todos os produtos
+                continue
+            
             item = {  
                 "id": product_id,  
                 "name": row[1],  
@@ -1229,14 +1406,24 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                     item["image_hash"] = None
             
             # Adiciona status de disponibilidade (já carregado em batch)
-            item["availability_status"] = availability_map.get(product_id, "unknown")
+            item["availability_status"] = availability_status
             
             # Adiciona ingredientes (já carregados em batch)
             item["ingredients"] = ingredients_map.get(product_id, [])
             
             items.append(item)  
-            
-        total_pages = (total + page_size - 1) // page_size  
+        
+        # CORREÇÃO: Ajustar total após filtrar produtos indisponíveis
+        # Se filter_unavailable=True, ajusta o total para refletir apenas produtos disponíveis
+        # Se filter_unavailable=False (admin), usa o total original
+        if filter_unavailable:
+            filtered_total = len(items)
+            total_pages = (filtered_total + page_size - 1) // page_size if filtered_total > 0 else 0
+            pagination_total = filtered_total
+        else:
+            # Admin vê todos os produtos, usa total original
+            total_pages = (total + page_size - 1) // page_size
+            pagination_total = total
         
         result = {  
             "category": {
@@ -1245,7 +1432,7 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
             },
             "items": items,  
             "pagination": {  
-                "total": total,  
+                "total": pagination_total,
                 "page": page,  
                 "page_size": page_size,  
                 "total_pages": total_pages  

@@ -2,9 +2,9 @@ from flask import Blueprint, request, jsonify, send_from_directory, send_file, R
 import os
 from ..services import product_service  
 from ..services.auth_service import require_role
-from ..utils.image_handler import save_product_image, delete_product_image, update_product_image  
+from ..utils.image_handler import save_product_image, delete_product_image, update_product_image
 
-product_bp = Blueprint('products', __name__)  
+product_bp = Blueprint('products', __name__)
 
 @product_bp.route('/', methods=['GET'])  
 def list_products_route():  
@@ -17,8 +17,18 @@ def list_products_route():
     # Então precisamos verificar explicitamente
     include_inactive_param = request.args.get('include_inactive', '').lower()
     include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
-    result = product_service.list_products(name_filter=name, category_id=category_id, page=page, page_size=page_size, include_inactive=include_inactive)  
-    return jsonify(result), 200  
+    
+    # CORREÇÃO: Painel admin mostra todos os produtos (incluindo indisponíveis)
+    # Rotas /api/products/* são usadas pelo painel administrativo
+    result = product_service.list_products(
+        name_filter=name, 
+        category_id=category_id, 
+        page=page, 
+        page_size=page_size, 
+        include_inactive=include_inactive,
+        filter_unavailable=False  # Painel admin vê todos os produtos
+    )  
+    return jsonify(result), 200
 
 @product_bp.route('/<int:product_id>', methods=['GET'])  
 def get_product_by_id_route(product_id):  
@@ -395,11 +405,14 @@ def get_products_by_category_route(category_id):
     include_inactive_param = request.args.get('include_inactive', '').lower()
     include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
     
+    # CORREÇÃO: Painel admin mostra todos os produtos (incluindo indisponíveis)
+    # Rotas /api/products/* são usadas pelo painel administrativo
     result, error_code, error_message = product_service.get_products_by_category_id(
         category_id=category_id, 
         page=page, 
         page_size=page_size, 
-        include_inactive=include_inactive
+        include_inactive=include_inactive,
+        filter_unavailable=False  # Painel admin vê todos os produtos
     )
     
     if result:
