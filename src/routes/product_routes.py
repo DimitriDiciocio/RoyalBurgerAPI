@@ -268,57 +268,142 @@ def get_product_ingredients_route(product_id):
 @product_bp.route('/<int:product_id>/ingredients', methods=['POST'])  
 @require_role('admin', 'manager')  
 def add_ingredient_to_product_route(product_id):  
+    # ALTERAÇÃO: Validação de product_id da rota
+    if not isinstance(product_id, int) or product_id <= 0:
+        return jsonify({"error": "ID do produto inválido"}), 400
+    
     try:
         data = request.get_json()
         if data is None:
             return jsonify({"error": "JSON inválido ou vazio"}), 400
     except Exception as e:
+        # ALTERAÇÃO: Logging de erro sem expor detalhes ao cliente
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao processar JSON na rota add_ingredient_to_product: {e}", exc_info=True)
         return jsonify({"error": "Erro ao processar JSON"}), 400
+    
     ingredient_id = data.get('ingredient_id')  
     portions = data.get('portions')  
-    if not ingredient_id or portions is None:  
-        return jsonify({"error": "'ingredient_id' e 'portions' são obrigatórios"}), 400  
-    if portions <= 0:
-        return jsonify({"error": "Número de porções deve ser maior que zero"}), 400
+    
+    # ALTERAÇÃO: Validação mais robusta de campos obrigatórios
+    if not ingredient_id:
+        return jsonify({"error": "Campo 'ingredient_id' é obrigatório"}), 400
+    if portions is None:
+        return jsonify({"error": "Campo 'portions' é obrigatório"}), 400
+    
+    # ALTERAÇÃO: Validação de tipo de ingredient_id
+    try:
+        ingredient_id = int(ingredient_id)
+        if ingredient_id <= 0:
+            return jsonify({"error": "ID do ingrediente deve ser um número positivo"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "ID do ingrediente deve ser um número válido"}), 400
+    
+    # ALTERAÇÃO: Validação de tipo de portions
+    try:
+        portions = float(portions)
+        if portions <= 0:
+            return jsonify({"error": "Número de porções deve ser maior que zero"}), 400
+        if portions > 999999.99:
+            return jsonify({"error": "Número de porções muito grande (máximo: 999999.99)"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "Campo 'portions' deve ser um número válido"}), 400
+    
     from ..services import ingredient_service
-    if ingredient_service.add_ingredient_to_product(product_id, ingredient_id, portions):  
-        return jsonify({"msg": "Ingrediente associado/atualizado com sucesso"}), 201  
-    return jsonify({"error": "Falha ao associar ingrediente"}), 500  
+    try:
+        if ingredient_service.add_ingredient_to_product(product_id, ingredient_id, portions):  
+            return jsonify({"msg": "Ingrediente associado/atualizado com sucesso"}), 201  
+        # ALTERAÇÃO: Mensagem de erro mais específica
+        return jsonify({"error": "Falha ao associar ingrediente. Verifique se o produto e ingrediente existem."}), 500
+    except Exception as e:
+        # ALTERAÇÃO: Tratamento de exceções não esperadas
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro inesperado ao associar ingrediente: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao associar ingrediente"}), 500  
 
 @product_bp.route('/<int:product_id>/ingredients/<int:ingredient_id>', methods=['DELETE'])  
 @require_role('admin', 'manager')  
 def remove_ingredient_from_product_route(product_id, ingredient_id):  
+    # ALTERAÇÃO: Validação de IDs da rota
+    if not isinstance(product_id, int) or product_id <= 0:
+        return jsonify({"error": "ID do produto inválido"}), 400
+    if not isinstance(ingredient_id, int) or ingredient_id <= 0:
+        return jsonify({"error": "ID do ingrediente inválido"}), 400
+    
     from ..services import ingredient_service
-    if ingredient_service.remove_ingredient_from_product(product_id, ingredient_id):  
-        return jsonify({"msg": "Ingrediente desassociado com sucesso"}), 200  
-    return jsonify({"error": "Falha ao desassociar ingrediente ou associação não encontrada"}), 404  
+    try:
+        if ingredient_service.remove_ingredient_from_product(product_id, ingredient_id):  
+            return jsonify({"msg": "Ingrediente desassociado com sucesso"}), 200  
+        # ALTERAÇÃO: Mensagem mais específica
+        return jsonify({"error": "Vínculo produto-ingrediente não encontrado"}), 404
+    except Exception as e:
+        # ALTERAÇÃO: Tratamento de exceções não esperadas
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro inesperado ao remover ingrediente: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao remover ingrediente"}), 500  
 
 
 @product_bp.route('/<int:product_id>/ingredients/<int:ingredient_id>', methods=['PUT'])
 @require_role('admin', 'manager')
 def update_product_ingredient_route(product_id, ingredient_id):
+    # ALTERAÇÃO: Validação de IDs da rota
+    if not isinstance(product_id, int) or product_id <= 0:
+        return jsonify({"error": "ID do produto inválido"}), 400
+    if not isinstance(ingredient_id, int) or ingredient_id <= 0:
+        return jsonify({"error": "ID do ingrediente inválido"}), 400
+    
     try:
         data = request.get_json()
         if data is None:
             return jsonify({"error": "JSON inválido ou vazio"}), 400
     except Exception as e:
+        # ALTERAÇÃO: Logging de erro sem expor detalhes ao cliente
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao processar JSON na rota update_product_ingredient: {e}", exc_info=True)
         return jsonify({"error": "Erro ao processar JSON"}), 400
+    
     portions = data.get('portions')
     if portions is None:
         return jsonify({"error": "Campo 'portions' é obrigatório"}), 400
-    if portions <= 0:
-        return jsonify({"error": "Número de porções deve ser maior que zero"}), 400
+    
+    # ALTERAÇÃO: Validação de tipo de portions antes de passar para o serviço
+    try:
+        portions_float = float(portions)
+        if portions_float <= 0:
+            return jsonify({"error": "Número de porções deve ser maior que zero"}), 400
+        if portions_float > 999999.99:
+            return jsonify({"error": "Número de porções muito grande (máximo: 999999.99)"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "Campo 'portions' deve ser um número válido"}), 400
+    
     from ..services import ingredient_service
-    success, error_code, message = ingredient_service.update_product_ingredient(product_id, ingredient_id, portions=portions)
-    if success:
-        return jsonify({"msg": message}), 200
-    if error_code == "NO_VALID_FIELDS":
-        return jsonify({"error": message}), 400
-    if error_code == "LINK_NOT_FOUND":
-        return jsonify({"error": message}), 404
-    if error_code == "DATABASE_ERROR":
-        return jsonify({"error": message}), 500
-    return jsonify({"error": "Falha ao atualizar vínculo"}), 500
+    try:
+        success, error_code, message = ingredient_service.update_product_ingredient(product_id, ingredient_id, portions=portions)
+        if success:
+            return jsonify({"msg": message}), 200
+        # ALTERAÇÃO: Tratamento específico de códigos de erro
+        if error_code == "NO_VALID_FIELDS":
+            return jsonify({"error": message}), 400
+        if error_code in ["INVALID_PRODUCT_ID", "INVALID_INGREDIENT_ID"]:
+            return jsonify({"error": message}), 400
+        if error_code == "LINK_NOT_FOUND":
+            return jsonify({"error": message}), 404
+        if error_code == "UPDATE_FAILED":
+            return jsonify({"error": message}), 500
+        if error_code == "DATABASE_ERROR":
+            return jsonify({"error": message}), 500
+        # ALTERAÇÃO: Fallback para códigos de erro não mapeados
+        return jsonify({"error": message or "Falha ao atualizar vínculo"}), 500
+    except Exception as e:
+        # ALTERAÇÃO: Tratamento de exceções não esperadas
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro inesperado ao atualizar ingrediente: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao atualizar vínculo"}), 500
 
 
 @product_bp.route('/search', methods=['GET'])  

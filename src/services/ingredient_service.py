@@ -1,5 +1,6 @@
 import fdb  
 import logging
+from decimal import Decimal
 from ..database import get_db_connection
 
 # ALTERAÇÃO: Configurar logger estruturado para substituir print()
@@ -309,10 +310,51 @@ def delete_ingredient(ingredient_id):
 
 
 def add_ingredient_to_product(product_id, ingredient_id, portions):  
+    # ALTERAÇÃO: Validação de IDs antes de processar
+    if not isinstance(product_id, int) or product_id <= 0:
+        logger.error(f"ID de produto inválido: {product_id} (tipo: {type(product_id).__name__})")
+        return False
+    if not isinstance(ingredient_id, int) or ingredient_id <= 0:
+        logger.error(f"ID de ingrediente inválido: {ingredient_id} (tipo: {type(ingredient_id).__name__})")
+        return False
+    
     conn = None  
-    try:  
+    try:
+        # ALTERAÇÃO: Converter portions para Decimal com validação robusta
+        try:
+            portions_float = float(portions)
+            if portions_float != portions_float:  # NaN check
+                logger.error(f"Valor de portions é NaN: {portions}")
+                return False
+            if portions_float <= 0:
+                logger.error(f"Valor de portions deve ser maior que zero: {portions}")
+                return False
+            # ALTERAÇÃO: Limitar precisão para evitar valores muito grandes
+            if portions_float > 999999.99:
+                logger.error(f"Valor de portions muito grande: {portions}")
+                return False
+            portions_decimal = Decimal(str(portions_float))
+        except (ValueError, TypeError) as e:
+            logger.error(f"Erro ao converter portions para Decimal: {e}, valor recebido: {portions} (tipo: {type(portions).__name__})")
+            return False
+        except Exception as e:
+            # ALTERAÇÃO: Capturar outras exceções não esperadas
+            logger.error(f"Erro inesperado ao processar portions: {e}", exc_info=True)
+            return False
+            
         conn = get_db_connection()  
         cur = conn.cursor()  
+        
+        # ALTERAÇÃO: Verificar se produto e ingrediente existem antes de vincular
+        cur.execute("SELECT 1 FROM PRODUCTS WHERE ID = ?", (product_id,))
+        if not cur.fetchone():
+            logger.warning(f"Tentativa de vincular ingrediente a produto inexistente: product_id={product_id}")
+            return False
+        
+        cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
+        if not cur.fetchone():
+            logger.warning(f"Tentativa de vincular ingrediente inexistente: ingredient_id={ingredient_id}")
+            return False
         
         # Verificar se a vinculação já existe
         cur.execute("SELECT 1 FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?", (product_id, ingredient_id))
@@ -321,63 +363,139 @@ def add_ingredient_to_product(product_id, ingredient_id, portions):
         if existing:
             # Atualizar vinculação existente
             sql = "UPDATE PRODUCT_INGREDIENTS SET PORTIONS = ? WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?"
-            cur.execute(sql, (portions, product_id, ingredient_id))
+            cur.execute(sql, (portions_decimal, product_id, ingredient_id))
         else:
             # Inserir nova vinculação
             sql = "INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS) VALUES (?, ?, ?)"
-            cur.execute(sql, (product_id, ingredient_id, portions))
+            cur.execute(sql, (product_id, ingredient_id, portions_decimal))
         
         conn.commit()  
         return True  
     except fdb.Error as e:  
-        # ALTERAÇÃO: Substituído print() por logging estruturado
-        logger.error(f"Erro ao associar ingrediente ao produto: {e}", exc_info=True)  
-        if conn: conn.rollback()  
+        # ALTERAÇÃO: Logging estruturado sem expor dados sensíveis
+        logger.error(f"Erro ao associar ingrediente ao produto: product_id={product_id}, ingredient_id={ingredient_id}, error={type(e).__name__}", exc_info=True)  
+        if conn: 
+            conn.rollback()  
         return False  
+    except Exception as e:
+        # ALTERAÇÃO: Capturar exceções genéricas não tratadas
+        logger.error(f"Erro inesperado ao associar ingrediente: {e}", exc_info=True)
+        if conn: 
+            conn.rollback()
+        return False
     finally:  
-        if conn: conn.close()  
+        if conn: 
+            conn.close()  
 
 
 def update_product_ingredient(product_id, ingredient_id, portions=None):
+    # ALTERAÇÃO: Validação de IDs antes de processar portions
+    if not isinstance(product_id, int) or product_id <= 0:
+        return (False, "INVALID_PRODUCT_ID", "ID do produto inválido")
+    if not isinstance(ingredient_id, int) or ingredient_id <= 0:
+        return (False, "INVALID_INGREDIENT_ID", "ID do ingrediente inválido")
+    
     if portions is None:
         return (False, "NO_VALID_FIELDS", "Forneça 'portions' para atualizar")
+    
+    # ALTERAÇÃO: Validar que portions é um número válido e converter para Decimal
+    try:
+        # Converter para float primeiro para validar
+        portions_float = float(portions)
+        if portions_float != portions_float:  # NaN check
+            return (False, "NO_VALID_FIELDS", "Campo 'portions' deve ser um número válido")
+        if portions_float <= 0:
+            return (False, "NO_VALID_FIELDS", "Número de porções deve ser maior que zero")
+        # ALTERAÇÃO: Limitar precisão para evitar valores muito grandes
+        if portions_float > 999999.99:
+            return (False, "NO_VALID_FIELDS", "Número de porções muito grande (máximo: 999999.99)")
+        # Converter para Decimal para garantir compatibilidade com Firebird DECIMAL
+        portions_decimal = Decimal(str(portions_float))
+    except (ValueError, TypeError) as e:
+        logger.error(f"Erro ao converter portions para Decimal: {e}")
+        return (False, "NO_VALID_FIELDS", "Campo 'portions' deve ser um número válido")
+    except Exception as e:
+        # ALTERAÇÃO: Capturar outras exceções não esperadas
+        logger.error(f"Erro inesperado ao processar portions: {e}", exc_info=True)
+        return (False, "NO_VALID_FIELDS", "Erro ao processar valor de porções")
+    
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # verificar existência do vínculo
+        # ALTERAÇÃO: Verificar existência do vínculo antes de atualizar
         cur.execute("SELECT 1 FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?", (product_id, ingredient_id))
         if not cur.fetchone():
             return (False, "LINK_NOT_FOUND", "Vínculo produto-insumo não encontrado")
         
         sql = "UPDATE PRODUCT_INGREDIENTS SET PORTIONS = ? WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?;"
-        cur.execute(sql, (portions, product_id, ingredient_id))
+        cur.execute(sql, (portions_decimal, product_id, ingredient_id))
         conn.commit()
-        return (cur.rowcount > 0, None, "Vínculo atualizado com sucesso")
+        
+        # ALTERAÇÃO: Verificar se a atualização foi bem-sucedida
+        if cur.rowcount == 0:
+            logger.warning(f"Atualização de vínculo não afetou nenhuma linha: product_id={product_id}, ingredient_id={ingredient_id}")
+            return (False, "UPDATE_FAILED", "Falha ao atualizar vínculo")
+        
+        return (True, None, "Vínculo atualizado com sucesso")
     except fdb.Error as e:
-        # ALTERAÇÃO: Substituído print() por logging estruturado
-        logger.error(f"Erro ao atualizar vínculo: {e}", exc_info=True)
-        if conn: conn.rollback()
+        # ALTERAÇÃO: Logging estruturado sem expor dados sensíveis
+        logger.error(f"Erro ao atualizar vínculo produto-insumo: product_id={product_id}, ingredient_id={ingredient_id}, error={type(e).__name__}", exc_info=True)
+        if conn: 
+            conn.rollback()
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    except Exception as e:
+        # ALTERAÇÃO: Capturar exceções genéricas não tratadas
+        logger.error(f"Erro inesperado ao atualizar vínculo: {e}", exc_info=True)
+        if conn: 
+            conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
-        if conn: conn.close()
+        if conn: 
+            conn.close()
 
 def remove_ingredient_from_product(product_id, ingredient_id):  
+    # ALTERAÇÃO: Validação de IDs antes de processar
+    if not isinstance(product_id, int) or product_id <= 0:
+        logger.warning(f"Tentativa de remover com ID de produto inválido: {product_id} (tipo: {type(product_id).__name__})")
+        return False
+    if not isinstance(ingredient_id, int) or ingredient_id <= 0:
+        logger.warning(f"Tentativa de remover com ID de ingrediente inválido: {ingredient_id} (tipo: {type(ingredient_id).__name__})")
+        return False
+    
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
+        # ALTERAÇÃO: Verificar se o vínculo existe antes de tentar remover
+        cur.execute("SELECT 1 FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?", (product_id, ingredient_id))
+        if not cur.fetchone():
+            logger.warning(f"Tentativa de remover vínculo inexistente: produto_id={product_id}, ingredient_id={ingredient_id}")
+            return False
         sql = "DELETE FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?;"  
         cur.execute(sql, (product_id, ingredient_id))  
         conn.commit()  
-        return cur.rowcount > 0  
+        
+        # ALTERAÇÃO: Verificar se a remoção foi bem-sucedida
+        deleted = cur.rowcount > 0
+        if not deleted:
+            logger.warning(f"Nenhuma linha afetada ao remover vínculo: produto_id={product_id}, ingredient_id={ingredient_id}")
+        return deleted
     except fdb.Error as e:  
-        # ALTERAÇÃO: Substituído print() por logging estruturado
-        logger.error(f"Erro ao remover associação de ingrediente: {e}", exc_info=True)  
-        if conn: conn.rollback()  
+        # ALTERAÇÃO: Logging estruturado sem expor dados sensíveis
+        logger.error(f"Erro ao remover associação de ingrediente: product_id={product_id}, ingredient_id={ingredient_id}, error={type(e).__name__}", exc_info=True)  
+        if conn: 
+            conn.rollback()  
         return False  
+    except Exception as e:
+        # ALTERAÇÃO: Capturar exceções genéricas não tratadas
+        logger.error(f"Erro inesperado ao remover associação: {e}", exc_info=True)
+        if conn: 
+            conn.rollback()
+        return False
     finally:  
-        if conn: conn.close()  
+        if conn: 
+            conn.close()  
 
 def get_ingredients_for_product(product_id):  
     conn = None  
