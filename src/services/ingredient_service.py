@@ -502,10 +502,10 @@ def get_ingredients_for_product(product_id):
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        # AJUSTE: Incluir CURRENT_STOCK na query para validação de estoque
+        # AJUSTE: Incluir CURRENT_STOCK e ADDITIONAL_PRICE na query para validação de estoque e preço adicional
         sql = """
             SELECT i.ID, i.NAME, pi.PORTIONS, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT, 
-                   i.PRICE, i.IS_AVAILABLE, i.STOCK_UNIT, i.CURRENT_STOCK,
+                   i.PRICE, i.ADDITIONAL_PRICE, i.IS_AVAILABLE, i.STOCK_UNIT, i.CURRENT_STOCK,
                    pi.MIN_QUANTITY, pi.MAX_QUANTITY
             FROM PRODUCT_INGREDIENTS pi
             JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
@@ -524,11 +524,12 @@ def get_ingredients_for_product(product_id):
             base_portion_quantity = float(row[3]) if row[3] is not None else 1.0
             base_portion_unit = row[4] if row[4] else "un"
             price = float(row[5]) if row[5] is not None else 0.0
-            is_available = row[6]
-            stock_unit = row[7] if row[7] else "un"
-            current_stock = float(row[8]) if row[8] is not None else 0.0
-            min_quantity = int(row[9]) if row[9] is not None else 0
-            max_quantity = int(row[10]) if row[10] is not None else 0
+            additional_price = float(row[6]) if row[6] is not None else 0.0
+            is_available = row[7]
+            stock_unit = row[8] if row[8] else "un"
+            current_stock = float(row[9]) if row[9] is not None else 0.0
+            min_quantity = int(row[10]) if row[10] is not None else 0
+            max_quantity = int(row[11]) if row[11] is not None else 0
             
             # Calcular quantidade real consumida baseada na porção
             actual_quantity = portions * base_portion_quantity
@@ -579,6 +580,7 @@ def get_ingredients_for_product(product_id):
                 "actual_unit": base_portion_unit,
                 "stock_unit": stock_unit,
                 "price": price,
+                "additional_price": additional_price,  # Preço adicional do ingrediente (para extras)
                 "portion_cost": round(portion_cost, 2),
                 "is_available": is_available,
                 "line_cost": round(line_cost, 2),

@@ -946,7 +946,7 @@ def get_order_details(order_id, user_id, user_role):
 
         # CORREÇÃO: Evitar query N+1 - buscar todos os extras de uma vez
         # Primeiro busca todos os itens
-        # Inclui PRODUCT_ID e imagem do produto para evitar roundtrips no frontend
+        # Inclui PRODUCT_ID, imagem e tempo de preparo do produto para evitar roundtrips no frontend
         sql_items = """
             SELECT
                 oi.ID,
@@ -956,7 +956,8 @@ def get_order_details(order_id, user_id, user_role):
                 p.DESCRIPTION,
                 oi.PRODUCT_ID,
                 p.IMAGE_URL,
-                NULL AS IMAGE_HASH -- REVISAR: adicionar coluna real se existir
+                NULL AS IMAGE_HASH, -- REVISAR: adicionar coluna real se existir
+                p.PREPARATION_TIME_MINUTES
             FROM ORDER_ITEMS oi
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
             WHERE oi.ORDER_ID = ?;
@@ -968,35 +969,64 @@ def get_order_details(order_id, user_id, user_role):
             order_details['items'] = []
             return order_details
         
+        # ALTERAÇÃO: Validação de lista vazia para prevenir SQL inválido
         # Busca todos os extras de uma vez (evita N+1)
         order_item_ids = [row[0] for row in item_rows]
-        placeholders = ', '.join(['?' for _ in order_item_ids])
-        sql_extras = f"""
-            SELECT e.ORDER_ITEM_ID, e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
-            FROM ORDER_ITEM_EXTRAS e
-            JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
-            WHERE e.ORDER_ITEM_ID IN ({placeholders})
-            ORDER BY e.ORDER_ITEM_ID, e.TYPE, i.NAME
-        """
-        cur.execute(sql_extras, tuple(order_item_ids))
+        
+        # ALTERAÇÃO: Validação de tipos para prevenir SQL injection (já estava seguro, mas melhorado)
+        # Validar que todos os IDs são números inteiros antes de executar query
+        validated_ids = []
+        for item_id in order_item_ids:
+            try:
+                validated_id = int(item_id)
+                if validated_id > 0:
+                    validated_ids.append(validated_id)
+            except (ValueError, TypeError):
+                # Ignorar IDs inválidos (não devem acontecer, mas prevenir é melhor)
+                continue
+        
+        # ALTERAÇÃO: Inicializar extras_dict vazio e só popular se houver IDs válidos
+        # Se não há IDs válidos, os itens ainda serão processados abaixo, mas sem extras
         extras_dict = {}
-        for ex in cur.fetchall():
-            order_item_id = ex[0]
-            if order_item_id not in extras_dict:
-                extras_dict[order_item_id] = {'extras': [], 'base_modifications': []}
-            row_type = (ex[4] or 'extra').lower()
-            if row_type == 'extra':
-                extras_dict[order_item_id]['extras'].append({
-                    "ingredient_id": ex[1],
-                    "name": ex[2],
-                    "quantity": ex[3]
-                })
-            elif row_type == 'base':
-                extras_dict[order_item_id]['base_modifications'].append({
-                    "ingredient_id": ex[1],
-                    "name": ex[2],
-                    "delta": int(ex[5])
-                })
+        
+        # ALTERAÇÃO: Só executar query se houver IDs válidos
+        if validated_ids:
+            placeholders = ', '.join(['?' for _ in validated_ids])
+            sql_extras = f"""
+                SELECT e.ORDER_ITEM_ID, e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
+                FROM ORDER_ITEM_EXTRAS e
+                JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
+                WHERE e.ORDER_ITEM_ID IN ({placeholders})
+                ORDER BY e.ORDER_ITEM_ID, e.TYPE, i.NAME
+            """
+            cur.execute(sql_extras, tuple(validated_ids))
+            # Processar resultados dos extras
+            for ex in cur.fetchall():
+                order_item_id = ex[0]
+                if order_item_id not in extras_dict:
+                    extras_dict[order_item_id] = {'extras': [], 'base_modifications': []}
+                row_type = (ex[4] or 'extra').lower()
+                if row_type == 'extra':
+                    extras_dict[order_item_id]['extras'].append({
+                        "ingredient_id": ex[1],
+                        "name": ex[2],
+                        "quantity": ex[3]
+                    })
+                elif row_type == 'base':
+                    # ALTERAÇÃO: Validação de delta para prevenir erros
+                    try:
+                        delta_value = int(ex[5]) if ex[5] is not None else 0
+                        # Validar que delta é um número válido
+                        if not isinstance(delta_value, int):
+                            delta_value = 0
+                    except (ValueError, TypeError):
+                        delta_value = 0
+                    
+                    extras_dict[order_item_id]['base_modifications'].append({
+                        "ingredient_id": ex[1],
+                        "name": ex[2],
+                        "delta": delta_value
+                    })
 
         # Monta lista de itens com seus extras
         order_items = []
@@ -1010,6 +1040,14 @@ def get_order_details(order_id, user_id, user_role):
                 "product_id": item_row[5],                 # adicionado
                 "product_image_url": item_row[6],          # adicionado
                 "product_image_hash": item_row[7],         # adicionado (pode ser None)
+                "product": {
+                    "id": item_row[5],
+                    "name": item_row[3],
+                    "description": item_row[4],
+                    "image_url": item_row[6],
+                    "image_hash": item_row[7],
+                    "preparation_time_minutes": int(item_row[8]) if item_row[8] else 0  # Tempo de preparo do produto
+                },
                 "extras": extras_dict.get(order_item_id, {}).get('extras', []),
                 "base_modifications": extras_dict.get(order_item_id, {}).get('base_modifications', [])
             }

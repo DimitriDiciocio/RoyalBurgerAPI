@@ -98,7 +98,8 @@ def get_cart_items(cart_id):
                 p.NAME as PRODUCT_NAME,
                 p.PRICE as PRODUCT_PRICE,
                 p.DESCRIPTION as PRODUCT_DESCRIPTION,
-                p.IMAGE_URL as PRODUCT_IMAGE_URL
+                p.IMAGE_URL as PRODUCT_IMAGE_URL,
+                p.PREPARATION_TIME_MINUTES as PRODUCT_PREPARATION_TIME
             FROM CART_ITEMS ci
             JOIN PRODUCTS p ON ci.PRODUCT_ID = p.ID
             WHERE ci.CART_ID = ?
@@ -149,6 +150,7 @@ def get_cart_items(cart_id):
             product_price = float(row[5]) if row[5] else 0.0
             product_description = row[6]
             product_image_url = row[7]
+            product_preparation_time = int(row[8]) if row[8] else 0
             
             # Processar extras do item (já buscados em batch)
             extras = []
@@ -200,7 +202,8 @@ def get_cart_items(cart_id):
                     "name": product_name,
                     "price": product_price,
                     "description": product_description,
-                    "image_url": product_image_url
+                    "image_url": product_image_url,
+                    "preparation_time_minutes": product_preparation_time
                 },
                 "extras": extras,
                 "base_modifications": base_modifications,
