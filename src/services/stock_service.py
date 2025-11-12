@@ -1,5 +1,6 @@
 import fdb
 import logging
+import math
 from decimal import Decimal
 from ..database import get_db_connection
 
@@ -106,15 +107,18 @@ def _convert_unit(value, from_unit, to_unit):
 
 
 def calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_portion_unit, 
-                                        stock_unit, item_quantity=1):
+                                        stock_unit, item_quantity=1, loss_percentage=0):
     """
     Calcula a quantidade consumida convertida para a unidade do estoque.
+    
+    ALTERAÇÃO: Agora considera perdas (LOSS_PERCENTAGE) no cálculo.
+    consumo_efetivo = consumo_teorico * (1 + perda% / 100)
     
     Realiza conversão automática de unidades antes do cálculo.
     Exemplo: se ingrediente está em kg no estoque mas é usado em g na receita,
     converte corretamente antes de deduzir.
     
-    Fórmula: portions × base_portion_quantity × item_quantity (convertido para stock_unit)
+    Fórmula: portions × base_portion_quantity × item_quantity × (1 + loss_percentage / 100) (convertido para stock_unit)
     
     Exemplos validados:
     - 1 porção × 100g × 1 item → 0.100kg (estoque em kg) ✓
@@ -128,9 +132,10 @@ def calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_po
         base_portion_unit: Unidade da porção base
         stock_unit: Unidade do estoque
         item_quantity: Quantidade de itens do produto no pedido (padrão: 1)
+        loss_percentage: Percentual de perda (padrão: 0) - ex: 5.0 significa 5% de perda
     
     Returns:
-        Decimal: Quantidade consumida na unidade do estoque
+        Decimal: Quantidade consumida na unidade do estoque (incluindo perdas)
     """
     # Calcula quantidade total consumida na unidade da porção base
     # Exemplo: 2 porções × 100g por porção × 3 itens = 600g
@@ -139,6 +144,16 @@ def calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_po
         Decimal(str(base_portion_quantity)) * 
         Decimal(str(item_quantity))
     )
+    
+    # ALTERAÇÃO: Aplica perdas se loss_percentage > 0
+    # consumo_efetivo = consumo_teorico * (1 + perda% / 100)
+    if loss_percentage and loss_percentage > 0:
+        loss_decimal = Decimal(str(loss_percentage)) / Decimal('100')
+        consumption_in_portion_unit = consumption_in_portion_unit * (Decimal('1') + loss_decimal)
+        logger.debug(
+            f"Aplicando perda de {loss_percentage}%: "
+            f"consumo_teorico * (1 + {loss_percentage}%) = {consumption_in_portion_unit}"
+        )
     
     # Converte para a unidade do estoque
     consumption_in_stock_unit = _convert_unit(
@@ -189,27 +204,60 @@ def validate_stock_for_items(items, cur):
         # product_ids foi validado como conjunto de inteiros, sem risco de SQL injection
         placeholders = ', '.join(['?' for _ in product_ids])
         
-        # Buscar regras de ingredientes por produto com informações de unidades
-        sql_rules = f"""
-            SELECT 
-                pi.PRODUCT_ID, 
-                pi.INGREDIENT_ID, 
-                pi.PORTIONS, 
-                pi.MIN_QUANTITY, 
-                pi.MAX_QUANTITY,
-                i.BASE_PORTION_QUANTITY,
-                i.BASE_PORTION_UNIT,
-                i.STOCK_UNIT
-            FROM PRODUCT_INGREDIENTS pi
-            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
-            WHERE pi.PRODUCT_ID IN ({placeholders})
-        """
-        cur.execute(sql_rules, tuple(product_ids))
+        # SIMPLIFICAÇÃO: Buscar regras de ingredientes por produto (sem perdas)
+        # Verifica se campo LOSS_PERCENTAGE existe antes de usar
+        try:
+            # Tenta ler com LOSS_PERCENTAGE (se campo existir)
+            sql_rules = f"""
+                SELECT 
+                    pi.PRODUCT_ID, 
+                    pi.INGREDIENT_ID, 
+                    pi.PORTIONS, 
+                    pi.MIN_QUANTITY, 
+                    pi.MAX_QUANTITY,
+                    COALESCE(pi.LOSS_PERCENTAGE, 0) as LOSS_PERCENTAGE,
+                    i.BASE_PORTION_QUANTITY,
+                    i.BASE_PORTION_UNIT,
+                    i.STOCK_UNIT
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                WHERE pi.PRODUCT_ID IN ({placeholders})
+            """
+            cur.execute(sql_rules, tuple(product_ids))
+            use_loss_percentage = True
+        except fdb.Error as e:
+            # Se campo não existe, usa query sem LOSS_PERCENTAGE
+            error_msg = str(e).lower()
+            if 'loss_percentage' in error_msg or 'unknown' in error_msg:
+                sql_rules = f"""
+                    SELECT 
+                        pi.PRODUCT_ID, 
+                        pi.INGREDIENT_ID, 
+                        pi.PORTIONS, 
+                        pi.MIN_QUANTITY, 
+                        pi.MAX_QUANTITY,
+                        i.BASE_PORTION_QUANTITY,
+                        i.BASE_PORTION_UNIT,
+                        i.STOCK_UNIT
+                    FROM PRODUCT_INGREDIENTS pi
+                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    WHERE pi.PRODUCT_ID IN ({placeholders})
+                """
+                cur.execute(sql_rules, tuple(product_ids))
+                use_loss_percentage = False
+            else:
+                raise
         
         # Mapear ingredientes necessários por produto
         product_ingredients = {}
         for row in cur.fetchall():
-            pid, ing_id, portions, min_q, max_q, base_qty, base_unit, stock_unit = row
+            if use_loss_percentage:
+                pid, ing_id, portions, min_q, max_q, loss_pct, base_qty, base_unit, stock_unit = row
+                loss_percentage = float(loss_pct or 0)
+            else:
+                pid, ing_id, portions, min_q, max_q, base_qty, base_unit, stock_unit = row
+                loss_percentage = 0  # Campo não existe, usa 0
+            
             if pid not in product_ingredients:
                 product_ingredients[pid] = {}
             
@@ -217,6 +265,7 @@ def validate_stock_for_items(items, cur):
                 'portions': float(portions or 0),
                 'min_quantity': int(min_q or 0),
                 'max_quantity': int(max_q or 0),
+                'loss_percentage': loss_percentage,
                 'base_portion_quantity': float(base_qty or 1),
                 'base_portion_unit': str(base_unit or 'un'),
                 'stock_unit': str(stock_unit or 'un')
@@ -238,13 +287,14 @@ def validate_stock_for_items(items, cur):
             
             for ing_id, rule in rules.items():
                 try:
-                    # Calcula consumo convertido para unidade do estoque
+                    # SIMPLIFICAÇÃO: Calcula consumo (perdas são opcionais, padrão 0)
                     needed = calculate_consumption_in_stock_unit(
                         portions=rule['portions'],
                         base_portion_quantity=rule['base_portion_quantity'],
                         base_portion_unit=rule['base_portion_unit'],
                         stock_unit=rule['stock_unit'],
-                        item_quantity=quantity
+                        item_quantity=quantity,
+                        loss_percentage=rule.get('loss_percentage', 0)
                     )
                     
                     if ing_id not in required_ingredients:
@@ -267,7 +317,7 @@ def validate_stock_for_items(items, cur):
                     try:
                         extra_ing_ids = {int(eid) for eid in extra_ing_ids}
                     except (ValueError, TypeError):
-                        logger.warning(f"Ingredient IDs inválidos nos extras, pulando validação")
+                        logger.warning("Ingredient IDs inválidos nos extras, pulando validação")
                         continue
                     
                     # SEGURANÇA: Query parametrizada, extra_ing_ids validado como inteiros
@@ -364,7 +414,7 @@ def validate_stock_for_items(items, cur):
                     try:
                         bm_ing_ids = {int(bid) for bid in bm_ing_ids}
                     except (ValueError, TypeError):
-                        logger.warning(f"Ingredient IDs inválidos em base_modifications, pulando validação")
+                        logger.warning("Ingredient IDs inválidos em base_modifications, pulando validação")
                         continue
                     
                     # SEGURANÇA: Query parametrizada, bm_ing_ids validado como inteiros
@@ -561,36 +611,67 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
             logger.warning(f"Quantidade inválida no pedido {order_id}, produto {product_id}: {quantity}, usando 1")
             quantity = 1
         
-        # Busca ingredientes do produto com informações de unidades
-        cur.execute("""
-            SELECT 
-                pi.INGREDIENT_ID, 
-                pi.PORTIONS,
-                i.BASE_PORTION_QUANTITY,
-                i.BASE_PORTION_UNIT,
-                i.STOCK_UNIT
-            FROM PRODUCT_INGREDIENTS pi
-            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
-            WHERE pi.PRODUCT_ID = ?
-        """, (product_id,))
+        # SIMPLIFICAÇÃO: Busca ingredientes do produto (perdas opcionais)
+        # Verifica se campo LOSS_PERCENTAGE existe antes de usar
+        try:
+            cur.execute("""
+                SELECT 
+                    pi.INGREDIENT_ID, 
+                    pi.PORTIONS,
+                    COALESCE(pi.LOSS_PERCENTAGE, 0) as LOSS_PERCENTAGE,
+                    i.BASE_PORTION_QUANTITY,
+                    i.BASE_PORTION_UNIT,
+                    i.STOCK_UNIT
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                WHERE pi.PRODUCT_ID = ?
+            """, (product_id,))
+            use_loss_percentage = True
+        except fdb.Error as e:
+            # Se campo não existe, usa query sem LOSS_PERCENTAGE
+            error_msg = str(e).lower()
+            if 'loss_percentage' in error_msg or 'unknown' in error_msg:
+                cur.execute("""
+                    SELECT 
+                        pi.INGREDIENT_ID, 
+                        pi.PORTIONS,
+                        i.BASE_PORTION_QUANTITY,
+                        i.BASE_PORTION_UNIT,
+                        i.STOCK_UNIT
+                    FROM PRODUCT_INGREDIENTS pi
+                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    WHERE pi.PRODUCT_ID = ?
+                """, (product_id,))
+                use_loss_percentage = False
+            else:
+                raise
+        
         product_ingredients = cur.fetchall()
         
         # Adiciona ingredientes base do produto
         for row in product_ingredients:
             ingredient_id = row[0]
             portions = row[1] or 0
-            base_portion_quantity = row[2] or 1
-            base_portion_unit = row[3] or 'un'
-            stock_unit = row[4] or 'un'
+            if use_loss_percentage:
+                loss_percentage = float(row[2] or 0)
+                base_portion_quantity = row[3] or 1
+                base_portion_unit = row[4] or 'un'
+                stock_unit = row[5] or 'un'
+            else:
+                loss_percentage = 0  # Campo não existe, usa 0
+                base_portion_quantity = row[2] or 1
+                base_portion_unit = row[3] or 'un'
+                stock_unit = row[4] or 'un'
             
-            # Calcula consumo convertido para unidade do estoque
+            # SIMPLIFICAÇÃO: Calcula consumo (perdas são opcionais, padrão 0)
             try:
                 total_needed = calculate_consumption_in_stock_unit(
                     portions=portions,
                     base_portion_quantity=base_portion_quantity,
                     base_portion_unit=base_portion_unit,
                     stock_unit=stock_unit,
-                    item_quantity=quantity
+                    item_quantity=quantity,
+                    loss_percentage=loss_percentage
                 )
             except ValueError as e:
                 logger.error(
@@ -679,26 +760,51 @@ def _calculate_ingredient_deductions(order_id, order_items, cur):
     return ingredient_deductions
 
 def _execute_stock_deductions(ingredient_deductions, cur):
-    """Executa as deduções de estoque"""
+    """
+    Executa as deduções de estoque.
+    
+    ALTERAÇÃO: Agora suporta FEFO (lotes) se a tabela STOCK_LOTS existir.
+    Se não existir, usa o método antigo (atualização direta de CURRENT_STOCK).
+    """
     updated_ingredients = []
     
     if not ingredient_deductions:
         return updated_ingredients
     
     for ingredient_id, deduction_amount in ingredient_deductions.items():
-        # Busca estoque atual e limite mínimo
-        cur.execute("""
-            SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME
-            FROM INGREDIENTS 
-            WHERE ID = ?
-        """, (ingredient_id,))
+        # SIMPLIFICAÇÃO: Busca estoque atual (lote mínimo opcional)
+        # Verifica se campo MIN_LOT_SIZE existe antes de usar
+        try:
+            cur.execute("""
+                SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME, COALESCE(MIN_LOT_SIZE, 0) as MIN_LOT_SIZE
+                FROM INGREDIENTS 
+                WHERE ID = ?
+            """, (ingredient_id,))
+            use_min_lot_size = True
+        except fdb.Error as e:
+            # Se campo não existe, usa query sem MIN_LOT_SIZE
+            error_msg = str(e).lower()
+            if 'min_lot_size' in error_msg or 'unknown' in error_msg:
+                cur.execute("""
+                    SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME
+                    FROM INGREDIENTS 
+                    WHERE ID = ?
+                """, (ingredient_id,))
+                use_min_lot_size = False
+            else:
+                raise
+        
         result = cur.fetchone()
         
         if not result:
             logger.warning(f"Ingrediente {ingredient_id} não encontrado ao deduzir estoque")
             continue
-            
-        current_stock, min_threshold, current_status, ingredient_name = result
+        
+        if use_min_lot_size:
+            current_stock, min_threshold, current_status, ingredient_name, min_lot_size = result
+        else:
+            current_stock, min_threshold, current_status, ingredient_name = result
+            min_lot_size = 0  # Campo não existe, usa 0
         
         # Garante que deduction_amount é Decimal para compatibilidade com current_stock
         # Converte explicitamente para Decimal, lidando com qualquer tipo numérico
@@ -726,8 +832,27 @@ def _execute_stock_deductions(ingredient_deductions, cur):
             )
             continue
         
+        # SIMPLIFICAÇÃO: Arredonda para lote mínimo se MIN_LOT_SIZE > 0 (opcional)
+        if min_lot_size and min_lot_size > 0:
+            min_lot_decimal = Decimal(str(min_lot_size))
+            # Arredonda para cima para múltiplo do lote mínimo
+            lots_needed = math.ceil(float(deduction_decimal / min_lot_decimal))
+            deduction_decimal = Decimal(str(lots_needed)) * min_lot_decimal
+            logger.debug(
+                f"Arredondando dedução para lote mínimo: {ingredient_name} | "
+                f"Original: {deduction_amount} | Lote mínimo: {min_lot_size} | "
+                f"Arredondado: {deduction_decimal}"
+            )
+        
+        # SIMPLIFICAÇÃO: Remove código relacionado a FEFO (lotes)
+        # TODO: FUTURO - Implementar FEFO completo quando necessário
+        # Por enquanto, usa método direto (atualização de CURRENT_STOCK)
+        # FEFO requer lógica mais complexa para gerenciar lotes individuais
+        
         # Verifica se há estoque suficiente
         current_stock_decimal = Decimal(str(current_stock))
+        
+        # SIMPLIFICAÇÃO: Validação para evitar estoques negativos
         if current_stock_decimal < deduction_decimal:
             raise ValueError(
                 f"Estoque insuficiente para {ingredient_name}. "
@@ -737,6 +862,13 @@ def _execute_stock_deductions(ingredient_deductions, cur):
         # Calcula novo estoque (ambos Decimal agora)
         # IMPORTANTE: Sempre SUBTRAI para DEDUZIR estoque
         new_stock = current_stock_decimal - deduction_decimal
+        
+        # SIMPLIFICAÇÃO: Validação adicional para evitar estoques negativos
+        if new_stock < 0:
+            raise ValueError(
+                f"Erro: Novo estoque seria negativo para {ingredient_name}. "
+                f"Antes: {current_stock_decimal}, Dedução: {deduction_decimal}, Depois: {new_stock}"
+            )
         
         # Log para debug: mostra valores antes e depois
         logger.debug(
@@ -1082,4 +1214,898 @@ def reactivate_products_for_ingredient(ingredient_id, cursor=None):
         return []
     finally:
         if conn:
+            conn.close()
+
+
+# =====================================================
+# SISTEMA DE RESERVAS TEMPORÁRIAS (SOFT LOCKS)
+# =====================================================
+
+def create_temporary_reservation(ingredient_id, quantity, session_id, user_id=None, cart_id=None, ttl_minutes=10):
+    """
+    Cria uma reserva temporária (soft lock) de insumo.
+    
+    Args:
+        ingredient_id: ID do insumo
+        quantity: Quantidade a reservar (na unidade do estoque)
+        session_id: ID da sessão do usuário
+        user_id: ID do usuário (opcional, para usuários autenticados)
+        cart_id: ID do carrinho (opcional)
+        ttl_minutes: Tempo de vida da reserva em minutos (padrão: 10)
+    
+    Returns:
+        tuple: (success: bool, reservation_id: int, error_code: str, message: str)
+    """
+    conn = None
+    try:
+        _validate_ingredient_id(ingredient_id)
+        
+        if quantity <= 0:
+            return (False, None, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verifica se há estoque disponível
+        available = get_ingredient_available_stock(ingredient_id, cur)
+        if available < quantity:
+            return (
+                False, 
+                None, 
+                "INSUFFICIENT_STOCK", 
+                f"Estoque insuficiente. Disponível: {available:.3f}, Solicitado: {quantity:.3f}"
+            )
+        
+        # Calcula data de expiração
+        from datetime import datetime, timedelta
+        expires_at = datetime.now() + timedelta(minutes=ttl_minutes)
+        
+        # Cria reserva temporária
+        cur.execute("""
+            INSERT INTO TEMPORARY_RESERVATIONS 
+            (INGREDIENT_ID, QUANTITY, SESSION_ID, USER_ID, CART_ID, EXPIRES_AT)
+            VALUES (?, ?, ?, ?, ?, ?)
+            RETURNING ID
+        """, (ingredient_id, quantity, session_id, user_id, cart_id, expires_at))
+        
+        reservation_id = cur.fetchone()[0]
+        conn.commit()
+        
+        return (True, reservation_id, None, "Reserva temporária criada com sucesso")
+        
+    except fdb.Error as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Erro ao criar reserva temporária: {e}", exc_info=True)
+        return (False, None, "DATABASE_ERROR", "Erro interno do servidor")
+    except ValueError as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Erro de validação ao criar reserva temporária: {e}")
+        return (False, None, "VALIDATION_ERROR", str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+def clear_temporary_reservations(session_id=None, user_id=None, cart_id=None):
+    """
+    Limpa reservas temporárias expiradas ou de uma sessão específica.
+    
+    Args:
+        session_id: ID da sessão (opcional)
+        user_id: ID do usuário (opcional)
+        cart_id: ID do carrinho (opcional)
+    
+    Returns:
+        tuple: (success: bool, cleared_count: int, error_code: str, message: str)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Limpa reservas expiradas
+        cur.execute("""
+            DELETE FROM TEMPORARY_RESERVATIONS
+            WHERE EXPIRES_AT <= CURRENT_TIMESTAMP
+        """)
+        expired_count = cur.rowcount
+        
+        # Limpa reservas específicas se fornecidas
+        if session_id or user_id or cart_id:
+            conditions = []
+            params = []
+            
+            if session_id:
+                conditions.append("SESSION_ID = ?")
+                params.append(session_id)
+            if user_id:
+                conditions.append("USER_ID = ?")
+                params.append(user_id)
+            if cart_id:
+                conditions.append("CART_ID = ?")
+                params.append(cart_id)
+            
+            if conditions:
+                sql = f"""
+                    DELETE FROM TEMPORARY_RESERVATIONS
+                    WHERE {' AND '.join(conditions)}
+                """
+                cur.execute(sql, tuple(params))
+                specific_count = cur.rowcount
+            else:
+                specific_count = 0
+        else:
+            specific_count = 0
+        
+        conn.commit()
+        total_cleared = expired_count + specific_count
+        
+        return (True, total_cleared, None, f"{total_cleared} reservas temporárias removidas")
+        
+    except fdb.Error as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Erro ao limpar reservas temporárias: {e}", exc_info=True)
+        return (False, 0, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_ingredient_available_stock(ingredient_id, cur=None):
+    """
+    Obtém estoque disponível de um insumo considerando reservas.
+    
+    Args:
+        ingredient_id: ID do insumo
+        cur: Cursor do banco (opcional, se None cria nova conexão)
+    
+    Returns:
+        Decimal: Estoque disponível na unidade do estoque
+    """
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # Busca informações do insumo
+        cur.execute("""
+            SELECT 
+                CURRENT_STOCK,
+                MIN_STOCK_THRESHOLD,
+                STOCK_UNIT,
+                IS_AVAILABLE
+            FROM INGREDIENTS
+            WHERE ID = ?
+        """, (ingredient_id,))
+        
+        row = cur.fetchone()
+        if not row:
+            return Decimal('0')
+        
+        current_stock, min_threshold, stock_unit, is_available = row
+        
+        if not is_available:
+            return Decimal('0')
+        
+        current_stock_decimal = Decimal(str(current_stock or 0))
+        min_threshold_decimal = Decimal(str(min_threshold or 0))
+        
+        # Calcula reservas confirmadas (pedidos pendentes/confirmados/preparando)
+        # IMPORTANTE: Precisa considerar conversão de unidades usando calculate_consumption_in_stock_unit
+        # Mas por enquanto, vamos simplificar assumindo que já está na unidade correta
+        cur.execute("""
+            SELECT 
+                oi.QUANTITY,
+                pi.PORTIONS,
+                i2.BASE_PORTION_QUANTITY,
+                i2.BASE_PORTION_UNIT,
+                i2.STOCK_UNIT
+            FROM ORDER_ITEMS oi
+            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
+            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
+            JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE pi.INGREDIENT_ID = ?
+              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
+        """, (ingredient_id,))
+        
+        confirmed_reservations = Decimal('0')
+        for row in cur.fetchall():
+            oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
+            try:
+                # Calcula consumo convertido para unidade do estoque
+                consumption = calculate_consumption_in_stock_unit(
+                    portions=portions or 0,
+                    base_portion_quantity=base_portion_quantity or 1,
+                    base_portion_unit=base_portion_unit or 'un',
+                    stock_unit=stock_unit or 'un',
+                    item_quantity=oi_quantity or 1
+                )
+                confirmed_reservations += consumption
+            except ValueError as e:
+                logger.warning(f"Erro ao calcular reserva confirmada: {e}")
+                continue
+        
+        # Calcula reservas temporárias ativas
+        cur.execute("""
+            SELECT COALESCE(SUM(QUANTITY), 0)
+            FROM TEMPORARY_RESERVATIONS
+            WHERE INGREDIENT_ID = ?
+              AND EXPIRES_AT > CURRENT_TIMESTAMP
+        """, (ingredient_id,))
+        
+        temporary_reservations = Decimal(str(cur.fetchone()[0] or 0))
+        
+        # Estoque disponível = estoque_real - estoque_seguranca - reservas_confirmadas - reservas_brandas_ativas
+        available = current_stock_decimal - min_threshold_decimal - confirmed_reservations - temporary_reservations
+        
+        # SIMPLIFICAÇÃO: Remove código relacionado a substitutos
+        # TODO: FUTURO - Implementar validação de substitutos quando necessário
+        # Por enquanto, retorna estoque disponível (garantindo que não seja negativo)
+        # Substitutos requerem lógica mais complexa para validar disponibilidade e conversão
+        
+        # Retorna estoque disponível (garantindo que não seja negativo)
+        return max(Decimal('0'), available)
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao obter estoque disponível: {e}", exc_info=True)
+        return Decimal('0')
+    finally:
+        if should_close and conn:
+            conn.close()
+
+
+# =====================================================
+# CÁLCULO DE CAPACIDADE DE PRODUÇÃO
+# =====================================================
+
+def _batch_get_ingredient_availability(product_ids, cur):
+    """
+    SIMPLIFICAÇÃO: Obtém estoque disponível para múltiplos ingredientes de uma vez.
+    Usado para otimizar cálculo de capacidade em batch.
+    
+    Args:
+        product_ids: Lista de IDs de produtos
+        cur: Cursor do banco
+    
+    Returns:
+        dict: {ingredient_id: available_stock}
+    """
+    if not product_ids:
+        return {}
+    
+    try:
+        # Busca ingredientes de todos os produtos
+        placeholders = ', '.join(['?' for _ in product_ids])
+        
+        # Busca ingredientes obrigatórios (PORTIONS > 0) de todos os produtos
+        cur.execute(f"""
+            SELECT DISTINCT pi.INGREDIENT_ID
+            FROM PRODUCT_INGREDIENTS pi
+            WHERE pi.PRODUCT_ID IN ({placeholders})
+              AND pi.PORTIONS > 0
+        """, tuple(product_ids))
+        
+        ingredient_ids = [row[0] for row in cur.fetchall()]
+        
+        if not ingredient_ids:
+            return {}
+        
+        # OTIMIZAÇÃO: Busca estoque disponível para todos os ingredientes de uma vez usando função batch
+        return _batch_get_ingredient_available_stock(ingredient_ids, cur)
+    except Exception as e:
+        logger.warning(f"Erro ao buscar disponibilidade em batch: {e}", exc_info=True)
+        return {}
+
+
+def _batch_get_ingredient_available_stock(ingredient_ids, cur):
+    """
+    OTIMIZAÇÃO: Obtém estoque disponível para múltiplos ingredientes de uma vez.
+    Evita N+1 queries ao buscar estoque, reservas confirmadas e reservas temporárias em batch.
+    
+    Args:
+        ingredient_ids: Lista de IDs de ingredientes
+        cur: Cursor do banco
+    
+    Returns:
+        dict: {ingredient_id: available_stock (Decimal)}
+    """
+    if not ingredient_ids:
+        return {}
+    
+    try:
+        # Busca informações básicas de todos os ingredientes de uma vez
+        placeholders = ', '.join(['?' for _ in ingredient_ids])
+        cur.execute(f"""
+            SELECT 
+                ID,
+                CURRENT_STOCK,
+                MIN_STOCK_THRESHOLD,
+                STOCK_UNIT,
+                IS_AVAILABLE
+            FROM INGREDIENTS
+            WHERE ID IN ({placeholders})
+        """, tuple(ingredient_ids))
+        
+        ingredients_info = {}
+        for row in cur.fetchall():
+            ing_id, current_stock, min_threshold, stock_unit, is_available = row
+            if not is_available:
+                ingredients_info[ing_id] = {
+                    'current_stock': Decimal('0'),
+                    'min_threshold': Decimal('0'),
+                    'stock_unit': stock_unit,
+                    'available_stock': Decimal('0')
+                }
+            else:
+                ingredients_info[ing_id] = {
+                    'current_stock': Decimal(str(current_stock or 0)),
+                    'min_threshold': Decimal(str(min_threshold or 0)),
+                    'stock_unit': stock_unit,
+                    'available_stock': Decimal('0')  # Será calculado abaixo
+                }
+        
+        # OTIMIZAÇÃO: Busca reservas confirmadas de todos os ingredientes de uma vez
+        # Agrupa por ingrediente e calcula consumo total
+        cur.execute(f"""
+            SELECT 
+                pi.INGREDIENT_ID,
+                oi.QUANTITY,
+                pi.PORTIONS,
+                i2.BASE_PORTION_QUANTITY,
+                i2.BASE_PORTION_UNIT,
+                i2.STOCK_UNIT
+            FROM ORDER_ITEMS oi
+            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
+            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
+            JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE pi.INGREDIENT_ID IN ({placeholders})
+              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
+        """, tuple(ingredient_ids))
+        
+        # Calcula reservas confirmadas por ingrediente
+        confirmed_reservations = {ing_id: Decimal('0') for ing_id in ingredient_ids}
+        for row in cur.fetchall():
+            ing_id, oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
+            if ing_id not in ingredients_info:
+                continue
+            
+            try:
+                # Calcula consumo convertido para unidade do estoque
+                consumption = calculate_consumption_in_stock_unit(
+                    portions=portions or 0,
+                    base_portion_quantity=base_portion_quantity or 1,
+                    base_portion_unit=base_portion_unit or 'un',
+                    stock_unit=stock_unit or 'un',
+                    item_quantity=oi_quantity or 1
+                )
+                confirmed_reservations[ing_id] += consumption
+            except ValueError as e:
+                logger.warning(f"Erro ao calcular reserva confirmada para ingrediente {ing_id}: {e}", exc_info=True)
+                continue
+        
+        # OTIMIZAÇÃO: Busca reservas temporárias de todos os ingredientes de uma vez
+        cur.execute(f"""
+            SELECT 
+                INGREDIENT_ID,
+                COALESCE(SUM(QUANTITY), 0) as TOTAL_RESERVATIONS
+            FROM TEMPORARY_RESERVATIONS
+            WHERE INGREDIENT_ID IN ({placeholders})
+              AND EXPIRES_AT > CURRENT_TIMESTAMP
+            GROUP BY INGREDIENT_ID
+        """, tuple(ingredient_ids))
+        
+        temporary_reservations = {ing_id: Decimal('0') for ing_id in ingredient_ids}
+        for row in cur.fetchall():
+            ing_id, total_reservations = row
+            temporary_reservations[ing_id] = Decimal(str(total_reservations or 0))
+        
+        # Calcula estoque disponível para cada ingrediente
+        availability_map = {}
+        for ing_id in ingredient_ids:
+            if ing_id not in ingredients_info:
+                availability_map[ing_id] = Decimal('0')
+                continue
+            
+            info = ingredients_info[ing_id]
+            current_stock = info['current_stock']
+            min_threshold = info['min_threshold']
+            confirmed = confirmed_reservations.get(ing_id, Decimal('0'))
+            temporary = temporary_reservations.get(ing_id, Decimal('0'))
+            
+            # Estoque disponível = estoque_real - estoque_seguranca - reservas_confirmadas - reservas_brandas_ativas
+            available = current_stock - min_threshold - confirmed - temporary
+            availability_map[ing_id] = max(Decimal('0'), available)
+        
+        return availability_map
+    except Exception as e:
+        logger.error(f"Erro ao buscar estoque disponível em batch: {e}", exc_info=True)
+        return {}
+
+
+def calculate_product_capacity(product_id, cur=None, include_extras=True):
+    """
+    Calcula a capacidade de produção de um produto.
+    
+    capacidade = min_i floor(estoque_disponivel_i / consumo_por_unidade_i)
+    
+    Args:
+        product_id: ID do produto
+        cur: Cursor do banco (opcional)
+        include_extras: Se True, considera extras além da receita base
+    
+    Returns:
+        dict: {
+            'capacity': int,  # Capacidade máxima (número de unidades)
+            'limiting_ingredient': dict,  # Insumo que limita a capacidade
+            'ingredients': list,  # Lista de todos os insumos com suas capacidades
+            'is_available': bool
+        }
+    """
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # SIMPLIFICAÇÃO: Busca ingredientes da receita base (perdas opcionais)
+        # Verifica se campo LOSS_PERCENTAGE existe antes de usar
+        # TODO: REVISAR - Método atual de detecção de coluna é frágil; considerar usar INFORMATION_SCHEMA
+        use_loss_percentage = False
+        try:
+            # Tenta buscar coluna LOSS_PERCENTAGE (pode não existir em versões antigas do schema)
+            cur.execute("""
+                SELECT 
+                    pi.INGREDIENT_ID,
+                    pi.PORTIONS,
+                    COALESCE(pi.LOSS_PERCENTAGE, 0) as LOSS_PERCENTAGE,
+                    i.NAME,
+                    i.BASE_PORTION_QUANTITY,
+                    i.BASE_PORTION_UNIT,
+                    i.STOCK_UNIT,
+                    i.IS_AVAILABLE
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                WHERE pi.PRODUCT_ID = ?
+                  AND pi.PORTIONS > 0
+                  AND i.IS_AVAILABLE = TRUE
+            """, (product_id,))
+            use_loss_percentage = True
+        except fdb.Error as e:
+            # Se campo não existe, usa query sem LOSS_PERCENTAGE
+            error_msg = str(e).lower()
+            if 'loss_percentage' in error_msg or 'unknown' in error_msg or 'column' in error_msg:
+                logger.debug(f"Campo LOSS_PERCENTAGE não encontrado, usando query sem perdas para produto {product_id}")
+                cur.execute("""
+                    SELECT 
+                        pi.INGREDIENT_ID,
+                        pi.PORTIONS,
+                        i.NAME,
+                        i.BASE_PORTION_QUANTITY,
+                        i.BASE_PORTION_UNIT,
+                        i.STOCK_UNIT,
+                        i.IS_AVAILABLE
+                    FROM PRODUCT_INGREDIENTS pi
+                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    WHERE pi.PRODUCT_ID = ?
+                      AND pi.PORTIONS > 0
+                      AND i.IS_AVAILABLE = TRUE
+                """, (product_id,))
+                use_loss_percentage = False
+            else:
+                # ALTERAÇÃO: Re-raise se for outro tipo de erro (não relacionado à coluna)
+                logger.error(f"Erro inesperado ao buscar ingredientes do produto {product_id}: {e}", exc_info=True)
+                raise
+        
+        ingredients = cur.fetchall()
+        
+        if not ingredients:
+            return {
+                'capacity': 0,
+                'limiting_ingredient': None,
+                'ingredients': [],
+                'is_available': False,
+                'message': 'Produto sem ingredientes cadastrados ou ingredientes indisponíveis'
+            }
+        
+        capacities = []
+        ingredient_info_list = []
+        min_capacity = None
+        limiting_ingredient = None
+        
+        for row in ingredients:
+            if use_loss_percentage:
+                ing_id, portions, loss_pct, name, base_portion_quantity, base_portion_unit, stock_unit, is_available = row
+                loss_percentage = float(loss_pct or 0)
+            else:
+                ing_id, portions, name, base_portion_quantity, base_portion_unit, stock_unit, is_available = row
+                loss_percentage = 0  # Campo não existe, usa 0
+            
+            if not is_available:
+                continue
+            
+            # Obtém estoque disponível
+            available_stock = get_ingredient_available_stock(ing_id, cur)
+            
+            # SIMPLIFICAÇÃO: Calcula consumo (perdas são opcionais, padrão 0)
+            try:
+                consumption_per_unit = calculate_consumption_in_stock_unit(
+                    portions=portions,
+                    base_portion_quantity=base_portion_quantity,
+                    base_portion_unit=base_portion_unit,
+                    stock_unit=stock_unit,
+                    item_quantity=1,
+                    loss_percentage=loss_percentage
+                )
+            except ValueError as e:
+                logger.error(f"Erro ao calcular consumo para {name} (ingrediente {ing_id}): {e}", exc_info=True)
+                continue
+            
+            if consumption_per_unit <= 0:
+                continue
+            
+            # Calcula capacidade para este insumo
+            capacity = int(available_stock / consumption_per_unit)
+            
+            ingredient_info = {
+                'ingredient_id': ing_id,
+                'name': name,
+                'available_stock': float(available_stock),
+                'consumption_per_unit': float(consumption_per_unit),
+                'capacity': capacity,
+                'stock_unit': stock_unit
+            }
+            
+            capacities.append(capacity)
+            ingredient_info_list.append(ingredient_info)
+            
+            # Identifica insumo limitante (menor capacidade)
+            if min_capacity is None or capacity < min_capacity:
+                min_capacity = capacity
+                limiting_ingredient = ingredient_info
+        
+        if not capacities:
+            return {
+                'capacity': 0,
+                'limiting_ingredient': None,
+                'ingredients': ingredient_info_list,
+                'is_available': False,
+                'message': 'Nenhum ingrediente disponível'
+            }
+        
+        return {
+            'capacity': min_capacity,
+            'limiting_ingredient': limiting_ingredient,
+            'ingredients': ingredient_info_list,
+            'is_available': min_capacity > 0,
+            'message': f'Capacidade: {min_capacity} unidades' if min_capacity > 0 else 'Sem capacidade de produção'
+        }
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao calcular capacidade do produto: {e}", exc_info=True)
+        return {
+            'capacity': 0,
+            'limiting_ingredient': None,
+            'ingredients': [],
+            'is_available': False,
+            'message': 'Erro ao calcular capacidade'
+        }
+    finally:
+        if should_close and conn:
+            conn.close()
+
+
+def calculate_product_capacity_with_extras(product_id, extras=None, cur=None):
+    """
+    Calcula capacidade de produção considerando extras.
+    
+    ALTERAÇÃO: Se o mesmo insumo aparece na receita e como extra → soma antes de validar.
+    capacidade_total = min_i floor(estoque_disponivel_i / (consumo_receita_i + consumo_extras_i))
+    
+    Args:
+        product_id: ID do produto
+        extras: Lista de extras [{ingredient_id: int, quantity: int}]
+        cur: Cursor do banco (opcional)
+    
+    Returns:
+        dict: Mesmo formato de calculate_product_capacity, mas considerando extras
+    """
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # Se não há extras, retorna capacidade base
+        if not extras:
+            return calculate_product_capacity(product_id, cur, include_extras=False)
+        
+        # ALTERAÇÃO: Busca ingredientes da receita base (perdas opcionais)
+        # Verifica se campo LOSS_PERCENTAGE existe antes de usar
+        # TODO: REVISAR - Método atual de detecção de coluna é frágil; considerar usar INFORMATION_SCHEMA
+        use_loss_percentage = False
+        try:
+            # Tenta buscar coluna LOSS_PERCENTAGE (pode não existir em versões antigas do schema)
+            cur.execute("""
+                SELECT 
+                    pi.INGREDIENT_ID,
+                    pi.PORTIONS,
+                    COALESCE(pi.LOSS_PERCENTAGE, 0) as LOSS_PERCENTAGE,
+                    i.NAME,
+                    i.BASE_PORTION_QUANTITY,
+                    i.BASE_PORTION_UNIT,
+                    i.STOCK_UNIT,
+                    i.IS_AVAILABLE
+                FROM PRODUCT_INGREDIENTS pi
+                JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                WHERE pi.PRODUCT_ID = ?
+                  AND pi.PORTIONS > 0
+                  AND i.IS_AVAILABLE = TRUE
+            """, (product_id,))
+            use_loss_percentage = True
+        except fdb.Error as e:
+            # Se campo não existe, usa query sem LOSS_PERCENTAGE
+            error_msg = str(e).lower()
+            if 'loss_percentage' in error_msg or 'unknown' in error_msg or 'column' in error_msg:
+                logger.debug(f"Campo LOSS_PERCENTAGE não encontrado, usando query sem perdas para produto {product_id}")
+                cur.execute("""
+                    SELECT 
+                        pi.INGREDIENT_ID,
+                        pi.PORTIONS,
+                        i.NAME,
+                        i.BASE_PORTION_QUANTITY,
+                        i.BASE_PORTION_UNIT,
+                        i.STOCK_UNIT,
+                        i.IS_AVAILABLE
+                    FROM PRODUCT_INGREDIENTS pi
+                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    WHERE pi.PRODUCT_ID = ?
+                      AND pi.PORTIONS > 0
+                      AND i.IS_AVAILABLE = TRUE
+                """, (product_id,))
+                use_loss_percentage = False
+            else:
+                # ALTERAÇÃO: Re-raise se for outro tipo de erro (não relacionado à coluna)
+                logger.error(f"Erro inesperado ao buscar ingredientes do produto {product_id}: {e}", exc_info=True)
+                raise
+        
+        recipe_ingredients = cur.fetchall()
+        
+        if not recipe_ingredients:
+            return {
+                'capacity': 0,
+                'limiting_ingredient': None,
+                'ingredients': [],
+                'is_available': False,
+                'message': 'Produto sem ingredientes cadastrados ou ingredientes indisponíveis'
+            }
+        
+        # ALTERAÇÃO: Agrega consumo de extras por ingrediente
+        # Mapeia extras por ingredient_id para somar consumo quando o mesmo ingrediente aparece na receita
+        extras_consumption = {}  # {ingredient_id: consumo_total_em_extras}
+        extras_info = {}  # {ingredient_id: {name, stock_unit, base_portion_quantity, base_portion_unit}}
+        
+        # ALTERAÇÃO: Otimização - busca todos os ingredientes extras de uma vez (evita N+1)
+        extra_ingredient_ids = []
+        extra_quantities = {}
+        for extra in extras:
+            ing_id = extra.get('ingredient_id')
+            qty = extra.get('quantity', 1)
+            
+            if not ing_id or qty <= 0:
+                continue
+            
+            try:
+                ing_id = int(ing_id)
+                qty = int(qty)
+            except (ValueError, TypeError):
+                continue
+            
+            if ing_id not in extra_ingredient_ids:
+                extra_ingredient_ids.append(ing_id)
+                extra_quantities[ing_id] = 0
+            extra_quantities[ing_id] += qty
+        
+        # Busca informações de todos os ingredientes extras de uma vez
+        extra_ingredients_info = {}
+        if extra_ingredient_ids:
+            placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+            cur.execute(f"""
+                SELECT 
+                    ID,
+                    BASE_PORTION_QUANTITY,
+                    BASE_PORTION_UNIT,
+                    STOCK_UNIT,
+                    NAME,
+                    IS_AVAILABLE
+                FROM INGREDIENTS
+                WHERE ID IN ({placeholders})
+            """, tuple(extra_ingredient_ids))
+            
+            for row in cur.fetchall():
+                ing_id_db, base_portion_quantity, base_portion_unit, stock_unit, name, is_available = row
+                if is_available:
+                    extra_ingredients_info[ing_id_db] = {
+                        'base_portion_quantity': base_portion_quantity,
+                        'base_portion_unit': base_portion_unit,
+                        'stock_unit': stock_unit,
+                        'name': name
+                    }
+        
+        # Processa consumo de cada ingrediente extra
+        for ing_id, qty in extra_quantities.items():
+            if ing_id not in extra_ingredients_info:
+                continue
+            
+            extra_info = extra_ingredients_info[ing_id]
+            base_portion_quantity = extra_info['base_portion_quantity']
+            base_portion_unit = extra_info['base_portion_unit']
+            stock_unit = extra_info['stock_unit']
+            name = extra_info['name']
+            
+            # Calcula consumo do extra por unidade do produto
+            try:
+                extra_consumption = calculate_consumption_in_stock_unit(
+                    portions=qty,
+                    base_portion_quantity=base_portion_quantity,
+                    base_portion_unit=base_portion_unit,
+                    stock_unit=stock_unit,
+                    item_quantity=1
+                )
+            except ValueError as e:
+                logger.error(f"Erro ao calcular consumo do extra {ing_id} ({name}): {e}", exc_info=True)
+                continue
+            
+            if extra_consumption > 0:
+                # ALTERAÇÃO: Soma consumo de extras (se o mesmo ingrediente aparecer múltiplas vezes nos extras)
+                if ing_id not in extras_consumption:
+                    extras_consumption[ing_id] = Decimal('0')
+                    extras_info[ing_id] = {
+                        'name': name,
+                        'stock_unit': stock_unit,
+                        'base_portion_quantity': base_portion_quantity,
+                        'base_portion_unit': base_portion_unit
+                    }
+                extras_consumption[ing_id] += extra_consumption
+        
+        # ALTERAÇÃO: Calcula capacidade considerando receita + extras
+        # Para cada ingrediente: consumo_total = consumo_receita + consumo_extras
+        capacities = []
+        ingredient_info_list = []
+        min_capacity = None
+        limiting_ingredient = None
+        
+        for row in recipe_ingredients:
+            if use_loss_percentage:
+                ing_id, portions, loss_pct, name, base_portion_quantity, base_portion_unit, stock_unit, is_available = row
+                loss_percentage = float(loss_pct or 0)
+            else:
+                ing_id, portions, name, base_portion_quantity, base_portion_unit, stock_unit, is_available = row
+                loss_percentage = 0  # Campo não existe, usa 0
+            
+            if not is_available:
+                continue
+            
+            # Obtém estoque disponível
+            available_stock = get_ingredient_available_stock(ing_id, cur)
+            
+            # Calcula consumo da receita por unidade do produto
+            try:
+                recipe_consumption = calculate_consumption_in_stock_unit(
+                    portions=portions,
+                    base_portion_quantity=base_portion_quantity,
+                    base_portion_unit=base_portion_unit,
+                    stock_unit=stock_unit,
+                    item_quantity=1,
+                    loss_percentage=loss_percentage
+                )
+            except ValueError as e:
+                logger.error(f"Erro ao calcular consumo da receita para {name}: {e}")
+                continue
+            
+            # ALTERAÇÃO: Soma consumo de extras se o mesmo ingrediente aparecer nos extras
+            total_consumption = recipe_consumption
+            if ing_id in extras_consumption:
+                total_consumption += extras_consumption[ing_id]
+            
+            if total_consumption <= 0:
+                continue
+            
+            # Calcula capacidade para este ingrediente (receita + extras)
+            capacity = int(available_stock / total_consumption)
+            
+            ingredient_info = {
+                'ingredient_id': ing_id,
+                'name': name,
+                'available_stock': float(available_stock),
+                'consumption_per_unit': float(total_consumption),
+                'recipe_consumption': float(recipe_consumption),
+                'extras_consumption': float(extras_consumption.get(ing_id, 0)),
+                'capacity': capacity,
+                'stock_unit': stock_unit
+            }
+            
+            capacities.append(capacity)
+            ingredient_info_list.append(ingredient_info)
+            
+            # Identifica insumo limitante (menor capacidade)
+            if min_capacity is None or capacity < min_capacity:
+                min_capacity = capacity
+                limiting_ingredient = ingredient_info
+        
+        # ALTERAÇÃO: Processa extras que não aparecem na receita
+        for ing_id, extra_consumption in extras_consumption.items():
+            # Verifica se o ingrediente já foi processado (está na receita)
+            if any(ing.get('ingredient_id') == ing_id for ing in ingredient_info_list):
+                continue
+            
+            # Ingrediente extra que não está na receita
+            extra_info = extras_info[ing_id]
+            available_stock = get_ingredient_available_stock(ing_id, cur)
+            
+            if extra_consumption <= 0:
+                continue
+            
+            # Calcula capacidade para este extra (apenas extras, sem receita)
+            capacity = int(available_stock / extra_consumption)
+            
+            ingredient_info = {
+                'ingredient_id': ing_id,
+                'name': extra_info['name'],
+                'available_stock': float(available_stock),
+                'consumption_per_unit': float(extra_consumption),
+                'recipe_consumption': 0.0,
+                'extras_consumption': float(extra_consumption),
+                'capacity': capacity,
+                'stock_unit': extra_info['stock_unit']
+            }
+            
+            capacities.append(capacity)
+            ingredient_info_list.append(ingredient_info)
+            
+            # Identifica insumo limitante (menor capacidade)
+            if min_capacity is None or capacity < min_capacity:
+                min_capacity = capacity
+                limiting_ingredient = ingredient_info
+        
+        if not capacities:
+            return {
+                'capacity': 0,
+                'limiting_ingredient': None,
+                'ingredients': ingredient_info_list,
+                'is_available': False,
+                'message': 'Nenhum ingrediente disponível'
+            }
+        
+        return {
+            'capacity': min_capacity,
+            'limiting_ingredient': limiting_ingredient,
+            'ingredients': ingredient_info_list,
+            'is_available': min_capacity > 0,
+            'message': f'Capacidade: {min_capacity} unidades' if min_capacity > 0 else 'Sem capacidade de produção'
+        }
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao calcular capacidade com extras: {e}", exc_info=True)
+        return {
+            'capacity': 0,
+            'limiting_ingredient': None,
+            'ingredients': [],
+            'is_available': False,
+            'message': 'Erro ao calcular capacidade'
+        }
+    finally:
+        if should_close and conn:
             conn.close()

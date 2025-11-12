@@ -50,7 +50,222 @@ def check_product_availability_route(product_id):
     if availability['status'] == 'unknown' and 'Produto não encontrado' in availability.get('message', ''):
         return jsonify({"error": "Produto não encontrado"}), 404
     
-    return jsonify(availability), 200  
+    return jsonify(availability), 200
+
+@product_bp.route('/<int:product_id>/capacity', methods=['GET'])
+def get_product_capacity_route(product_id):
+    """
+    Calcula a capacidade de produção de um produto.
+    
+    Query parameters:
+        - extras: JSON opcional com lista de extras [{ingredient_id: int, quantity: int}]
+    
+    Returns:
+        {
+            'capacity': int,  # Capacidade máxima (número de unidades)
+            'limiting_ingredient': dict,  # Insumo que limita a capacidade
+            'ingredients': list,  # Lista de todos os insumos com suas capacidades
+            'is_available': bool,
+            'message': str
+        }
+    """
+    from ..services import stock_service
+    import json
+    
+    extras_param = request.args.get('extras', None)
+    extras = None
+    
+    if extras_param:
+        try:
+            extras = json.loads(extras_param)
+        except (json.JSONDecodeError, ValueError):
+            return jsonify({"error": "Formato de extras inválido. Use JSON válido."}), 400
+    
+    if extras:
+        capacity = stock_service.calculate_product_capacity_with_extras(product_id, extras)
+    else:
+        capacity = stock_service.calculate_product_capacity(product_id)
+    
+    return jsonify(capacity), 200
+
+
+@product_bp.route('/simular_capacidade', methods=['POST'])
+def simulate_product_capacity_route():
+    """
+    Simula a capacidade máxima de produção de um produto considerando receita e extras.
+    
+    Body (JSON):
+        {
+            "product_id": int,  # ID do produto (obrigatório)
+            "extras": [  # Lista de extras (opcional)
+                {"ingredient_id": int, "quantity": int}
+            ],
+            "quantity": int  # Quantidade desejada (opcional, padrão: 1)
+        }
+    
+    Returns:
+        {
+            "product_id": int,
+            "max_quantity": int,  # Capacidade máxima (número de unidades)
+            "availability_status": str,  # "available", "limited", "unavailable", "low_stock"
+            "limiting_ingredient": {  # Insumo que limita a capacidade
+                "name": str,
+                "available": float,
+                "unit": str,
+                "message": str
+            },
+            "capacity": int,  # Alias para max_quantity
+            "is_available": bool,
+            "message": str
+        }
+    
+    Status codes:
+        - 200: Sucesso
+        - 400: Erro de validação (product_id ausente ou inválido)
+        - 404: Produto não encontrado
+        - 500: Erro interno do servidor
+    """
+    from ..services import stock_service
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Valida se há dados JSON
+        if not request.is_json:
+            return jsonify({"error": "Content-Type deve ser application/json"}), 400
+        
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error": "JSON inválido ou vazio"}), 400
+        
+        # Valida product_id
+        product_id = data.get("product_id")
+        if not product_id:
+            return jsonify({"error": "product_id é obrigatório"}), 400
+        
+        try:
+            product_id = int(product_id)
+            if product_id <= 0:
+                return jsonify({"error": "product_id deve ser um número positivo"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "product_id deve ser um número válido"}), 400
+        
+        # Valida se o produto existe
+        product = product_service.get_product_by_id(product_id)
+        if not product:
+            return jsonify({"error": "Produto não encontrado"}), 404
+        
+        # Obtém extras (opcional)
+        extras = data.get("extras", [])
+        if extras:
+            # Valida formato dos extras
+            if not isinstance(extras, list):
+                return jsonify({"error": "extras deve ser uma lista"}), 400
+            
+            # Valida cada extra
+            for extra in extras:
+                if not isinstance(extra, dict):
+                    return jsonify({"error": "Cada extra deve ser um objeto"}), 400
+                
+                ing_id = extra.get("ingredient_id")
+                qty = extra.get("quantity", 1)
+                
+                if not ing_id:
+                    return jsonify({"error": "ingredient_id é obrigatório em cada extra"}), 400
+                
+                try:
+                    ing_id = int(ing_id)
+                    qty = int(qty) if qty else 1
+                    
+                    if ing_id <= 0:
+                        return jsonify({"error": "ingredient_id deve ser um número positivo"}), 400
+                    if qty <= 0:
+                        return jsonify({"error": "quantity deve ser um número positivo"}), 400
+                except (ValueError, TypeError):
+                    return jsonify({"error": "ingredient_id e quantity devem ser números válidos"}), 400
+        
+        # Calcula capacidade usando a função existente
+        if extras:
+            capacity_result = stock_service.calculate_product_capacity_with_extras(product_id, extras)
+        else:
+            capacity_result = stock_service.calculate_product_capacity(product_id)
+        
+        # Verifica se houve erro no cálculo
+        if not capacity_result or capacity_result.get('capacity') is None:
+            return jsonify({
+                "error": "Erro ao calcular capacidade",
+                "message": capacity_result.get('message', 'Erro desconhecido') if capacity_result else 'Erro ao calcular capacidade'
+            }), 500
+        
+        # Formata resposta no formato esperado pelo frontend
+        capacity = capacity_result.get('capacity', 0)
+        is_available = capacity_result.get('is_available', False)
+        limiting_ingredient = capacity_result.get('limiting_ingredient')
+        
+        # Determina availability_status baseado na capacidade
+        if not is_available or capacity < 1:
+            availability_status = "unavailable"
+        elif capacity == 1:
+            availability_status = "limited"
+        else:
+            # Capacidade > 1: verifica se está baixo
+            if limiting_ingredient:
+                available_stock = limiting_ingredient.get('available_stock', 0)
+                consumption_per_unit = limiting_ingredient.get('consumption_per_unit', 0)
+                
+                # Se o estoque disponível é menos que 2x o consumo por unidade, está baixo
+                if available_stock < (consumption_per_unit * 2):
+                    availability_status = "low_stock"
+                else:
+                    availability_status = "available"
+            else:
+                availability_status = "available"
+        
+        # Formata limiting_ingredient para o formato esperado
+        limiting_ingredient_formatted = None
+        if limiting_ingredient:
+            ingredient_name = limiting_ingredient.get('name', 'Ingrediente desconhecido')
+            available_stock = limiting_ingredient.get('available_stock', 0)
+            stock_unit = limiting_ingredient.get('stock_unit', 'un')
+            consumption_per_unit = limiting_ingredient.get('consumption_per_unit', 0)
+            
+            # Formata mensagem de limite
+            if capacity == 1:
+                message = f"Limite de {capacity} unidade — {ingredient_name.lower()} insuficiente (restam {available_stock:.2f} {stock_unit})."
+            elif capacity > 1:
+                message = f"Limite de {capacity} unidades — {ingredient_name.lower()} insuficiente (restam {available_stock:.2f} {stock_unit})."
+            else:
+                # Capacidade = 0: sem estoque disponível
+                message = f"Sem estoque disponível — {ingredient_name.lower()} insuficiente (restam {available_stock:.2f} {stock_unit})."
+            
+            limiting_ingredient_formatted = {
+                "name": ingredient_name,
+                "available": round(available_stock, 2),
+                "unit": stock_unit,
+                "message": message
+            }
+        
+        # Monta resposta final
+        response = {
+            "product_id": product_id,
+            "max_quantity": capacity,
+            "capacity": capacity,  # Alias para compatibilidade
+            "availability_status": availability_status,
+            "limiting_ingredient": limiting_ingredient_formatted,
+            "is_available": is_available,
+            "message": capacity_result.get('message', f'Capacidade: {capacity} unidades')
+        }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        # ALTERAÇÃO: Não expõe detalhes internos do erro ao cliente
+        logger.error(f"Erro ao simular capacidade do produto {product_id}: {e}", exc_info=True)
+        return jsonify({
+            "error": "Erro interno ao calcular capacidade",
+            "message": "Não foi possível calcular a capacidade do produto. Tente novamente mais tarde."
+        }), 500  
 
 @product_bp.route('/', methods=['POST'])  
 @require_role('admin', 'manager')  
@@ -115,6 +330,8 @@ def create_product_route():
         if error_code == "PRODUCT_NAME_EXISTS":  
             return jsonify({"error": error_message}), 409  
         if error_code == "INVALID_INGREDIENTS":
+            return jsonify({"error": error_message}), 400
+        if error_code == "INCOMPLETE_RECIPE":
             return jsonify({"error": error_message}), 400
         if error_code == "DATABASE_ERROR":  
             return jsonify({"error": error_message}), 500  

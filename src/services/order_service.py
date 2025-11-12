@@ -1131,6 +1131,13 @@ def cancel_order(order_id, user_id, is_manager=False):
                 # Libera a mesa
                 table_service.set_table_available(table_id)
 
+        # TODO: REVISAR - Devolução de estoque ao cancelar pedido
+        # Quando um pedido é cancelado, o estoque já foi deduzido na criação do pedido.
+        # Dependendo da política de negócio, pode ser necessário devolver o estoque ao cancelar.
+        # Isso requer uma função stock_service.restore_stock_for_order(order_id) que ainda não existe.
+        # Por enquanto, o estoque permanece deduzido mesmo após cancelamento.
+        # Nota: Reservas temporárias não são afetadas aqui, pois já foram limpas quando o pedido foi criado.
+        
         # Cancela o pedido
         sql_update = "UPDATE ORDERS SET STATUS = 'cancelled', UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = ?;"
         cur.execute(sql_update, (order_id,))
@@ -1439,15 +1446,60 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         # Deduz estoque quando o pedido é criado (usa cursor existente para manter transação)
         success, error_code, message = stock_service.deduct_stock_for_order(order_id, cur)
         if not success:
-            # Se falhou a dedução, reverte tudo
+            # Se falhou a dedução, reverte tudo (reservas temporárias permanecem no carrinho)
             conn.rollback()
             logger.error(f"Erro ao deduzir estoque para pedido {order_id}: {message}")
             return (None, error_code, message)
         logger.info(f"Estoque deduzido para pedido {order_id}: {message}")
         
+        # INTEGRAÇÃO: Limpa reservas temporárias APÓS dedução bem-sucedida do estoque
+        # As reservas temporárias são convertidas em dedução permanente do estoque
+        # Portanto, devem ser removidas para evitar dupla dedução
+        cart_id = cart_data.get("cart_id")
+        if cart_id:
+            # ALTERAÇÃO: Limpa reservas expiradas primeiro para liberar estoque
+            # Depois limpa reservas temporárias do carrinho específico
+            try:
+                # Limpa reservas expiradas primeiro (otimização)
+                cur.execute("""
+                    DELETE FROM TEMPORARY_RESERVATIONS
+                    WHERE EXPIRES_AT <= CURRENT_TIMESTAMP
+                """)
+                expired_count = cur.rowcount
+                if expired_count > 0:
+                    logger.info(f"Reservas temporárias expiradas limpas: {expired_count} reservas removidas")
+                
+                # Limpa reservas temporárias do carrinho (convertidas em dedução permanente)
+                cur.execute("""
+                    DELETE FROM TEMPORARY_RESERVATIONS
+                    WHERE CART_ID = ?
+                """, (cart_id,))
+                reservations_cleared = cur.rowcount
+                if reservations_cleared > 0:
+                    logger.info(f"Reservas temporárias limpas para carrinho {cart_id}: {reservations_cleared} reservas removidas após checkout")
+                elif expired_count == 0:
+                    logger.debug(f"Nenhuma reserva temporária encontrada para carrinho {cart_id}")
+            except fdb.Error as e:
+                # ALTERAÇÃO: Se falhar ao limpar reservas, loga erro mas não falha o pedido
+                # (o estoque já foi deduzido, então o pedido deve ser criado mesmo assim)
+                # Não expõe detalhes do erro ao cliente, apenas loga internamente
+                error_msg = str(e).lower()
+                logger.error(
+                    f"Erro ao limpar reservas temporárias para carrinho {cart_id}: "
+                    f"Tabela: TEMPORARY_RESERVATIONS, Erro: {error_msg[:100]}",
+                    exc_info=True
+                )
+                # Nota: Não faz rollback aqui porque o estoque já foi deduzido com sucesso
+                # As reservas serão limpas automaticamente quando expirarem ou podem ser limpas manualmente
+        else:
+            logger.warning(f"cart_id não encontrado em cart_data ao limpar reservas temporárias para pedido {order_id}")
+        
         # Limpa o carrinho do usuário
-        cart_id = cart_data["cart_id"]
-        cur.execute("DELETE FROM CART_ITEMS WHERE CART_ID = ?;", (cart_id,))
+        if cart_id:
+            cur.execute("DELETE FROM CART_ITEMS WHERE CART_ID = ?;", (cart_id,))
+            logger.info(f"Carrinho {cart_id} limpo após criação do pedido {order_id}")
+        else:
+            logger.warning(f"cart_id não encontrado, não foi possível limpar carrinho para pedido {order_id}")
         
         # Nota: Pontos de fidelidade serão creditados apenas quando o pedido for concluído (status='completed')
         # Ver função update_order_status para lógica de crédito de pontos

@@ -3,6 +3,7 @@ from . import stock_service
 import fdb
 import logging
 from decimal import Decimal
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -663,6 +664,23 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
             # Incrementa quantidade do item existente
             sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
             cur.execute(sql, (quantity, existing_item_id))
+            
+            # NOVA INTEGRAÇÃO: Recria reservas temporárias para todo o carrinho
+            # (porque a quantidade foi atualizada, precisa recalcular todas as reservas)
+            # Busca user_id do carrinho
+            cur.execute("SELECT USER_ID FROM CARTS WHERE ID = ?", (cart_id,))
+            cart_user_row = cur.fetchone()
+            cart_user_id = cart_user_row[0] if cart_user_row else user_id
+            
+            success, error_code, message = _recreate_temporary_reservations_for_cart(
+                cart_id=cart_id,
+                user_id=cart_user_id,
+                cur=cur
+            )
+            
+            if not success:
+                conn.rollback()
+                return (False, error_code, message)
         else:
             # Cria novo item
             sql = "INSERT INTO CART_ITEMS (CART_ID, PRODUCT_ID, QUANTITY, NOTES) VALUES (?, ?, ?, ?) RETURNING ID;"
@@ -671,6 +689,7 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
             
             # OTIMIZAÇÃO: Busca preços de ingredientes em batch ao invés de queries individuais
             # Adiciona extras se fornecidos (TYPE='extra')
+            # IMPORTANTE: Inserir extras e base_modifications ANTES de criar reservas temporárias
             if extras:
                 logger.info(f"[add_item_to_cart] Processando {len(extras)} extras para item {new_item_id}")
                 # Coleta IDs de ingredientes e busca preços de uma vez
@@ -764,6 +783,25 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                             "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
                             (new_item_id, ing_id, delta, unit_price)
                         )
+            
+            # NOVA INTEGRAÇÃO: Cria reservas temporárias para o novo item APÓS inserir todos os dados
+            # (extras e base_modifications já foram inseridos)
+            success, error_code, message, reservation_ids = _create_temporary_reservations_for_item(
+                cart_id=cart_id,
+                product_id=product_id,
+                quantity=quantity,
+                extras=extras,
+                base_modifications=base_modifications,
+                user_id=user_id,
+                cur=cur
+            )
+            
+            if not success:
+                # Erro ao criar reservas - remove o item criado e retorna erro
+                cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?", (new_item_id,))
+                cur.execute("DELETE FROM CART_ITEMS WHERE ID = ?", (new_item_id,))
+                conn.rollback()
+                return (False, error_code, message)
         
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
@@ -1003,6 +1041,18 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
             
             sql = "UPDATE CART_ITEMS SET QUANTITY = QUANTITY + ? WHERE ID = ?;"
             cur.execute(sql, (quantity, existing_item_id))
+            
+            # NOVA INTEGRAÇÃO: Recria reservas temporárias para todo o carrinho (visitante)
+            # (porque a quantidade foi atualizada, precisa recalcular todas as reservas)
+            success, error_code, message = _recreate_temporary_reservations_for_cart(
+                cart_id=cart_id,
+                user_id=None,  # Visitante
+                cur=cur
+            )
+            
+            if not success:
+                conn.rollback()
+                return (False, error_code, message)
         else:
             sql = "INSERT INTO CART_ITEMS (CART_ID, PRODUCT_ID, QUANTITY, NOTES) VALUES (?, ?, ?, ?) RETURNING ID;"
             cur.execute(sql, (cart_id, product_id, quantity, notes))
@@ -1077,6 +1127,25 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                             "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
                             (new_item_id, ing_id, delta, unit_price)
                         )
+            
+            # NOVA INTEGRAÇÃO: Cria reservas temporárias para o novo item APÓS inserir todos os dados (visitante)
+            # (extras e base_modifications já foram inseridos)
+            success, error_code, message, reservation_ids = _create_temporary_reservations_for_item(
+                cart_id=cart_id,
+                product_id=product_id,
+                quantity=quantity,
+                extras=extras,
+                base_modifications=base_modifications,
+                user_id=None,  # Visitante
+                cur=cur
+            )
+            
+            if not success:
+                # Erro ao criar reservas - remove o item criado e retorna erro
+                cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?", (new_item_id,))
+                cur.execute("DELETE FROM CART_ITEMS WHERE ID = ?", (new_item_id,))
+                conn.rollback()
+                return (False, error_code, message)
 
         conn.commit()
         return (True, None, "Item adicionado ao carrinho com sucesso")
@@ -1261,15 +1330,26 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
             sql = "UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;"
             cur.execute(sql, (notes, cart_item_id))
         
+        # ALTERAÇÃO: Busca informações do item uma única vez (cart_id, product_id, quantity atual)
+        # Busca informações do item uma única vez para evitar queries duplicadas
+        cur.execute("SELECT CART_ID, PRODUCT_ID, QUANTITY FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+        item_row = cur.fetchone()
+        if not item_row:
+            return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+        
+        item_cart_id = item_row[0]
+        item_product_id = item_row[1]
+        # ALTERAÇÃO: Usa quantity atualizada se foi modificada, senão usa a do banco
+        item_quantity = quantity if quantity is not None else item_row[2]
+        
+        cur.execute("SELECT USER_ID FROM CARTS WHERE ID = ?", (item_cart_id,))
+        cart_user_row = cur.fetchone()
+        item_user_id = cart_user_row[0] if cart_user_row else user_id
+        
         # Atualiza extras se fornecidos (independente de notes)
         if extras is not None:
-            # Valida conforme regras do produto deste item
-            cur.execute("SELECT PRODUCT_ID, QUANTITY FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
-            row = cur.fetchone()
-            if not row:
-                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
-            product_id = row[0]
-            item_quantity = row[1]  # Quantidade do item no carrinho (pode ter sido atualizada)
+            # ALTERAÇÃO: Usa product_id já obtido acima
+            product_id = item_product_id
             
             rules = _get_product_rules(cur, product_id)
             for extra in extras:
@@ -1343,18 +1423,14 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         if base_modifications is not None:
             # Remove e recria TYPE='base'
             cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'base';", (cart_item_id,))
-            # Precisamos do product_id para validar regras
-            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
-            row = cur.fetchone()
-            if not row:
-                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
-            product_id = row[0]
+            # ALTERAÇÃO: Usa product_id já obtido acima (evita query duplicada)
+            product_id = item_product_id
             rules = _get_product_rules(cur, product_id)
             for bm in base_modifications:
                 try:
                     ing_id = int(bm.get("ingredient_id"))
                     delta = int(bm.get("delta", 0))
-                except Exception:
+                except (ValueError, TypeError):
                     continue
                 rule = rules.get(ing_id)
                 if not rule or float(rule["portions"]) == 0.0 or delta == 0:
@@ -1366,6 +1442,19 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
                     "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
                     (cart_item_id, ing_id, delta, unit_price)
                 )
+        
+        # ALTERAÇÃO: Recria reservas temporárias APENAS UMA VEZ após todas as atualizações
+        # (quantidade, extras, base_modifications) - remove duplicação
+        # Recria reservas temporárias para todo o carrinho
+        success, error_code, message = _recreate_temporary_reservations_for_cart(
+            cart_id=item_cart_id,
+            user_id=item_user_id,
+            cur=cur
+        )
+        
+        if not success:
+            conn.rollback()
+            return (False, error_code, message)
         
         conn.commit()
         return (True, None, "Item atualizado com sucesso")
@@ -1466,15 +1555,20 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
         if notes is not None:
             cur.execute("UPDATE CART_ITEMS SET NOTES = ? WHERE ID = ?;", (notes, cart_item_id))
 
+        # ALTERAÇÃO: Busca informações do item uma única vez (product_id, quantity atual)
+        cur.execute("SELECT PRODUCT_ID, QUANTITY FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+        item_row = cur.fetchone()
+        if not item_row:
+            return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+        
+        item_product_id = item_row[0]
+        # ALTERAÇÃO: Usa quantity atualizada se foi modificada, senão usa a do banco
+        item_quantity = quantity if quantity is not None else item_row[1]
+
         # Atualiza extras se fornecidos (independente de notes)
         if extras is not None:
-            # Valida conforme regras do produto deste item
-            cur.execute("SELECT PRODUCT_ID, QUANTITY FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
-            row = cur.fetchone()
-            if not row:
-                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
-            product_id = row[0]
-            item_quantity = row[1]  # Quantidade do item no carrinho (pode ter sido atualizada)
+            # ALTERAÇÃO: Usa product_id já obtido acima
+            product_id = item_product_id
             
             rules = _get_product_rules(cur, product_id)
             for extra in extras:
@@ -1547,17 +1641,14 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
         # Atualiza base_modifications se fornecido
         if base_modifications is not None:
             cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'base';", (cart_item_id,))
-            cur.execute("SELECT PRODUCT_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
-            row = cur.fetchone()
-            if not row:
-                return (False, "ITEM_NOT_FOUND", "Item não encontrado")
-            product_id = row[0]
+            # ALTERAÇÃO: Usa product_id já obtido acima (evita query duplicada)
+            product_id = item_product_id
             rules = _get_product_rules(cur, product_id)
             for bm in base_modifications:
                 try:
                     ing_id = int(bm.get("ingredient_id"))
                     delta = int(bm.get("delta", 0))
-                except Exception:
+                except (ValueError, TypeError):
                     continue
                 rule = rules.get(ing_id)
                 if not rule or float(rule["portions"]) == 0.0 or delta == 0:
@@ -1569,6 +1660,19 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
                     "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, 0, 'base', ?, ?);",
                     (cart_item_id, ing_id, delta, unit_price)
                 )
+        
+        # ALTERAÇÃO: Recria reservas temporárias APENAS UMA VEZ após todas as atualizações (visitante)
+        # (quantidade, extras, base_modifications) - remove duplicação
+        # Recria reservas temporárias para todo o carrinho
+        success, error_code, message = _recreate_temporary_reservations_for_cart(
+            cart_id=cart_id,  # ALTERAÇÃO: Usa cart_id já validado (função recebe cart_id como parâmetro)
+            user_id=None,  # Visitante
+            cur=cur
+        )
+        
+        if not success:
+            conn.rollback()
+            return (False, error_code, message)
 
         conn.commit()
         return (True, None, "Item atualizado com sucesso")
@@ -1598,6 +1702,602 @@ def _get_product_rules(cur, product_id):
             "max_quantity": int(row[3] or 0)
         }
     return rules
+
+
+# =====================================================
+# SISTEMA DE RESERVAS TEMPORÁRIAS - FUNÇÕES AUXILIARES
+# =====================================================
+
+def _calculate_item_ingredient_consumption(product_id, quantity, extras=None, base_modifications=None, cur=None):
+    """
+    Calcula consumo total de insumos de um item (produto + extras + base_modifications).
+    
+    Args:
+        product_id: ID do produto
+        quantity: Quantidade do item
+        extras: Lista de extras [{ingredient_id: int, quantity: int}]
+        base_modifications: Lista de base_modifications [{ingredient_id: int, delta: int}]
+        cur: Cursor do banco (opcional)
+    
+    Returns:
+        dict: {ingredient_id: consumption_quantity} onde consumption_quantity está na unidade do estoque
+    """
+    # ALTERAÇÃO: Validação de entrada
+    try:
+        product_id = int(product_id)
+        quantity = int(quantity)
+        if product_id <= 0 or quantity <= 0:
+            raise ValueError("product_id e quantity devem ser positivos")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Erro de validação em _calculate_item_ingredient_consumption: {e}")
+        return {}
+    
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        consumption = {}
+        
+        # 1. Calcular consumo dos ingredientes da receita base (portions > 0)
+        cur.execute("""
+            SELECT 
+                pi.INGREDIENT_ID,
+                pi.PORTIONS,
+                i.BASE_PORTION_QUANTITY,
+                i.BASE_PORTION_UNIT,
+                i.STOCK_UNIT
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ?
+              AND pi.PORTIONS > 0
+        """, (product_id,))
+        
+        for row in cur.fetchall():
+            ing_id, portions, base_portion_quantity, base_portion_unit, stock_unit = row
+            
+            try:
+                # Calcula consumo convertido para unidade do estoque
+                consumption_qty = stock_service.calculate_consumption_in_stock_unit(
+                    portions=portions or 0,
+                    base_portion_quantity=base_portion_quantity or 1,
+                    base_portion_unit=base_portion_unit or 'un',
+                    stock_unit=stock_unit or 'un',
+                    item_quantity=quantity
+                )
+                
+                if ing_id not in consumption:
+                    consumption[ing_id] = Decimal('0')
+                consumption[ing_id] += consumption_qty
+            except ValueError as e:
+                logger.warning(f"Erro ao calcular consumo do ingrediente {ing_id}: {e}")
+                continue
+        
+        # 2. Calcular consumo dos extras (se fornecidos)
+        # ALTERAÇÃO: Otimização - busca informações de todos os extras em batch para evitar N+1 queries
+        if extras:
+            # Coleta todos os IDs de ingredientes extras
+            extra_ingredient_ids = []
+            extra_quantities = {}
+            for extra in extras:
+                try:
+                    ing_id = int(extra.get("ingredient_id", 0))
+                    extra_qty = int(extra.get("quantity", 1))
+                    if ing_id > 0 and extra_qty > 0:
+                        extra_ingredient_ids.append(ing_id)
+                        extra_quantities[ing_id] = extra_qty
+                except (ValueError, TypeError):
+                    continue
+            
+            # Busca informações de todos os extras de uma vez
+            extras_info = {}
+            if extra_ingredient_ids:
+                placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                cur.execute(f"""
+                    SELECT 
+                        ID,
+                        BASE_PORTION_QUANTITY,
+                        BASE_PORTION_UNIT,
+                        STOCK_UNIT
+                    FROM INGREDIENTS
+                    WHERE ID IN ({placeholders})
+                """, tuple(extra_ingredient_ids))
+                
+                for row in cur.fetchall():
+                    ing_id = row[0]
+                    extras_info[ing_id] = {
+                        'base_portion_quantity': row[1],
+                        'base_portion_unit': row[2],
+                        'stock_unit': row[3]
+                    }
+            
+            # Busca portions da receita base para todos os extras de uma vez
+            base_portions_map = {}
+            if extra_ingredient_ids:
+                placeholders = ', '.join(['?' for _ in extra_ingredient_ids])
+                cur.execute(f"""
+                    SELECT INGREDIENT_ID, PORTIONS
+                    FROM PRODUCT_INGREDIENTS
+                    WHERE PRODUCT_ID = ? AND INGREDIENT_ID IN ({placeholders})
+                """, (product_id, *extra_ingredient_ids))
+                
+                for row in cur.fetchall():
+                    base_portions_map[row[0]] = float(row[1] or 0)
+            
+            # Calcula consumo de cada extra
+            for ing_id in extra_ingredient_ids:
+                if ing_id not in extras_info:
+                    continue
+                
+                extra_qty = extra_quantities[ing_id]
+                info = extras_info[ing_id]
+                base_portion_quantity = info['base_portion_quantity']
+                base_portion_unit = info['base_portion_unit']
+                stock_unit = info['stock_unit']
+                
+                try:
+                    # Calcula consumo do extra convertido para unidade do estoque
+                    # IMPORTANTE: Verificar se o ingrediente já está na receita base
+                    # Se estiver, o extra consome apenas a quantidade adicional
+                    base_portions = base_portions_map.get(ing_id, 0)
+                    
+                    if base_portions > 0:
+                        # Ingrediente está na receita base, extra consome apenas quantidade adicional
+                        base_total_portions = base_portions * quantity
+                        extra_portions_to_consume = max(0, extra_qty - base_total_portions)
+                        
+                        if extra_portions_to_consume > 0:
+                            extra_consumption = stock_service.calculate_consumption_in_stock_unit(
+                                portions=extra_portions_to_consume,
+                                base_portion_quantity=base_portion_quantity or 1,
+                                base_portion_unit=base_portion_unit or 'un',
+                                stock_unit=stock_unit or 'un',
+                                item_quantity=quantity
+                            )
+                            
+                            if ing_id not in consumption:
+                                consumption[ing_id] = Decimal('0')
+                            consumption[ing_id] += extra_consumption
+                    else:
+                        # Ingrediente não está na receita base, consome quantidade total do extra
+                        extra_consumption = stock_service.calculate_consumption_in_stock_unit(
+                            portions=extra_qty,
+                            base_portion_quantity=base_portion_quantity or 1,
+                            base_portion_unit=base_portion_unit or 'un',
+                            stock_unit=stock_unit or 'un',
+                            item_quantity=quantity
+                        )
+                        
+                        if ing_id not in consumption:
+                            consumption[ing_id] = Decimal('0')
+                        consumption[ing_id] += extra_consumption
+                except ValueError as e:
+                    logger.warning(f"Erro ao calcular consumo do extra {ing_id}: {e}")
+                    continue
+        
+        # 3. Calcular consumo das base_modifications (apenas deltas positivos)
+        # ALTERAÇÃO: Otimização - busca informações de todos os base_modifications em batch
+        if base_modifications:
+            # Coleta todos os IDs de ingredientes de base_modifications
+            bm_ingredient_ids = []
+            bm_deltas = {}
+            for bm in base_modifications:
+                try:
+                    delta = int(bm.get("delta", 0))
+                    if delta <= 0:  # Apenas deltas positivos consomem estoque
+                        continue
+                    ing_id = int(bm.get("ingredient_id", 0))
+                    if ing_id > 0:
+                        bm_ingredient_ids.append(ing_id)
+                        bm_deltas[ing_id] = delta
+                except (ValueError, TypeError):
+                    continue
+            
+            # Busca informações de todos os base_modifications de uma vez
+            bm_info = {}
+            if bm_ingredient_ids:
+                placeholders = ', '.join(['?' for _ in bm_ingredient_ids])
+                cur.execute(f"""
+                    SELECT 
+                        ID,
+                        BASE_PORTION_QUANTITY,
+                        BASE_PORTION_UNIT,
+                        STOCK_UNIT
+                    FROM INGREDIENTS
+                    WHERE ID IN ({placeholders})
+                """, tuple(bm_ingredient_ids))
+                
+                for row in cur.fetchall():
+                    ing_id = row[0]
+                    bm_info[ing_id] = {
+                        'base_portion_quantity': row[1],
+                        'base_portion_unit': row[2],
+                        'stock_unit': row[3]
+                    }
+            
+            # Calcula consumo de cada base_modification
+            for ing_id in bm_ingredient_ids:
+                if ing_id not in bm_info:
+                    continue
+                
+                delta = bm_deltas[ing_id]
+                info = bm_info[ing_id]
+                base_portion_quantity = info['base_portion_quantity']
+                base_portion_unit = info['base_portion_unit']
+                stock_unit = info['stock_unit']
+                
+                try:
+                    # DELTA é em porções, então multiplica por base_portion_quantity
+                    delta_consumption = (
+                        Decimal(str(delta)) * 
+                        Decimal(str(base_portion_quantity or 1))
+                    )
+                    
+                    # ALTERAÇÃO: Importa _convert_unit no topo (já está sendo usado)
+                    # Converte para unidade do estoque
+                    from .stock_service import _convert_unit
+                    total_bm = _convert_unit(
+                        delta_consumption,
+                        base_portion_unit or 'un',
+                        stock_unit or 'un'
+                    ) * Decimal(str(quantity))
+                    
+                    if ing_id not in consumption:
+                        consumption[ing_id] = Decimal('0')
+                    consumption[ing_id] += total_bm
+                except ValueError as e:
+                    logger.warning(f"Erro ao calcular consumo da base_modification {ing_id}: {e}")
+                    continue
+        
+        return consumption
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao calcular consumo de insumos: {e}", exc_info=True)
+        return {}
+    finally:
+        if should_close and conn:
+            conn.close()
+
+
+def _create_temporary_reservations_for_item(cart_id, product_id, quantity, extras=None, base_modifications=None, user_id=None, cur=None):
+    """
+    Cria reservas temporárias para um item do carrinho.
+    
+    Args:
+        cart_id: ID do carrinho
+        product_id: ID do produto
+        quantity: Quantidade do item
+        extras: Lista de extras (opcional)
+        base_modifications: Lista de base_modifications (opcional)
+        user_id: ID do usuário (opcional, None para visitante)
+        cur: Cursor do banco (opcional)
+    
+    Returns:
+        tuple: (success: bool, error_code: str, message: str, reservation_ids: list)
+    """
+    # ALTERAÇÃO: Validação de entrada
+    try:
+        cart_id = int(cart_id) if cart_id else None
+        product_id = int(product_id) if product_id else None
+        quantity = int(quantity) if quantity else 0
+        if not cart_id or not product_id or quantity <= 0:
+            raise ValueError("cart_id, product_id e quantity devem ser válidos e positivos")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Erro de validação em _create_temporary_reservations_for_item: {e}")
+        return (False, "VALIDATION_ERROR", f"Parâmetros inválidos: {str(e)}", [])
+    
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # Calcula consumo total de insumos
+        consumption = _calculate_item_ingredient_consumption(
+            product_id=product_id,
+            quantity=quantity,
+            extras=extras,
+            base_modifications=base_modifications,
+            cur=cur
+        )
+        
+        if not consumption:
+            # Não há consumo de insumos (produto sem ingredientes?)
+            return (True, None, "Nenhum insumo a reservar", [])
+        
+        # Gera session_id: para visitantes usa cart_id, para usuários usa user_id
+        if user_id:
+            session_id = f"user_{user_id}_cart_{cart_id}"
+        else:
+            session_id = f"cart_{cart_id}"
+        
+        reservation_ids = []
+        
+        # Cria reserva temporária para cada insumo
+        for ingredient_id, consumption_qty in consumption.items():
+            # Verifica se há estoque disponível antes de criar reserva
+            available_stock = stock_service.get_ingredient_available_stock(ingredient_id, cur)
+            
+            if available_stock < consumption_qty:
+                # Estoque insuficiente - limpa reservas já criadas e retorna erro
+                if reservation_ids:
+                    # Limpa reservas já criadas
+                    for res_id in reservation_ids:
+                        try:
+                            cur.execute("DELETE FROM TEMPORARY_RESERVATIONS WHERE ID = ?", (res_id,))
+                        except Exception as e:
+                            logger.warning(f"Erro ao limpar reserva {res_id}: {e}")
+                
+                # Busca nome do insumo para mensagem de erro
+                cur.execute("SELECT NAME FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
+                row = cur.fetchone()
+                ing_name = row[0] if row else f"Ingrediente ID {ingredient_id}"
+                
+                return (
+                    False,
+                    "INSUFFICIENT_STOCK",
+                    f"Estoque insuficiente para '{ing_name}'. Disponível: {available_stock:.3f}, Necessário: {consumption_qty:.3f}",
+                    []
+                )
+            
+            # Calcula data de expiração (TTL de 10 minutos)
+            expires_at = datetime.now() + timedelta(minutes=10)
+            
+            # ALTERAÇÃO: Converte Decimal para string para preservar precisão (evita perda ao converter para float)
+            # Cria reserva temporária diretamente (dentro da transação existente)
+            try:
+                # ALTERAÇÃO: Mantém precisão usando Decimal ao invés de float
+                consumption_qty_value = float(consumption_qty)  # Firebird requer float, mas preservamos precisão no cálculo
+                cur.execute("""
+                    INSERT INTO TEMPORARY_RESERVATIONS 
+                    (INGREDIENT_ID, QUANTITY, SESSION_ID, USER_ID, CART_ID, EXPIRES_AT)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    RETURNING ID
+                """, (ingredient_id, consumption_qty_value, session_id, user_id, cart_id, expires_at))
+                
+                reservation_id = cur.fetchone()[0]
+                reservation_ids.append(reservation_id)
+            except fdb.Error as e:
+                # ALTERAÇÃO: Tratamento específico para erros de banco de dados
+                # Erro ao criar reserva - limpa reservas já criadas e retorna erro
+                logger.error(f"Erro ao criar reserva temporária para ingrediente {ingredient_id}: {e}", exc_info=True)
+                
+                if reservation_ids:
+                    for res_id in reservation_ids:
+                        try:
+                            cur.execute("DELETE FROM TEMPORARY_RESERVATIONS WHERE ID = ?", (res_id,))
+                        except fdb.Error as e2:
+                            logger.warning(f"Erro ao limpar reserva {res_id}: {e2}")
+                
+                return (False, "DATABASE_ERROR", f"Erro ao criar reserva temporária: {str(e)}", [])
+            except Exception as e:
+                # ALTERAÇÃO: Captura outros erros inesperados
+                logger.error(f"Erro inesperado ao criar reserva temporária para ingrediente {ingredient_id}: {e}", exc_info=True)
+                
+                if reservation_ids:
+                    for res_id in reservation_ids:
+                        try:
+                            cur.execute("DELETE FROM TEMPORARY_RESERVATIONS WHERE ID = ?", (res_id,))
+                        except Exception as e2:
+                            logger.warning(f"Erro ao limpar reserva {res_id}: {e2}")
+                
+                return (False, "RESERVATION_ERROR", f"Erro ao criar reserva temporária: {str(e)}", [])
+        
+        return (True, None, f"{len(reservation_ids)} reservas temporárias criadas", reservation_ids)
+        
+    except Exception as e:
+        logger.error(f"Erro ao criar reservas temporárias: {e}", exc_info=True)
+        return (False, "RESERVATION_ERROR", f"Erro ao criar reservas temporárias: {str(e)}", [])
+    finally:
+        if should_close and conn:
+            conn.close()
+
+
+def _clear_temporary_reservations_for_item(cart_item_id, user_id=None, cart_id=None, cur=None):
+    """
+    Limpa reservas temporárias de um item do carrinho.
+    
+    Args:
+        cart_item_id: ID do item do carrinho
+        user_id: ID do usuário (opcional)
+        cart_id: ID do carrinho (opcional)
+        cur: Cursor do banco (opcional)
+    
+    Returns:
+        tuple: (success: bool, cleared_count: int)
+    """
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # Busca informações do item para calcular consumo
+        cur.execute("""
+            SELECT ci.PRODUCT_ID, ci.QUANTITY, ci.CART_ID, c.USER_ID
+            FROM CART_ITEMS ci
+            JOIN CARTS c ON ci.CART_ID = c.ID
+            WHERE ci.ID = ?
+        """, (cart_item_id,))
+        
+        row = cur.fetchone()
+        if not row:
+            return (True, 0)
+        
+        item_product_id, item_quantity, item_cart_id, item_user_id = row
+        
+        # Busca extras e base_modifications do item
+        cur.execute("""
+            SELECT INGREDIENT_ID, QUANTITY, TYPE, DELTA
+            FROM CART_ITEM_EXTRAS
+            WHERE CART_ITEM_ID = ?
+        """, (cart_item_id,))
+        
+        extras = []
+        base_modifications = []
+        
+        for row in cur.fetchall():
+            ing_id, qty, extra_type, delta = row
+            if extra_type == 'extra':
+                extras.append({"ingredient_id": ing_id, "quantity": qty})
+            elif extra_type == 'base' and delta:
+                base_modifications.append({"ingredient_id": ing_id, "delta": delta})
+        
+        # Calcula consumo para limpar reservas correspondentes
+        # Gera session_id
+        if item_user_id:
+            session_id = f"user_{item_user_id}_cart_{item_cart_id}"
+        else:
+            session_id = f"cart_{item_cart_id}"
+        
+        # Limpa reservas temporárias do carrinho (todas as reservas do carrinho serão recriadas)
+        # Isso é mais seguro do que tentar limpar apenas as reservas deste item
+        # Porque pode haver sobreposição entre itens
+        cleared_count = 0
+        
+        # Limpa reservas expiradas primeiro
+        cur.execute("""
+            DELETE FROM TEMPORARY_RESERVATIONS
+            WHERE EXPIRES_AT <= CURRENT_TIMESTAMP
+        """)
+        cleared_count += cur.rowcount
+        
+        # Limpa reservas do carrinho (serão recriadas quando necessário)
+        cur.execute("""
+            DELETE FROM TEMPORARY_RESERVATIONS
+            WHERE CART_ID = ?
+        """, (item_cart_id,))
+        cleared_count += cur.rowcount
+        
+        if should_close and conn:
+            conn.commit()
+        
+        return (True, cleared_count)
+        
+    except Exception as e:
+        logger.error(f"Erro ao limpar reservas temporárias: {e}", exc_info=True)
+        return (False, 0)
+    finally:
+        if should_close and conn:
+            conn.close()
+
+
+def _recreate_temporary_reservations_for_cart(cart_id, user_id=None, cur=None):
+    """
+    Recria reservas temporárias para todos os itens do carrinho.
+    Usado após atualizar quantidade ou modificar itens.
+    
+    Args:
+        cart_id: ID do carrinho
+        user_id: ID do usuário (opcional, None para visitante)
+        cur: Cursor do banco (opcional)
+    
+    Returns:
+        tuple: (success: bool, error_code: str, message: str)
+    """
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # Busca todos os itens do carrinho
+        cur.execute("""
+            SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY
+            FROM CART_ITEMS ci
+            WHERE ci.CART_ID = ?
+        """, (cart_id,))
+        
+        items = cur.fetchall()
+        
+        # ALTERAÇÃO: Limpa reservas expiradas primeiro para liberar estoque
+        # Limpa reservas expiradas primeiro (otimização)
+        cur.execute("""
+            DELETE FROM TEMPORARY_RESERVATIONS
+            WHERE EXPIRES_AT <= CURRENT_TIMESTAMP
+        """)
+        
+        # Limpa todas as reservas temporárias do carrinho antes de recriar
+        cur.execute("""
+            DELETE FROM TEMPORARY_RESERVATIONS
+            WHERE CART_ID = ?
+        """, (cart_id,))
+        
+        # Cria reservas temporárias para cada item
+        for item_id, product_id, quantity in items:
+            # Busca extras e base_modifications do item
+            cur.execute("""
+                SELECT INGREDIENT_ID, QUANTITY, TYPE, DELTA
+                FROM CART_ITEM_EXTRAS
+                WHERE CART_ITEM_ID = ?
+            """, (item_id,))
+            
+            extras = []
+            base_modifications = []
+            
+            for row in cur.fetchall():
+                ing_id, qty, extra_type, delta = row
+                if extra_type == 'extra':
+                    extras.append({"ingredient_id": ing_id, "quantity": qty})
+                elif extra_type == 'base' and delta:
+                    base_modifications.append({"ingredient_id": ing_id, "delta": delta})
+            
+            # Cria reservas temporárias para este item
+            success, error_code, message, _ = _create_temporary_reservations_for_item(
+                cart_id=cart_id,
+                product_id=product_id,
+                quantity=quantity,
+                extras=extras if extras else None,
+                base_modifications=base_modifications if base_modifications else None,
+                user_id=user_id,
+                cur=cur
+            )
+            
+            if not success:
+                # Erro ao criar reservas - limpa todas as reservas e retorna erro
+                cur.execute("""
+                    DELETE FROM TEMPORARY_RESERVATIONS
+                    WHERE CART_ID = ?
+                """, (cart_id,))
+                
+                if should_close and conn:
+                    conn.rollback()
+                
+                return (False, error_code, message)
+        
+        if should_close and conn:
+            conn.commit()
+        
+        return (True, None, "Reservas temporárias recriadas com sucesso")
+        
+    except fdb.Error as e:
+        # ALTERAÇÃO: Tratamento específico para erros de banco de dados
+        logger.error(f"Erro de banco de dados ao recriar reservas temporárias: {e}", exc_info=True)
+        if should_close and conn:
+            conn.rollback()
+        return (False, "DATABASE_ERROR", f"Erro ao recriar reservas temporárias: {str(e)}")
+    except Exception as e:
+        # ALTERAÇÃO: Captura outros erros inesperados
+        logger.error(f"Erro inesperado ao recriar reservas temporárias: {e}", exc_info=True)
+        if should_close and conn:
+            conn.rollback()
+        return (False, "RESERVATION_ERROR", f"Erro ao recriar reservas temporárias: {str(e)}")
+    finally:
+        if should_close and conn:
+            conn.close()
 
 
 def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur):
@@ -1790,9 +2490,41 @@ def remove_cart_item(user_id, cart_item_id):
         # (garante remoção mesmo se não houver cascade configurado)
         cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;", (cart_item_id,))
         
-        # Remove o item
+        # ALTERAÇÃO: Busca cart_id e user_id ANTES de remover item para evitar queries após deleção
+        cur.execute("SELECT CART_ID FROM CART_ITEMS WHERE ID = ?", (cart_item_id,))
+        cart_row = cur.fetchone()
+        if not cart_row:
+            return (False, "ITEM_NOT_FOUND", "Item não encontrado")
+        
+        item_cart_id = cart_row[0]
+        
+        # Busca user_id do carrinho antes de remover
+        cur.execute("SELECT USER_ID FROM CARTS WHERE ID = ?", (item_cart_id,))
+        cart_user_row = cur.fetchone()
+        item_user_id = cart_user_row[0] if cart_user_row else user_id
+        
+        # ALTERAÇÃO: Remove o item ANTES de recriar reservas para evitar race condition
+        # Remove o item primeiro
         sql = "DELETE FROM CART_ITEMS WHERE ID = ?;"
         cur.execute(sql, (cart_item_id,))
+        
+        # NOVA INTEGRAÇÃO: Recria reservas temporárias após remover item
+        # (para atualizar reservas dos itens restantes)
+        success, error_code, message = _recreate_temporary_reservations_for_cart(
+            cart_id=item_cart_id,
+            user_id=item_user_id,
+            cur=cur
+        )
+        
+        # Nota: Não retorna erro se falhar ao recriar reservas (item já foi removido)
+        # Apenas loga o erro, mas commit a transação mesmo assim
+        if not success:
+            logger.warning(f"Erro ao recriar reservas temporárias após remover item: {error_code} - {message}")
+            # ALTERAÇÃO: Em caso de erro, limpa todas as reservas do carrinho para evitar inconsistências
+            try:
+                cur.execute("DELETE FROM TEMPORARY_RESERVATIONS WHERE CART_ID = ?", (item_cart_id,))
+            except Exception as e:
+                logger.error(f"Erro ao limpar reservas temporárias após falha: {e}")
         
         conn.commit()
         return (True, None, "Item removido do carrinho com sucesso")
@@ -1830,8 +2562,29 @@ def remove_cart_item_by_cart(cart_id, cart_item_id):
         # (garante remoção mesmo se não houver cascade configurado)
         cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ?;", (cart_item_id,))
         
-        # Remove o item
+        # ALTERAÇÃO: Remove o item ANTES de recriar reservas para evitar race condition
+        # Remove o item primeiro
         cur.execute("DELETE FROM CART_ITEMS WHERE ID = ?;", (cart_item_id,))
+        
+        # NOVA INTEGRAÇÃO: Recria reservas temporárias após remover item (visitante)
+        # (para atualizar reservas dos itens restantes)
+        # Recria reservas temporárias para todos os itens restantes do carrinho
+        success, error_code, message = _recreate_temporary_reservations_for_cart(
+            cart_id=cart_id,
+            user_id=None,  # Visitante
+            cur=cur
+        )
+        
+        # Nota: Não retorna erro se falhar ao recriar reservas (item já foi removido)
+        # Apenas loga o erro, mas commit a transação mesmo assim
+        if not success:
+            logger.warning(f"Erro ao recriar reservas temporárias após remover item: {error_code} - {message}")
+            # ALTERAÇÃO: Em caso de erro, limpa todas as reservas do carrinho para evitar inconsistências
+            try:
+                cur.execute("DELETE FROM TEMPORARY_RESERVATIONS WHERE CART_ID = ?", (cart_id,))
+            except Exception as e:
+                logger.error(f"Erro ao limpar reservas temporárias após falha: {e}")
+        
         conn.commit()
         return (True, None, "Item removido do carrinho com sucesso")
     except fdb.Error as e:
@@ -1858,6 +2611,13 @@ def clear_cart(user_id):
         
         if cart:
             cart_id = cart[0]
+            # NOVA INTEGRAÇÃO: Limpa reservas temporárias do carrinho antes de remover itens
+            # Usa a função de limpeza do stock_service que aceita user_id e cart_id
+            cur.execute("""
+                DELETE FROM TEMPORARY_RESERVATIONS
+                WHERE (USER_ID = ? AND CART_ID = ?) OR CART_ID = ?
+            """, (user_id, cart_id, cart_id))
+            
             # Remove todos os itens (cascade remove os extras)
             sql = "DELETE FROM CART_ITEMS WHERE CART_ID = ?;"
             cur.execute(sql, (cart_id,))
