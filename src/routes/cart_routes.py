@@ -1,8 +1,10 @@
 from flask import Blueprint, request, jsonify
+import logging
 from ..services import cart_service
 from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 
 cart_bp = Blueprint('cart', __name__)
+logger = logging.getLogger(__name__)
 
 def _validate_extras(extras):
     """Valida extras de forma centralizada"""
@@ -46,7 +48,8 @@ def get_cart_route():
         return jsonify(cart_summary), 200
         
     except Exception as e:
-        print(f"Erro ao buscar carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao buscar carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -68,8 +71,7 @@ def add_item_to_cart_route():
         quantity = data.get('quantity', 1)
         extras = data.get('extras', [])
         notes = data.get('notes')
-        base_modifications = data.get('base_modifications')
-        base_modifications = data.get('base_modifications')
+        # ALTERAÇÃO: Removida duplicação de atribuição de base_modifications
         base_modifications = data.get('base_modifications', [])
         
         # Validações básicas
@@ -99,7 +101,8 @@ def add_item_to_cart_route():
         }), 201
         
     except Exception as e:
-        print(f"Erro ao adicionar item ao carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao adicionar item ao carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -152,7 +155,13 @@ def smart_add_item_route():
         if user_id:
             success, error_code, message = cart_service.add_item_to_cart(user_id, product_id, quantity, extras, notes, base_modifications)
             if not success:
-                status_code = 404 if error_code == "PRODUCT_NOT_FOUND" else 500
+                # NOVO: Retorna status_code correto para diferentes tipos de erro
+                if error_code == "PRODUCT_NOT_FOUND":
+                    status_code = 404
+                elif error_code == "INSUFFICIENT_STOCK":
+                    status_code = 422  # Unprocessable Entity - erro de validação de estoque
+                else:
+                    status_code = 500
                 return jsonify({"error": message or "Erro ao adicionar item"}), status_code
             
             cart_summary = cart_service.get_cart_summary(user_id)
@@ -167,7 +176,13 @@ def smart_add_item_route():
         if guest_cart_id:
             success, error_code, message = cart_service.add_item_to_cart_by_cart_id(guest_cart_id, product_id, quantity, extras, notes, base_modifications)
             if not success:
-                status_code = 404 if error_code in ("PRODUCT_NOT_FOUND", "CART_NOT_FOUND") else 500
+                # NOVO: Retorna status_code correto para diferentes tipos de erro
+                if error_code in ("PRODUCT_NOT_FOUND", "CART_NOT_FOUND"):
+                    status_code = 404
+                elif error_code == "INSUFFICIENT_STOCK":
+                    status_code = 422  # Unprocessable Entity - erro de validação de estoque
+                else:
+                    status_code = 500
                 return jsonify({"error": message or "Erro ao adicionar item"}), status_code
             
             cart_summary = cart_service.get_cart_summary_by_cart_id(guest_cart_id)
@@ -185,7 +200,12 @@ def smart_add_item_route():
         new_cart_id = guest_cart["id"]
         success, error_code, message = cart_service.add_item_to_cart_by_cart_id(new_cart_id, product_id, quantity, extras, notes, base_modifications)
         if not success:
-            return jsonify({"error": message or "Erro ao adicionar item"}), 500
+            # NOVO: Retorna status_code correto para diferentes tipos de erro
+            if error_code == "INSUFFICIENT_STOCK":
+                status_code = 422  # Unprocessable Entity - erro de validação de estoque
+            else:
+                status_code = 500
+            return jsonify({"error": message or "Erro ao adicionar item"}), status_code
         cart_summary = cart_service.get_cart_summary_by_cart_id(new_cart_id)
         return jsonify({
             "message": message, 
@@ -194,7 +214,8 @@ def smart_add_item_route():
             "is_authenticated": False
         }), 201
     except Exception as e:
-        print(f"Erro no smart add: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro no smart add: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -208,8 +229,7 @@ def smart_update_item_route(cart_item_id):
         quantity = data.get('quantity')
         extras = data.get('extras')
         notes = data.get('notes')
-        base_modifications = data.get('base_modifications')
-        base_modifications = data.get('base_modifications')
+        # ALTERAÇÃO: Removida duplicação de atribuição de base_modifications
         base_modifications = data.get('base_modifications')
         guest_cart_id = data.get('guest_cart_id')
 
@@ -230,7 +250,15 @@ def smart_update_item_route(cart_item_id):
         if user_id:
             success, error_code, message = cart_service.update_cart_item(user_id, cart_item_id, quantity, extras, notes, base_modifications)
             if not success:
-                status = 404 if error_code in ("ITEM_NOT_FOUND",) else (400 if error_code == "INVALID_QUANTITY" else 500)
+                # NOVO: Retorna status_code correto para diferentes tipos de erro
+                if error_code == "ITEM_NOT_FOUND":
+                    status = 404
+                elif error_code == "INVALID_QUANTITY":
+                    status = 400
+                elif error_code == "INSUFFICIENT_STOCK":
+                    status = 422  # Unprocessable Entity - erro de validação de estoque
+                else:
+                    status = 500
                 return jsonify({"error": message}), status
             cart_summary = cart_service.get_cart_summary(user_id)
             return jsonify({
@@ -244,7 +272,15 @@ def smart_update_item_route(cart_item_id):
             return jsonify({"error": "guest_cart_id é obrigatório para convidados"}), 400
         success, error_code, message = cart_service.update_cart_item_by_cart(guest_cart_id, cart_item_id, quantity, extras, notes, base_modifications)
         if not success:
-            status = 404 if error_code in ("ITEM_NOT_FOUND",) else (400 if error_code == "INVALID_QUANTITY" else 500)
+            # NOVO: Retorna status_code correto para diferentes tipos de erro
+            if error_code == "ITEM_NOT_FOUND":
+                status = 404
+            elif error_code == "INVALID_QUANTITY":
+                status = 400
+            elif error_code == "INSUFFICIENT_STOCK":
+                status = 422  # Unprocessable Entity - erro de validação de estoque
+            else:
+                status = 500
             return jsonify({"error": message}), status
         cart_summary = cart_service.get_cart_summary_by_cart_id(guest_cart_id)
         return jsonify({
@@ -254,7 +290,8 @@ def smart_update_item_route(cart_item_id):
             "is_authenticated": False
         }), 200
     except Exception as e:
-        print(f"Erro ao atualizar item (smart): {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao atualizar item (smart): {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -301,7 +338,8 @@ def smart_remove_item_route(cart_item_id):
             "is_authenticated": False
         }), 200
     except Exception as e:
-        print(f"Erro ao remover item (smart): {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao remover item (smart): {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -366,7 +404,8 @@ def update_cart_item_route(cart_item_id):
         }), 200
         
     except Exception as e:
-        print(f"Erro ao atualizar item do carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao atualizar item do carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -399,7 +438,8 @@ def remove_cart_item_route(cart_item_id):
         }), 200
         
     except Exception as e:
-        print(f"Erro ao remover item do carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao remover item do carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -424,7 +464,8 @@ def clear_cart_route():
         return jsonify({"message": message}), 200
         
     except Exception as e:
-        print(f"Erro ao limpar carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao limpar carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -449,7 +490,8 @@ def get_cart_summary_route():
         }), 200
         
     except Exception as e:
-        print(f"Erro ao buscar resumo do carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao buscar resumo do carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -469,7 +511,8 @@ def validate_cart_route():
             "availability_alerts": cart_summary["summary"].get("availability_alerts", [])
         }), 200
     except Exception as e:
-        print(f"Erro ao validar carrinho: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao validar carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -490,7 +533,8 @@ def get_guest_cart_route(cart_id):
             "is_authenticated": False
         }), 200
     except Exception as e:
-        print(f"Erro ao buscar carrinho de convidado: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao buscar carrinho de convidado: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -508,7 +552,8 @@ def validate_guest_cart_route(cart_id):
             "availability_alerts": cart_summary["summary"].get("availability_alerts", [])
         }), 200
     except Exception as e:
-        print(f"Erro ao validar carrinho de convidado: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao validar carrinho de convidado: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -528,7 +573,8 @@ def validate_guest_cart_for_order_route(cart_id):
             "cart_id": cart_id
         }), 200
     except Exception as e:
-        print(f"Erro ao validar carrinho para pedido: {e}")
+        # ALTERAÇÃO: Substituído print() por logging estruturado
+        logger.error(f"Erro ao validar carrinho para pedido: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -567,7 +613,6 @@ def claim_guest_cart_route():
         }), 200
         
     except Exception as e:
-        print(f"Erro ao reivindicar carrinho: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -627,5 +672,4 @@ def sync_cart_route():
         }), 200
         
     except Exception as e:
-        print(f"Erro ao sincronizar carrinho: {e}")
         return jsonify({"error": "Erro interno do servidor"}), 500

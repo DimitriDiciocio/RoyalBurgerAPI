@@ -1397,6 +1397,7 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
         current_stock_decimal = Decimal(str(current_stock or 0))
         min_threshold_decimal = Decimal(str(min_threshold or 0))
         
+        
         # Calcula reservas confirmadas (pedidos pendentes/confirmados/preparando)
         # IMPORTANTE: Precisa considerar conversão de unidades usando calculate_consumption_in_stock_unit
         # Mas por enquanto, vamos simplificar assumindo que já está na unidade correta
@@ -1442,8 +1443,10 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
         
         temporary_reservations = Decimal(str(cur.fetchone()[0] or 0))
         
-        # Estoque disponível = estoque_real - estoque_seguranca - reservas_confirmadas - reservas_brandas_ativas
-        available = current_stock_decimal - min_threshold_decimal - confirmed_reservations - temporary_reservations
+        # Estoque disponível = estoque_real - reservas_confirmadas - reservas_temporárias
+        # NOTA: MIN_STOCK_THRESHOLD é apenas um indicador de alerta para reabastecimento
+        # Não é descontado do estoque disponível - serve apenas para sinalizar ao admin/gerente
+        available = current_stock_decimal - confirmed_reservations - temporary_reservations
         
         # SIMPLIFICAÇÃO: Remove código relacionado a substitutos
         # TODO: FUTURO - Implementar validação de substitutos quando necessário
@@ -1517,9 +1520,13 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
         dict: {ingredient_id: available_stock (Decimal)}
     """
     if not ingredient_ids:
+        logger.warning("[STOCK_SERVICE] _batch_get_ingredient_available_stock chamado sem ingredient_ids")
         return {}
     
     try:
+        # LOG: Iniciando busca de estoque
+        logger.info(f"[STOCK_SERVICE] _batch_get_ingredient_available_stock: buscando estoque para {len(ingredient_ids)} ingredientes")
+        
         # Busca informações básicas de todos os ingredientes de uma vez
         placeholders = ', '.join(['?' for _ in ingredient_ids])
         cur.execute(f"""
@@ -1534,9 +1541,13 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
         """, tuple(ingredient_ids))
         
         ingredients_info = {}
-        for row in cur.fetchall():
+        ingredient_rows = cur.fetchall()
+        logger.info(f"[STOCK_SERVICE] Encontrados {len(ingredient_rows)} ingredientes no banco")
+        
+        for row in ingredient_rows:
             ing_id, current_stock, min_threshold, stock_unit, is_available = row
             if not is_available:
+                logger.debug(f"[STOCK_SERVICE] Ingrediente {ing_id} não disponível (IS_AVAILABLE = FALSE)")
                 ingredients_info[ing_id] = {
                     'current_stock': Decimal('0'),
                     'min_threshold': Decimal('0'),
@@ -1548,8 +1559,15 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
                     'current_stock': Decimal(str(current_stock or 0)),
                     'min_threshold': Decimal(str(min_threshold or 0)),
                     'stock_unit': stock_unit,
-                    'available_stock': Decimal('0')  # Será calculado abaixo
+                    'available_stock': Decimal('0'),  # Será calculado abaixo
+                    'is_available': is_available
                 }
+                # LOG: Estoque do ingrediente (SEMPRE logar para diagnóstico)
+                logger.info(f"[STOCK_SERVICE] 📦 Ingrediente {ing_id}: "
+                           f"CURRENT_STOCK={current_stock}, "
+                           f"MIN_STOCK_THRESHOLD={min_threshold}, "
+                           f"STOCK_UNIT={stock_unit}, "
+                           f"IS_AVAILABLE={is_available}")
         
         # OTIMIZAÇÃO: Busca reservas confirmadas de todos os ingredientes de uma vez
         # Agrupa por ingrediente e calcula consumo total
@@ -1571,7 +1589,10 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
         
         # Calcula reservas confirmadas por ingrediente
         confirmed_reservations = {ing_id: Decimal('0') for ing_id in ingredient_ids}
-        for row in cur.fetchall():
+        confirmed_rows = cur.fetchall()
+        logger.info(f"[STOCK_SERVICE] 📋 Reservas confirmadas: {len(confirmed_rows)} itens de pedidos encontrados")
+        
+        for row in confirmed_rows:
             ing_id, oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
             if ing_id not in ingredients_info:
                 continue
@@ -1586,9 +1607,20 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
                     item_quantity=oi_quantity or 1
                 )
                 confirmed_reservations[ing_id] += consumption
+                logger.debug(f"[STOCK_SERVICE] Reserva confirmada: ingrediente {ing_id}, consumo={consumption} {stock_unit}")
             except ValueError as e:
-                logger.warning(f"Erro ao calcular reserva confirmada para ingrediente {ing_id}: {e}", exc_info=True)
+                logger.warning(f"[STOCK_SERVICE] Erro ao calcular reserva confirmada para ingrediente {ing_id}: {e}", exc_info=True)
                 continue
+        
+        # LOG: Resumo de reservas confirmadas (SEMPRE logar se houver reservas)
+        total_confirmed = sum(confirmed_reservations.values())
+        if total_confirmed > 0:
+            confirmed_count = len([r for r in confirmed_reservations.values() if r > 0])
+            logger.info(f"[STOCK_SERVICE] 📋 Total de reservas confirmadas: {total_confirmed} (distribuído entre {confirmed_count} ingredientes)")
+            # LOG: Detalhes das reservas confirmadas
+            for ing_id, reserved in confirmed_reservations.items():
+                if reserved > 0:
+                    logger.info(f"[STOCK_SERVICE]   → Ingrediente {ing_id}: {reserved} unidades reservadas")
         
         # OTIMIZAÇÃO: Busca reservas temporárias de todos os ingredientes de uma vez
         cur.execute(f"""
@@ -1602,14 +1634,21 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
         """, tuple(ingredient_ids))
         
         temporary_reservations = {ing_id: Decimal('0') for ing_id in ingredient_ids}
-        for row in cur.fetchall():
+        temp_reservations_rows = cur.fetchall()
+        logger.info(f"[STOCK_SERVICE] Encontradas {len(temp_reservations_rows)} reservas temporárias ativas")
+        for row in temp_reservations_rows:
             ing_id, total_reservations = row
             temporary_reservations[ing_id] = Decimal(str(total_reservations or 0))
+        
+        # LOG: Reservas confirmadas
+        confirmed_count = sum(1 for r in confirmed_reservations.values() if r > 0)
+        logger.info(f"[STOCK_SERVICE] Reservas confirmadas encontradas para {confirmed_count} ingredientes")
         
         # Calcula estoque disponível para cada ingrediente
         availability_map = {}
         for ing_id in ingredient_ids:
             if ing_id not in ingredients_info:
+                logger.warning(f"[STOCK_SERVICE] Ingrediente {ing_id} não encontrado em ingredients_info")
                 availability_map[ing_id] = Decimal('0')
                 continue
             
@@ -1619,13 +1658,55 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
             confirmed = confirmed_reservations.get(ing_id, Decimal('0'))
             temporary = temporary_reservations.get(ing_id, Decimal('0'))
             
-            # Estoque disponível = estoque_real - estoque_seguranca - reservas_confirmadas - reservas_brandas_ativas
-            available = current_stock - min_threshold - confirmed - temporary
+            # NOTA: MIN_STOCK_THRESHOLD é uma margem mínima para gestão de capacidade do insumo
+            # Serve para sinalizar ao admin/gerente que deve ser comprado/atualizado o estoque
+            # Pode ser maior que o estoque atual - isso é apenas um sinal de que precisa reabastecer
+            # O threshold não bloqueia o uso do estoque, apenas serve como indicador de alerta
+            
+            # Estoque disponível = estoque_real - reservas_confirmadas - reservas_temporárias
+            # O threshold é apenas um indicador para alertas, não é descontado do estoque disponível
+            # Se o estoque ficar abaixo do threshold, é apenas um sinal para reabastecer
+            available = current_stock - confirmed - temporary
+            
+            
+            # LOG: Cálculo de estoque disponível (apenas em debug para evitar poluição de logs)
+            # ALTERAÇÃO: Logging otimizado - usar debug ao invés de info para detalhes rotineiros
+            logger.debug(f"[STOCK_SERVICE] Ingrediente {ing_id} ({info.get('stock_unit', 'N/A')}): "
+                        f"current_stock={current_stock}, "
+                        f"min_threshold={min_threshold}, "
+                        f"confirmed_reservations={confirmed}, "
+                        f"temporary_reservations={temporary}, "
+                        f"available={available}")
+            
             availability_map[ing_id] = max(Decimal('0'), available)
+            
+            # LOG: Estoque disponível final (SEMPRE logar se for 0)
+            if availability_map[ing_id] <= 0:
+                # Verificar a causa raiz do estoque zerado
+                if current_stock <= 0:
+                    logger.error(f"[STOCK_SERVICE] ❌ Ingrediente {ing_id} SEM ESTOQUE FÍSICO: CURRENT_STOCK = {current_stock}")
+                elif confirmed + temporary >= current_stock:
+                    logger.warning(f"[STOCK_SERVICE] ⚠️ Ingrediente {ing_id} SEM ESTOQUE DISPONÍVEL: "
+                                 f"reservas ({confirmed} confirmadas + {temporary} temporárias) consumiram todo o estoque disponível")
+                else:
+                    logger.warning(f"[STOCK_SERVICE] ⚠️ Ingrediente {ing_id} SEM ESTOQUE DISPONÍVEL: "
+                                 f"disponivel={availability_map[ing_id]}, "
+                                 f"current_stock={current_stock}, "
+                                 f"min_threshold={min_threshold} (apenas alerta), "
+                                 f"confirmed={confirmed}, "
+                                 f"temporary={temporary}, "
+                                 f"formula: {current_stock} - {confirmed} - {temporary} = {available}")
+            else:
+                # ALTERAÇÃO: Logging otimizado - usar debug para casos normais
+                logger.debug(f"[STOCK_SERVICE] ✅ Ingrediente {ing_id}: estoque disponível = {availability_map[ing_id]} {info['stock_unit']}")
+        
+        # LOG: Resumo
+        available_count = sum(1 for stock in availability_map.values() if stock > 0)
+        logger.info(f"[STOCK_SERVICE] Estoque disponível calculado: {available_count}/{len(ingredient_ids)} ingredientes com estoque > 0")
         
         return availability_map
     except Exception as e:
-        logger.error(f"Erro ao buscar estoque disponível em batch: {e}", exc_info=True)
+        logger.error(f"[STOCK_SERVICE] Erro ao buscar estoque disponível em batch: {e}", exc_info=True)
         return {}
 
 

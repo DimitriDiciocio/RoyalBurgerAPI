@@ -117,23 +117,12 @@ def create_user(user_data):
             if cur.fetchone():
                 return (None, "CPF_ALREADY_EXISTS", "Este CPF já está em uso por outra conta.")
 
-        # Debug: mostra os valores que serão inseridos
-        print(f"DEBUG - Inserindo usuário:")
-        print(f"  FULL_NAME: {full_name}")
-        print(f"  EMAIL: {email}")
-        print(f"  ROLE: {role}")
-        print(f"  DATE_OF_BIRTH: {date_of_birth} (tipo: {type(date_of_birth)})")
-        print(f"  PHONE: {phone}")
-        print(f"  CPF: {cpf}")
-        
         # Verifica se a data é válida antes de inserir
         if date_of_birth:
             try:
                 # Tenta converter para datetime para validar
                 datetime.strptime(date_of_birth, '%Y-%m-%d')
-                print(f"DEBUG - Data validada com sucesso: {date_of_birth}")
             except ValueError as ve:
-                print(f"DEBUG - Erro na validação da data: {ve}")
                 return (None, "INVALID_DATE", f"Data de nascimento inválida: {date_of_birth}")
         
         # query para inserir novo usuário
@@ -149,9 +138,8 @@ def create_user(user_data):
         if role == 'customer':
             try:
                 loyalty_service.add_welcome_points(new_user_id, cur)
-                print(f"Pontos de boas-vindas adicionados para o cliente {new_user_id}")
             except Exception as e:
-                print(f"AVISO: Falha ao adicionar pontos de boas-vindas para o cliente {new_user_id}. Erro: {e}")
+                pass
         
         # Commit de tudo junto (usuário + pontos)
         conn.commit()
@@ -177,12 +165,12 @@ def create_user(user_data):
                     user=new_user
                 )
             except Exception as e:
-                print(f"AVISO: Falha ao enviar e-mail de boas-vindas para {new_user['email']}. Erro: {e}")
+                # ALTERAÇÃO: Logging estruturado ao invés de silenciar completamente
+                # Falha no email não deve impedir criação do usuário, mas deve ser registrada
+                logger.warning(f"Falha ao enviar e-mail de boas-vindas para {new_user.get('email', 'N/A')}: {e}", exc_info=True)
 
         return (new_user, None, None)
     except fdb.Error as e:
-        print(f"Erro ao criar usuário: {e}")
-        print(f"Detalhes do erro: SQLCODE={e.args[1] if len(e.args) > 1 else 'N/A'}")
         if conn: conn.rollback()
         
         # Tratamento específico para erro de validação de data
@@ -212,7 +200,6 @@ def verify_user_password(user_id, password):
 
         return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
     except fdb.Error as e:
-        print(f"Erro ao verificar senha do usuário: {e}")
         return False
     finally:
         if conn:
@@ -232,7 +219,6 @@ def get_users_by_role(roles):
         users = [{"id": row[0], "full_name": row[1], "email": row[2], "phone": row[3], "cpf": row[4], "role": row[5]} for row in cur.fetchall()]
         return users
     except fdb.Error as e:
-        print(f"Erro ao buscar usuários por papel: {e}")
         return []
     finally:
         if conn: conn.close()
@@ -265,7 +251,6 @@ def get_user_by_id(user_id):
             }
         return None
     except fdb.Error as e:
-        print(f"Erro ao buscar usuário por ID: {e}")
         return None
     finally:
         if conn: conn.close()
@@ -285,7 +270,6 @@ def get_user_by_email(email):
             return {"id": row[0], "full_name": row[1], "email": row[2], "phone": row[3], "cpf": row[4], "role": row[5]}
         return None
     except fdb.Error as e:
-        print(f"Erro ao buscar usuário por e-mail: {e}")
         return None
     finally:
         if conn: conn.close()
@@ -378,7 +362,6 @@ def update_user(user_id, update_data, is_admin_request=False):
             return (True, None, "Dados atualizados com sucesso.")
 
     except fdb.Error as e:
-        print(f"Erro ao atualizar usuário: {e}")
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor.")
     finally:
@@ -402,7 +385,6 @@ def deactivate_user(user_id):
         return True
         
     except fdb.Error as e:
-        print(f"Erro ao inativar usuário: {e}")
         if conn: conn.rollback()
         return False
     finally:
@@ -420,7 +402,6 @@ def get_user_ids_by_roles(roles):
         cur.execute(sql, tuple(roles))
         return [row[0] for row in cur.fetchall()]
     except fdb.Error as e:
-        print(f"Erro ao buscar usuários por cargos: {e}")
         return []
     finally:
         if conn: conn.close()
@@ -472,12 +453,13 @@ def initiate_password_reset(email):
                 reset_code=reset_code,
             )
         except Exception as e:
-            print(f"Erro ao enviar e-mail de recuperação: {e}")
+            # ALTERAÇÃO: Logging estruturado ao invés de silenciar completamente
+            # Falha no email não impede geração do código, mas deve ser registrada para diagnóstico
+            logger.warning(f"Falha ao enviar e-mail de recuperação de senha para {email}: {e}", exc_info=True)
 
         return (True, "Código enviado com sucesso")
 
     except fdb.Error as e:
-        print(f"Erro no banco de dados ao iniciar a recuperação de senha: {e}")
         if conn: conn.rollback()
         return (False, "Erro interno do servidor")
     finally:
@@ -529,7 +511,6 @@ def verify_reset_code(email, reset_code):
         return (True, "Código válido.")
 
     except fdb.Error as e:
-        print(f"Erro no banco de dados ao verificar código: {e}")
         return (False, "Erro interno do servidor")
     finally:
         if conn: conn.close()
@@ -595,7 +576,6 @@ def finalize_password_reset(email, reset_code, new_password):
         return (True, "Senha atualizada com sucesso.")
 
     except fdb.Error as e:
-        print(f"Erro no banco de dados ao finalizar a recuperação de senha: {e}")
         if conn: conn.rollback()
         return (False, "Ocorreu um erro interno. Tente novamente mais tarde.")
     finally:
@@ -619,7 +599,6 @@ def reactivate_user(user_id):
         return True
         
     except fdb.Error as e:
-        print(f"Erro ao reativar usuário: {e}")
         if conn: conn.rollback()
         return False
     finally:
@@ -661,11 +640,12 @@ def change_user_password(user_id, current_password, new_password):
         try:
             auth_service.revoke_all_tokens_for_user(user_id)
         except Exception as e:
-            print(f"Aviso: falha ao revogar tokens do usuário {user_id}: {e}")
+            # ALTERAÇÃO: Logging estruturado ao invés de silenciar completamente
+            # Falha na revogação não impede alteração de senha, mas deve ser registrada
+            logger.warning(f"Falha ao revogar tokens do usuário {user_id} após alteração de senha: {e}", exc_info=True)
         return (True, None, "Senha alterada com sucesso. Você será desconectado em todos os dispositivos.")
-        
+
     except fdb.Error as e:
-        print(f"Erro ao alterar senha: {e}")
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -729,7 +709,6 @@ def get_user_metrics(user_id):
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar métricas do usuário: {e}")
         return None
     finally:
         if conn: conn.close()
@@ -754,7 +733,6 @@ def is_last_active_admin(user_id):
         return admin_count == 1
         
     except fdb.Error as e:
-        print(f"Erro ao verificar último admin: {e}")
         return False
     finally:
         if conn: conn.close()
@@ -1039,7 +1017,6 @@ def get_users_general_metrics():
         }
         
     except fdb.Error as e:
-        print(f"Erro ao buscar métricas gerais: {e}")
         return {
             "total": 0,
             "ativos": 0,
@@ -1064,7 +1041,6 @@ def check_email_availability(email):
         count = cur.fetchone()[0]
         return count == 0
     except fdb.Error as e:
-        print(f"Erro ao verificar disponibilidade do email: {e}")
         return False
     finally:
         if conn: conn.close()
@@ -1093,7 +1069,6 @@ def cleanup_unverified_accounts(days_old=7):
         return deleted_count
         
     except fdb.Error as e:
-        print(f"Erro ao limpar contas não verificadas: {e}")
         if conn: conn.rollback()
         return 0
     finally:
@@ -1119,7 +1094,6 @@ def update_user_status(user_id, is_active):
             return (False, "USER_NOT_FOUND", "Usuário não encontrado")
             
     except fdb.Error as e:
-        print(f"Erro ao atualizar status do usuário: {e}")
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -1145,7 +1119,6 @@ def update_user_role(user_id, new_role):
             return (False, "USER_NOT_FOUND", "Usuário não encontrado")
             
     except fdb.Error as e:
-        print(f"Erro ao atualizar cargo do usuário: {e}")
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:

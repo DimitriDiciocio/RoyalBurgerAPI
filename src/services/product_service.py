@@ -189,6 +189,7 @@ def _batch_get_product_availability_status(product_ids, cur):
         }
     """
     if not product_ids:
+        logger.warning("[PRODUCT_SERVICE] _batch_get_product_availability_status chamado sem product_ids")
         return {}
     
     try:
@@ -196,6 +197,9 @@ def _batch_get_product_availability_status(product_ids, cur):
         # ALTERAÇÃO: Decimal já está importado no topo do módulo
         
         result = {}
+        
+        # LOG: Iniciando busca de ingredientes
+        logger.info(f"[PRODUCT_SERVICE] _batch_get_product_availability_status: buscando ingredientes para {len(product_ids)} produtos")
         
         # Verifica se campo LOSS_PERCENTAGE existe antes de usar
         use_loss_percentage = False
@@ -220,11 +224,12 @@ def _batch_get_product_availability_status(product_ids, cur):
                   AND i.IS_AVAILABLE = TRUE
             """, tuple(product_ids))
             use_loss_percentage = True
+            logger.debug(f"[PRODUCT_SERVICE] Query com LOSS_PERCENTAGE executada com sucesso")
         except fdb.Error as e:
             # Se campo não existe, usa query sem LOSS_PERCENTAGE
             error_msg = str(e).lower()
             if 'loss_percentage' in error_msg or 'unknown' in error_msg or 'column' in error_msg:
-                logger.debug(f"Campo LOSS_PERCENTAGE não encontrado, usando query sem perdas para produtos em batch")
+                logger.debug(f"[PRODUCT_SERVICE] Campo LOSS_PERCENTAGE não encontrado, usando query sem perdas para produtos em batch")
                 placeholders = ', '.join(['?' for _ in product_ids])
                 cur.execute(f"""
                     SELECT 
@@ -244,14 +249,33 @@ def _batch_get_product_availability_status(product_ids, cur):
                 """, tuple(product_ids))
                 use_loss_percentage = False
             else:
-                logger.error(f"Erro inesperado ao buscar ingredientes em batch: {e}", exc_info=True)
+                logger.error(f"[PRODUCT_SERVICE] Erro inesperado ao buscar ingredientes em batch: {e}", exc_info=True)
                 # Se erro não relacionado a coluna, retorna status unknown para todos
                 return {pid: {'status': 'unknown', 'capacity': 0, 'is_available': False, 'limiting_ingredient': None} 
                         for pid in product_ids}
         
         # Agrupa ingredientes por produto
         product_ingredients = {}
-        for row in cur.fetchall():
+        ingredient_rows = cur.fetchall()
+        logger.info(f"[PRODUCT_SERVICE] 🔍 Busca de ingredientes: {len(ingredient_rows)} ingredientes encontrados para {len(product_ids)} produtos")
+        
+        if len(ingredient_rows) == 0:
+            logger.error(f"[PRODUCT_SERVICE] ❌ CRÍTICO: Nenhum ingrediente encontrado para os produtos! "
+                         f"Verificar se há produtos com PORTIONS > 0 e ingredientes IS_AVAILABLE = TRUE")
+            # LOG: Verificar se há produtos sem ingredientes
+            placeholders_check = ', '.join(['?' for _ in product_ids])
+            cur.execute(f"""
+                SELECT p.ID, p.NAME, COUNT(pi.PRODUCT_ID) as total_ingredientes
+                FROM PRODUCTS p
+                LEFT JOIN PRODUCT_INGREDIENTS pi ON p.ID = pi.PRODUCT_ID AND pi.PORTIONS > 0
+                WHERE p.ID IN ({placeholders_check})
+                GROUP BY p.ID, p.NAME
+            """, tuple(product_ids))
+            for row in cur.fetchall():
+                product_id, product_name, total_ing = row
+                logger.warning(f"[PRODUCT_SERVICE]   → Produto {product_id} ({product_name}): {total_ing} ingredientes obrigatórios (PORTIONS > 0)")
+        
+        for row in ingredient_rows:
             if use_loss_percentage:
                 product_id, ing_id, portions, loss_pct, name, base_portion_quantity, base_portion_unit, stock_unit, is_available = row
                 loss_percentage = float(loss_pct or 0)
@@ -273,20 +297,35 @@ def _batch_get_product_availability_status(product_ids, cur):
                 'is_available': is_available
             })
         
+        # LOG: Ingredientes por produto
+        for product_id, ingredients in product_ingredients.items():
+            logger.debug(f"[PRODUCT_SERVICE] Produto {product_id} tem {len(ingredients)} ingredientes: "
+                       f"{[ing['name'] for ing in ingredients]}")
+        
         # OTIMIZAÇÃO: Busca estoque disponível de todos os ingredientes de uma vez
         all_ingredient_ids = set()
         for ingredients in product_ingredients.values():
             for ing in ingredients:
                 all_ingredient_ids.add(ing['ingredient_id'])
         
+        logger.info(f"[PRODUCT_SERVICE] Buscando estoque disponível para {len(all_ingredient_ids)} ingredientes únicos")
+        
         ingredient_availability = {}
         if all_ingredient_ids:
             ingredient_availability = stock_service._batch_get_ingredient_available_stock(list(all_ingredient_ids), cur)
+            logger.info(f"[PRODUCT_SERVICE] Estoque disponível retornado para {len(ingredient_availability)} ingredientes")
+            
+            # LOG: Estoque de alguns ingredientes
+            for ing_id, stock in list(ingredient_availability.items())[:5]:
+                logger.debug(f"[PRODUCT_SERVICE] Ingrediente {ing_id}: estoque disponível = {stock}")
+        else:
+            logger.warning(f"[PRODUCT_SERVICE] Nenhum ingrediente para buscar estoque!")
         
         # Calcula capacidade para cada produto
         for product_id in product_ids:
             if product_id not in product_ingredients or not product_ingredients[product_id]:
                 # Produto sem ingredientes obrigatórios
+                logger.warning(f"[PRODUCT_SERVICE] Produto {product_id} sem ingredientes obrigatórios (PORTIONS > 0)")
                 result[product_id] = {
                     'status': 'unavailable',
                     'capacity': 0,
@@ -300,6 +339,8 @@ def _batch_get_product_availability_status(product_ids, cur):
             min_capacity = None
             limiting_ingredient = None
             
+            logger.debug(f"[PRODUCT_SERVICE] Calculando capacidade para produto {product_id} com {len(ingredients)} ingredientes")
+            
             for ing in ingredients:
                 ing_id = ing['ingredient_id']
                 portions = ing['portions']
@@ -310,10 +351,24 @@ def _batch_get_product_availability_status(product_ids, cur):
                 stock_unit = ing['stock_unit']
                 
                 if not ing['is_available']:
+                    logger.debug(f"[PRODUCT_SERVICE] Ingrediente {ing_id} ({name}) não disponível (IS_AVAILABLE = FALSE)")
                     continue
                 
                 # Obtém estoque disponível (já buscado em batch)
                 available_stock = ingredient_availability.get(ing_id, Decimal('0'))
+                
+                # LOG: Estoque do ingrediente (SEMPRE logar se for 0 para diagnóstico)
+                if available_stock <= 0:
+                    logger.warning(f"[PRODUCT_SERVICE] ⚠️ Produto {product_id}, Ingrediente {ing_id} ({name}): "
+                                 f"ESTOQUE DISPONÍVEL ZERO! "
+                                 f"estoque_disponivel={available_stock}, portions={portions}, "
+                                 f"base_portion_quantity={base_portion_quantity}, base_portion_unit={base_portion_unit}, "
+                                 f"stock_unit={stock_unit}")
+                else:
+                    logger.debug(f"[PRODUCT_SERVICE] Produto {product_id}, Ingrediente {ing_id} ({name}): "
+                               f"estoque_disponivel={available_stock}, portions={portions}, "
+                               f"base_portion_quantity={base_portion_quantity}, base_portion_unit={base_portion_unit}, "
+                               f"stock_unit={stock_unit}")
                 
                 # Calcula consumo por unidade
                 try:
@@ -325,16 +380,21 @@ def _batch_get_product_availability_status(product_ids, cur):
                         item_quantity=1,
                         loss_percentage=loss_percentage
                     )
+                    logger.debug(f"[PRODUCT_SERVICE] Consumo por unidade calculado: {consumption_per_unit} {stock_unit}")
                 except ValueError as e:
-                    logger.error(f"Erro ao calcular consumo para {name} (ingrediente {ing_id}): {e}", exc_info=True)
+                    logger.error(f"[PRODUCT_SERVICE] Erro ao calcular consumo para {name} (ingrediente {ing_id}): {e}", exc_info=True)
                     continue
                 
                 if consumption_per_unit <= 0:
+                    logger.warning(f"[PRODUCT_SERVICE] Consumo por unidade <= 0 para {name} (ingrediente {ing_id}): {consumption_per_unit}")
                     continue
                 
                 # Calcula capacidade para este ingrediente
                 capacity = int(available_stock / consumption_per_unit)
                 capacities.append(capacity)
+                
+                logger.debug(f"[PRODUCT_SERVICE] Capacidade calculada para {name}: {capacity} unidades "
+                           f"(estoque: {available_stock}, consumo: {consumption_per_unit})")
                 
                 # Identifica insumo limitante (menor capacidade)
                 if min_capacity is None or capacity < min_capacity:
@@ -348,6 +408,23 @@ def _batch_get_product_availability_status(product_ids, cur):
                         'stock_unit': stock_unit
                     }
             
+            # LOG: Capacidades calculadas (SEMPRE logar detalhes para diagnóstico)
+            if not capacities or min_capacity is None or min_capacity < 1:
+                logger.warning(f"[PRODUCT_SERVICE] ❌ Produto {product_id} INDISPONÍVEL: "
+                             f"capacities={capacities}, min_capacity={min_capacity}, "
+                             f"total_ingredientes={len(ingredients)}, "
+                             f"ingredientes_com_estoque={len([ing for ing in ingredients if ingredient_availability.get(ing['ingredient_id'], Decimal('0')) > 0])}")
+                # LOG: Detalhes dos ingredientes que causaram capacidade 0
+                for ing in ingredients:
+                    ing_id = ing['ingredient_id']
+                    ing_stock = ingredient_availability.get(ing_id, Decimal('0'))
+                    if ing_stock <= 0:
+                        logger.warning(f"[PRODUCT_SERVICE]   → Ingrediente {ing_id} ({ing['name']}): "
+                                     f"estoque_disponivel={ing_stock} {ing['stock_unit']}")
+            else:
+                logger.info(f"[PRODUCT_SERVICE] ✅ Produto {product_id} disponível: "
+                           f"capacities={capacities}, min_capacity={min_capacity}")
+            
             # Determina status de disponibilidade
             if not capacities or min_capacity is None or min_capacity < 1:
                 result[product_id] = {
@@ -357,6 +434,7 @@ def _batch_get_product_availability_status(product_ids, cur):
                     'limiting_ingredient': None
                 }
             elif min_capacity == 1:
+                logger.info(f"[PRODUCT_SERVICE] Produto {product_id} disponível (limitado): capacity=1")
                 result[product_id] = {
                     'status': 'limited',
                     'capacity': 1,
@@ -365,6 +443,7 @@ def _batch_get_product_availability_status(product_ids, cur):
                 }
             else:
                 # Capacidade > 1: verifica se está baixo
+                logger.info(f"[PRODUCT_SERVICE] Produto {product_id} disponível: capacity={min_capacity}")
                 if limiting_ingredient:
                     # ALTERAÇÃO: Valores já são float (convertidos acima na linha 345-346)
                     available_stock = limiting_ingredient.get('available_stock', 0.0)
@@ -396,6 +475,7 @@ def _batch_get_product_availability_status(product_ids, cur):
         # Produtos sem ingredientes obrigatórios recebem status unavailable
         for product_id in product_ids:
             if product_id not in result:
+                logger.warning(f"[PRODUCT_SERVICE] Produto {product_id} não processado (sem ingredientes ou erro)")
                 result[product_id] = {
                     'status': 'unavailable',
                     'capacity': 0,
@@ -403,10 +483,17 @@ def _batch_get_product_availability_status(product_ids, cur):
                     'limiting_ingredient': None
                 }
         
+        # LOG: Resumo final
+        available_count = sum(1 for r in result.values() if r.get('is_available', False))
+        limited_count = sum(1 for r in result.values() if r.get('status') == 'limited')
+        unavailable_count = sum(1 for r in result.values() if r.get('status') == 'unavailable')
+        logger.info(f"[PRODUCT_SERVICE] _batch_get_product_availability_status concluído: "
+                   f"{available_count} disponíveis, {limited_count} limitados, {unavailable_count} indisponíveis de {len(product_ids)} produtos")
+        
         return result
         
     except Exception as e:
-        logger.error(f"Erro ao calcular disponibilidade em batch: {e}", exc_info=True)
+        logger.error(f"[PRODUCT_SERVICE] Erro ao calcular disponibilidade em batch: {e}", exc_info=True)
         # Retorna status unknown para todos os produtos em caso de erro
         return {pid: {'status': 'unknown', 'capacity': 0, 'is_available': False, 'limiting_ingredient': None} 
                 for pid in product_ids}
@@ -611,9 +698,7 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
             }
         }
     """
-    # IMPORTANTE: Definir logger no início da função para evitar UnboundLocalError
-    logger = logging.getLogger(__name__)
-    
+    # ALTERAÇÃO: Logger já está definido no topo do módulo
     conn = None
     should_close_conn = False
     
@@ -859,8 +944,14 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
         # Evita N+1 queries ao buscar ingredientes, estoque e calcular capacidade em batch
         if product_ids:
             try:
+                # LOG: Iniciando cálculo de disponibilidade em batch
+                logger.info(f"[PRODUCT_SERVICE] Calculando disponibilidade para {len(product_ids)} produtos: {product_ids[:5]}...")
+                
                 # Calcula disponibilidade de todos os produtos de uma vez
                 batch_availability = _batch_get_product_availability_status(product_ids, cur)
+                
+                # LOG: Resultados do batch
+                logger.info(f"[PRODUCT_SERVICE] batch_availability retornou {len(batch_availability)} produtos")
                 
                 # Processa resultados do batch
                 for product_id in product_ids:
@@ -871,6 +962,15 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                         is_available = avail_info.get('is_available', False)
                         limiting_ingredient = avail_info.get('limiting_ingredient')
                         
+                        # LOG: Detalhes de cada produto
+                        if availability_status == 'unavailable' or capacity < 1:
+                            logger.warning(f"[PRODUCT_SERVICE] Produto {product_id} indisponível: "
+                                         f"status={availability_status}, capacity={capacity}, "
+                                         f"is_available={is_available}")
+                        else:
+                            logger.debug(f"[PRODUCT_SERVICE] Produto {product_id} disponível: "
+                                       f"status={availability_status}, capacity={capacity}")
+                        
                         availability_map[product_id] = availability_status
                         capacity_map[product_id] = {
                             'capacity': capacity,
@@ -879,6 +979,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                         }
                     else:
                         # Produto não encontrado no batch (erro)
+                        logger.warning(f"[PRODUCT_SERVICE] Produto {product_id} não encontrado no batch_availability")
                         availability_map[product_id] = "unknown"
                         capacity_map[product_id] = {
                             'capacity': 0,
@@ -886,7 +987,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                             'limiting_ingredient': None
                         }
             except Exception as e:
-                logger.warning(f"Erro ao buscar capacidade em batch: {e}", exc_info=True)
+                logger.error(f"[PRODUCT_SERVICE] Erro ao buscar capacidade em batch: {e}", exc_info=True)
                 # Em caso de erro, marca todos como unknown
                 for product_id in product_ids:
                     availability_map[product_id] = "unknown"
@@ -932,11 +1033,19 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             capacity_info = capacity_map.get(product_id, {})
             capacity = capacity_info.get('capacity', 0)
             
+            # LOG: Status de cada produto antes do filtro
+            if filter_unavailable:
+                logger.debug(f"[PRODUCT_SERVICE] Produto {product_id} (row[1]): "
+                           f"availability_status={availability_status}, capacity={capacity}, "
+                           f"filter_unavailable={filter_unavailable}")
+            
             # Filtra produtos indisponíveis (unavailable = capacidade < 1)
             if filter_unavailable and availability_status == "unavailable":
                 # Produto sem capacidade - não incluir na listagem para usuários normais
                 # Mas não desativa no banco (IS_ACTIVE permanece TRUE)
                 # Administradores ainda veem todos os produtos
+                logger.debug(f"[PRODUCT_SERVICE] Produto {product_id} filtrado (unavailable): "
+                           f"capacity={capacity}, status={availability_status}")
                 continue
             
             item = {  
@@ -956,8 +1065,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 try:
                     item["image_hash"] = _get_image_hash(row[7])
                 except Exception as e:
-                    # ALTERAÇÃO: Substituído print() por logging estruturado
-                    logger = logging.getLogger(__name__)
+                    # ALTERAÇÃO: Logger já está definido no topo do módulo
                     logger.warning(f"Erro ao gerar hash da imagem: {e}", exc_info=True)
                     item["image_hash"] = None
             
@@ -980,10 +1088,16 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             filtered_total = len(items)
             total_pages = (filtered_total + page_size - 1) // page_size if filtered_total > 0 else 0
             pagination_total = filtered_total
+            
+            # LOG: Estatísticas de filtragem
+            logger.info(f"[PRODUCT_SERVICE] Filtragem aplicada: {len(product_rows)} produtos no banco, "
+                       f"{filtered_total} produtos disponíveis após filtro, "
+                       f"{len(product_rows) - filtered_total} produtos filtrados (unavailable)")
         else:
             # Admin vê todos os produtos, usa total original
             total_pages = (total + page_size - 1) // page_size
             pagination_total = total
+            logger.info(f"[PRODUCT_SERVICE] Filtragem desabilitada (admin): {len(items)} produtos retornados")
         
         result = {  
             "items": items,  
@@ -994,6 +1108,12 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 "total_pages": total_pages  
             }  
         }
+        
+        # LOG: Resultado final
+        # ALTERAÇÃO: Logging otimizado (apenas quando necessário para diagnóstico)
+        if len(items) == 0 or not use_cache:
+            logger.info(f"[PRODUCT_SERVICE] list_products retornando {len(items)} produtos (total no banco: {total}, "
+                       f"filtrados: {filtered_total if filter_unavailable else 'N/A'})")
         
         # OTIMIZAÇÃO: Salva resultado no cache se for cacheável
         if use_cache:
@@ -1028,9 +1148,7 @@ def get_product_by_id(product_id, quantity=1):
     Returns:
         dict: Dados do produto com ingredientes e max_quantity já calculado
     """
-    # IMPORTANTE: Definir logger no início da função para evitar UnboundLocalError
-    logger = logging.getLogger(__name__)
-    
+    # ALTERAÇÃO: Logger já está definido no topo do módulo
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -1647,8 +1765,7 @@ def get_products_by_category_id(category_id, page=1, page_size=10, include_inact
                 try:
                     item["image_hash"] = _get_image_hash(row[7])
                 except Exception as e:
-                    # ALTERAÇÃO: Substituído print() por logging estruturado
-                    logger = logging.getLogger(__name__)
+                    # ALTERAÇÃO: Logger já está definido no topo do módulo
                     logger.warning(f"Erro ao gerar hash da imagem: {e}", exc_info=True)
                     item["image_hash"] = None
             
@@ -1856,8 +1973,7 @@ def delete_product(product_id):
             from ..utils.image_handler import delete_product_image
             delete_product_image(product_id)
         except Exception as e:
-            # ALTERAÇÃO: Substituído print() por logging estruturado
-            logger = logging.getLogger(__name__)
+            # ALTERAÇÃO: Logger já está definido no topo do módulo
             logger.warning(f"Erro ao remover imagem do produto {product_id}: {e}", exc_info=True)
         
         return (True, None, {

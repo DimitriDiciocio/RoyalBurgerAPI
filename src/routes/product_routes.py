@@ -8,6 +8,9 @@ product_bp = Blueprint('products', __name__)
 
 @product_bp.route('/', methods=['GET'])  
 def list_products_route():  
+    import logging
+    logger = logging.getLogger(__name__)
+    
     name = request.args.get('name')  
     category_id = request.args.get('category_id', type=int)  
     page = request.args.get('page', type=int, default=1)  
@@ -18,16 +21,88 @@ def list_products_route():
     include_inactive_param = request.args.get('include_inactive', '').lower()
     include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
     
-    # CORREÇÃO: Painel admin mostra todos os produtos (incluindo indisponíveis)
-    # Rotas /api/products/* são usadas pelo painel administrativo
+    # NOVO: Aceita parâmetro filter_unavailable para filtrar produtos sem estoque
+    # Frontend pode usar filter_unavailable=true para esconder produtos indisponíveis
+    # Painel admin usa filter_unavailable=false (padrão) para ver todos os produtos
+    filter_unavailable_param = request.args.get('filter_unavailable', '').lower()
+    filter_unavailable = filter_unavailable_param in ('true', '1', 'yes') if filter_unavailable_param else False
+    
+    # LOG: Parâmetros recebidos
+    logger.info(f"[PRODUCT_ROUTES] list_products_route chamado com: page={page}, page_size={page_size}, "
+                f"include_inactive={include_inactive}, filter_unavailable={filter_unavailable}, "
+                f"category_id={category_id}, name={name}")
+    
     result = product_service.list_products(
         name_filter=name, 
         category_id=category_id, 
         page=page, 
         page_size=page_size, 
         include_inactive=include_inactive,
-        filter_unavailable=False  # Painel admin vê todos os produtos
-    )  
+        filter_unavailable=filter_unavailable  # Aceita parâmetro da query string
+    )
+    
+    # LOG: Resultado retornado
+    items_count = len(result.get('items', [])) if result else 0
+    logger.info(f"[PRODUCT_ROUTES] list_products_route retornou {items_count} produtos")
+    
+    if items_count > 0:
+        # LOG: Detalhes do primeiro produto
+        first_product = result.get('items', [])[0]
+        logger.info(f"[PRODUCT_ROUTES] Primeiro produto: id={first_product.get('id')}, "
+                    f"name={first_product.get('name')}, capacity={first_product.get('capacity')}, "
+                    f"availability_status={first_product.get('availability_status')}, "
+                    f"is_available={first_product.get('capacity_info', {}).get('is_available')}")
+    else:
+        logger.warning(f"[PRODUCT_ROUTES] ⚠️ Nenhum produto retornado! Verificar filtros e estoque.")
+        # LOG: Verificar se há produtos no banco
+        try:
+            from ..database import get_db_connection
+            conn = get_db_connection()
+            cur = conn.cursor()
+            # Verificar total de produtos ativos
+            cur.execute("SELECT COUNT(*) FROM PRODUCTS WHERE IS_ACTIVE = TRUE")
+            total_products = cur.fetchone()[0]
+            logger.info(f"[PRODUCT_ROUTES] 📊 Total de produtos ativos no banco: {total_products}")
+            
+            # Verificar produtos com ingredientes
+            cur.execute("""
+                SELECT p.ID, p.NAME, COUNT(pi.PRODUCT_ID) as total_ingredientes
+                FROM PRODUCTS p
+                LEFT JOIN PRODUCT_INGREDIENTS pi ON p.ID = pi.PRODUCT_ID AND pi.PORTIONS > 0
+                WHERE p.IS_ACTIVE = TRUE
+                GROUP BY p.ID, p.NAME
+                ORDER BY p.ID
+            """)
+            products_with_ingredients = cur.fetchall()
+            logger.info(f"[PRODUCT_ROUTES] 📊 Produtos com ingredientes: {len(products_with_ingredients)} produtos")
+            for row in products_with_ingredients[:5]:  # Mostrar apenas os primeiros 5
+                product_id, product_name, total_ing = row
+                logger.info(f"[PRODUCT_ROUTES]   → Produto {product_id} ({product_name}): {total_ing} ingredientes obrigatórios")
+            
+            # Verificar ingredientes com estoque
+            cur.execute("""
+                SELECT ID, NAME, CURRENT_STOCK, MIN_STOCK_THRESHOLD, IS_AVAILABLE, STOCK_UNIT
+                FROM INGREDIENTS
+                WHERE IS_AVAILABLE = TRUE
+                ORDER BY ID
+            """)
+            ingredients_with_stock = cur.fetchall()
+            logger.info(f"[PRODUCT_ROUTES] 📊 Ingredientes disponíveis: {len(ingredients_with_stock)} ingredientes")
+            for row in ingredients_with_stock[:10]:  # Mostrar apenas os primeiros 10
+                ing_id, ing_name, current_stock, min_threshold, is_available, stock_unit = row
+                # ALTERAÇÃO: MIN_STOCK_THRESHOLD não é descontado do estoque disponível
+                # É apenas um indicador de alerta para reabastecimento
+                available_stock = current_stock or 0
+                logger.info(f"[PRODUCT_ROUTES]   → Ingrediente {ing_id} ({ing_name}): "
+                          f"CURRENT_STOCK={current_stock}, MIN_THRESHOLD={min_threshold} (apenas alerta), "
+                          f"disponivel_aproximado={available_stock} {stock_unit}")
+            
+            conn.close()
+        except Exception as e:
+            # ALTERAÇÃO: Logging seguro sem expor detalhes internos
+            logger.error(f"[PRODUCT_ROUTES] Erro ao verificar total de produtos no banco: {e}", exc_info=True)
+            # Nota: Não expor detalhes do erro ao usuário final, apenas logar internamente
+    
     return jsonify(result), 200
 
 @product_bp.route('/<int:product_id>', methods=['GET'])  

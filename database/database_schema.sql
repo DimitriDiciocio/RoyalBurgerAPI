@@ -560,10 +560,6 @@ CREATE INDEX IDX_TEMPORARY_RESERVATIONS_SESSION ON TEMPORARY_RESERVATIONS (SESSI
 CREATE INDEX IDX_TEMPORARY_RESERVATIONS_EXPIRES ON TEMPORARY_RESERVATIONS (EXPIRES_AT);
 CREATE INDEX IDX_TEMPORARY_RESERVATIONS_INGREDIENT_EXPIRES ON TEMPORARY_RESERVATIONS (INGREDIENT_ID, EXPIRES_AT);
 
--- Adicionar Foreign Key de TABLE_ID em ORDERS para RESTAURANT_TABLES
--- (Se a FK já existir, o comando será ignorado)
--- ALTER TABLE ORDERS ADD CONSTRAINT FK_ORDERS_TABLE FOREIGN KEY (TABLE_ID) REFERENCES RESTAURANT_TABLES(ID) ON DELETE SET NULL;
-
 -- =====================================================
 -- COMENTÁRIOS SOBRE AS TABELAS
 -- =====================================================
@@ -615,13 +611,6 @@ FUNCIONALIDADES IMPLEMENTADAS:
 - Gestão de salão (mesas e atendentes) - pedidos on-site
 - Reservas temporárias de insumos (soft locks) para evitar conflitos de estoque
 - Limites de quantidade por cliente para promoções
-- Cálculo de perdas no consumo de insumos (LOSS_PERCENTAGE)
-- Arredondamento de quantidades em lotes mínimos (MIN_LOT_SIZE)
-
-CAMPOS OPCIONAIS:
-- LOSS_PERCENTAGE em PRODUCT_INGREDIENTS: Percentual de perda no consumo (padrão: 0.00)
-- MIN_LOT_SIZE em INGREDIENTS: Tamanho mínimo de lote para arredondamento (padrão: 0.00)
-  Nota: Estes campos são opcionais e o sistema funciona sem eles (usa valores padrão 0)
 */
 
 -- =====================================================
