@@ -404,11 +404,13 @@ def validate_stock_for_items(items, cur):
                             f"Erro na conversão de unidades do extra: {str(e)}"
                         )
             
-            # Adicionar base_modifications (apenas deltas positivos)
+            # CORREÇÃO: Processar base_modifications (deltas positivos e negativos)
+            # Deltas positivos aumentam consumo, deltas negativos reduzem consumo
             if 'base_modifications' in item and item['base_modifications']:
                 # Busca informações de unidades dos base_modifications em batch
+                # CORREÇÃO: Incluir todos os base_modifications (positivos e negativos)
                 bm_ing_ids = {bm.get('ingredient_id') for bm in item['base_modifications'] 
-                             if bm.get('delta', 0) > 0 and bm.get('ingredient_id')}
+                             if bm.get('delta', 0) != 0 and bm.get('ingredient_id')}
                 bm_info = {}
                 if bm_ing_ids:
                     try:
@@ -433,45 +435,75 @@ def validate_stock_for_items(items, cur):
                 
                 for bm in item.get('base_modifications', []):
                     delta = bm.get('delta', 0)
-                    if delta > 0:  # Apenas deltas positivos consomem estoque
-                        ing_id = bm.get('ingredient_id')
-                        if not ing_id:
-                            continue
+                    if delta == 0:  # Ignora deltas zero
+                        continue
+                    
+                    ing_id = bm.get('ingredient_id')
+                    if not ing_id:
+                        continue
+                    
+                    try:
+                        ing_id = int(ing_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Ingredient ID inválido em base_modification: {ing_id}")
+                        continue
+                    
+                    # CORREÇÃO: Buscar informações do ingrediente (pode estar na receita base ou não)
+                    info = bm_info.get(ing_id)
+                    if not info:
+                        # Se não encontrou nas informações buscadas, tenta buscar da receita base
+                        rule = rules.get(ing_id)
+                        if rule:
+                            info = {
+                                'base_portion_quantity': rule['base_portion_quantity'],
+                                'base_portion_unit': rule['base_portion_unit'],
+                                'stock_unit': rule['stock_unit']
+                            }
+                        else:
+                            # Fallback: usa valores padrão
+                            info = {
+                                'base_portion_quantity': 1,
+                                'base_portion_unit': 'un',
+                                'stock_unit': 'un'
+                            }
+                    
+                    try:
+                        # CORREÇÃO: Usar calculate_consumption_in_stock_unit para consistência
+                        # Isso garante conversão de unidades correta e considera perdas se houver
+                        # Delta pode ser positivo ou negativo
+                        rule = rules.get(ing_id, {})
+                        loss_percentage = rule.get('loss_percentage', 0) if rule else 0
                         
-                        try:
-                            ing_id = int(ing_id)
-                        except (ValueError, TypeError):
-                            logger.warning(f"Ingredient ID inválido em base_modification: {ing_id}")
-                            continue
+                        delta_consumption = calculate_consumption_in_stock_unit(
+                            portions=abs(delta),  # Usa valor absoluto para cálculo
+                            base_portion_quantity=info['base_portion_quantity'],
+                            base_portion_unit=info['base_portion_unit'],
+                            stock_unit=info['stock_unit'],
+                            item_quantity=quantity,
+                            loss_percentage=loss_percentage
+                        )
                         
-                        info = bm_info.get(ing_id, {
-                            'base_portion_quantity': 1,
-                            'base_portion_unit': 'un',
-                            'stock_unit': 'un'
-                        })
+                        # Garantir que required_ingredients existe para este ingrediente
+                        # (pode não existir se o ingrediente não está na receita base)
+                        if ing_id not in required_ingredients:
+                            required_ingredients[ing_id] = Decimal('0')
                         
-                        try:
-                            # DELTA é em porções, então multiplica por base_portion_quantity
-                            delta_consumption = (
-                                Decimal(str(delta)) * 
-                                Decimal(str(info['base_portion_quantity']))
-                            )
-                            total_bm = _convert_unit(
-                                delta_consumption,
-                                info['base_portion_unit'],
-                                info['stock_unit']
-                            ) * Decimal(str(quantity))
+                        # CORREÇÃO: Se delta é negativo, reduz o consumo necessário
+                        # Se delta é positivo, aumenta o consumo necessário
+                        if delta < 0:
+                            # Delta negativo: reduz consumo (remove da receita base)
+                            required_ingredients[ing_id] = max(Decimal('0'), required_ingredients[ing_id] - delta_consumption)
+                        else:
+                            # Delta positivo: aumenta consumo (adiciona à receita base)
+                            required_ingredients[ing_id] += delta_consumption
                             
-                            if ing_id not in required_ingredients:
-                                required_ingredients[ing_id] = Decimal('0')
-                            required_ingredients[ing_id] += total_bm
-                        except ValueError as e:
-                            logger.error(f"Erro ao calcular consumo de base_modification {ing_id}: {e}")
-                            return (
-                                False,
-                                "STOCK_VALIDATION_ERROR",
-                                f"Erro na conversão de unidades do base_modification: {str(e)}"
-                            )
+                    except ValueError as e:
+                        logger.error(f"Erro ao calcular consumo de base_modification {ing_id}: {e}")
+                        return (
+                            False,
+                            "STOCK_VALIDATION_ERROR",
+                            f"Erro na conversão de unidades do base_modification: {str(e)}"
+                        )
         
         # Verificar se há ingredientes necessários
         if not required_ingredients:
@@ -1434,14 +1466,50 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
                 continue
         
         # Calcula reservas temporárias ativas
-        cur.execute("""
-            SELECT COALESCE(SUM(QUANTITY), 0)
-            FROM TEMPORARY_RESERVATIONS
-            WHERE INGREDIENT_ID = ?
-              AND EXPIRES_AT > CURRENT_TIMESTAMP
-        """, (ingredient_id,))
-        
-        temporary_reservations = Decimal(str(cur.fetchone()[0] or 0))
+        # CORREÇÃO: Tratamento seguro para evitar erro SQLCODE -804 do Firebird
+        # Usa subquery com COALESCE para garantir que sempre retorne um valor, mesmo quando não há registros
+        temporary_reservations = Decimal('0')
+        try:
+            # ALTERAÇÃO: Usa subquery com COALESCE para evitar erro SQLCODE -804 quando não há registros
+            # A subquery garante que sempre retorne uma linha (mesmo que seja 0)
+            cur.execute("""
+                SELECT COALESCE((
+                    SELECT SUM(QUANTITY)
+                    FROM TEMPORARY_RESERVATIONS
+                    WHERE INGREDIENT_ID = ?
+                      AND EXPIRES_AT > CURRENT_TIMESTAMP
+                ), 0) as TOTAL_RESERVATIONS
+                FROM RDB$DATABASE
+            """, (ingredient_id,))
+            
+            sum_row = cur.fetchone()
+            # ALTERAÇÃO: Validação mais robusta do resultado
+            if sum_row is not None:
+                try:
+                    # Tenta acessar o primeiro elemento de forma segura
+                    sum_value = sum_row[0] if len(sum_row) > 0 else None
+                    if sum_value is not None:
+                        temporary_reservations = Decimal(str(sum_value))
+                        # ALTERAÇÃO: Garantir que não seja negativo
+                        if temporary_reservations < 0:
+                            logger.warning(f"Reserva temporária negativa detectada para ingrediente {ingredient_id}: {temporary_reservations}")
+                            temporary_reservations = Decimal('0')
+                except (ValueError, TypeError, IndexError) as e:
+                    logger.debug(f"Erro ao converter reserva temporária para Decimal (ingrediente {ingredient_id}): {e}")
+                    temporary_reservations = Decimal('0')
+            else:
+                # Se fetchone() retornou None, não há registros
+                temporary_reservations = Decimal('0')
+        except fdb.Error as e:
+            # ALTERAÇÃO: Se houver erro na query (ex: tabela não existe, SQLCODE -804), assume 0
+            # Usa debug ao invés de warning para evitar poluição de logs quando não há reservas
+            error_code = getattr(e, 'sqlcode', None)
+            if error_code != -804:  # Só loga como warning se não for o erro esperado de "sem registros"
+                logger.warning(f"Erro ao buscar reservas temporárias para ingrediente {ingredient_id}: {e}")
+            else:
+                # SQLCODE -804 é esperado quando não há registros, apenas loga em debug
+                logger.debug(f"Nenhuma reserva temporária encontrada para ingrediente {ingredient_id} (SQLCODE -804)")
+            temporary_reservations = Decimal('0')
         
         # Estoque disponível = estoque_real - reservas_confirmadas - reservas_temporárias
         # NOTA: MIN_STOCK_THRESHOLD é apenas um indicador de alerta para reabastecimento
@@ -1885,20 +1953,24 @@ def calculate_product_capacity(product_id, cur=None, include_extras=True):
             conn.close()
 
 
-def calculate_product_capacity_with_extras(product_id, extras=None, cur=None):
+def calculate_product_capacity_with_extras(product_id, extras=None, base_modifications=None, cur=None):
     """
-    Calcula capacidade de produção considerando extras.
+    Calcula capacidade de produção considerando extras e modificações da receita base.
     
     ALTERAÇÃO: Se o mesmo insumo aparece na receita e como extra → soma antes de validar.
-    capacidade_total = min_i floor(estoque_disponivel_i / (consumo_receita_i + consumo_extras_i))
+    ALTERAÇÃO: base_modifications permite modificar a receita base (deltas positivos ou negativos).
+    capacidade_total = min_i floor(estoque_disponivel_i / (consumo_receita_modificado_i + consumo_extras_i))
     
     Args:
         product_id: ID do produto
         extras: Lista de extras [{ingredient_id: int, quantity: int}]
+        base_modifications: Lista de modificações da receita base [{ingredient_id: int, delta: int}]
+                          delta positivo = adiciona à receita base
+                          delta negativo = remove da receita base
         cur: Cursor do banco (opcional)
     
     Returns:
-        dict: Mesmo formato de calculate_product_capacity, mas considerando extras
+        dict: Mesmo formato de calculate_product_capacity, mas considerando extras e base_modifications
     """
     conn = None
     should_close = False
@@ -1909,9 +1981,29 @@ def calculate_product_capacity_with_extras(product_id, extras=None, cur=None):
             cur = conn.cursor()
             should_close = True
         
-        # Se não há extras, retorna capacidade base
-        if not extras:
+        # Se não há extras nem base_modifications, retorna capacidade base
+        if not extras and not base_modifications:
             return calculate_product_capacity(product_id, cur, include_extras=False)
+        
+        # NOVO: Processa base_modifications para criar mapa de deltas por ingrediente
+        base_mods_map = {}  # {ingredient_id: delta_total}
+        if base_modifications:
+            for bm in base_modifications:
+                ing_id = bm.get('ingredient_id')
+                delta = bm.get('delta', 0)
+                
+                if not ing_id or delta == 0:
+                    continue
+                
+                try:
+                    ing_id = int(ing_id)
+                    delta = int(delta)
+                except (ValueError, TypeError):
+                    continue
+                
+                if ing_id not in base_mods_map:
+                    base_mods_map[ing_id] = 0
+                base_mods_map[ing_id] += delta
         
         # ALTERAÇÃO: Busca ingredientes da receita base (perdas opcionais)
         # Verifica se campo LOSS_PERCENTAGE existe antes de usar
@@ -2096,8 +2188,37 @@ def calculate_product_capacity_with_extras(product_id, extras=None, cur=None):
                 logger.error(f"Erro ao calcular consumo da receita para {name}: {e}")
                 continue
             
+            # NOVO: Aplica modificações da receita base (base_modifications)
+            # Se há delta negativo, reduz o consumo da receita base
+            # Se há delta positivo, adiciona ao consumo (será somado com extras depois)
+            modified_recipe_consumption = recipe_consumption
+            if ing_id in base_mods_map:
+                delta = base_mods_map[ing_id]
+                # Calcula consumo do delta (pode ser positivo ou negativo)
+                try:
+                    delta_consumption = calculate_consumption_in_stock_unit(
+                        portions=abs(delta),  # Usa valor absoluto para cálculo
+                        base_portion_quantity=base_portion_quantity,
+                        base_portion_unit=base_portion_unit,
+                        stock_unit=stock_unit,
+                        item_quantity=1,
+                        loss_percentage=loss_percentage
+                    )
+                    # Se delta é negativo, subtrai do consumo da receita
+                    # Se delta é positivo, adiciona ao consumo (será tratado como extra)
+                    if delta < 0:
+                        modified_recipe_consumption = max(Decimal('0'), recipe_consumption - delta_consumption)
+                    else:
+                        # Delta positivo será tratado como extra (adicionado depois)
+                        if ing_id not in extras_consumption:
+                            extras_consumption[ing_id] = Decimal('0')
+                        extras_consumption[ing_id] += delta_consumption
+                except ValueError as e:
+                    logger.warning(f"Erro ao calcular consumo do delta para {name}: {e}")
+                    # Em caso de erro, mantém consumo original
+            
             # ALTERAÇÃO: Soma consumo de extras se o mesmo ingrediente aparecer nos extras
-            total_consumption = recipe_consumption
+            total_consumption = modified_recipe_consumption
             if ing_id in extras_consumption:
                 total_consumption += extras_consumption[ing_id]
             

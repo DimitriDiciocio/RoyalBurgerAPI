@@ -175,6 +175,9 @@ def simulate_product_capacity_route():
             "extras": [  # Lista de extras (opcional)
                 {"ingredient_id": int, "quantity": int}
             ],
+            "base_modifications": [  # Modificações da receita base (opcional)
+                {"ingredient_id": int, "delta": int}  # delta pode ser positivo ou negativo
+            ],
             "quantity": int  # Quantidade desejada (opcional, padrão: 1)
         }
     
@@ -205,6 +208,9 @@ def simulate_product_capacity_route():
     
     logger = logging.getLogger(__name__)
     
+    # ALTERAÇÃO: Inicializar product_id para evitar erro no except se houver exceção antes da atribuição
+    product_id = None
+    
     try:
         # Valida se há dados JSON
         if not request.is_json:
@@ -223,8 +229,24 @@ def simulate_product_capacity_route():
             product_id = int(product_id)
             if product_id <= 0:
                 return jsonify({"error": "product_id deve ser um número positivo"}), 400
+            # ALTERAÇÃO: Limite máximo para evitar valores absurdos
+            if product_id > 2147483647:  # Limite máximo de INT32
+                return jsonify({"error": "product_id excede o limite máximo permitido"}), 400
         except (ValueError, TypeError):
             return jsonify({"error": "product_id deve ser um número válido"}), 400
+        
+        # ALTERAÇÃO: Valida quantity (opcional, mas se fornecido deve ser válido)
+        quantity = data.get("quantity", 1)
+        if quantity is not None:
+            try:
+                quantity = int(quantity)
+                if quantity <= 0:
+                    return jsonify({"error": "quantity deve ser um número positivo"}), 400
+                # ALTERAÇÃO: Limite máximo para evitar valores absurdos
+                if quantity > 999:
+                    return jsonify({"error": "quantity excede o limite máximo permitido (999)"}), 400
+            except (ValueError, TypeError):
+                return jsonify({"error": "quantity deve ser um número válido"}), 400
         
         # Valida se o produto existe
         product = product_service.get_product_by_id(product_id)
@@ -255,14 +277,66 @@ def simulate_product_capacity_route():
                     
                     if ing_id <= 0:
                         return jsonify({"error": "ingredient_id deve ser um número positivo"}), 400
+                    # ALTERAÇÃO: Limite máximo para evitar valores absurdos
+                    if ing_id > 2147483647:
+                        return jsonify({"error": "ingredient_id excede o limite máximo permitido"}), 400
                     if qty <= 0:
                         return jsonify({"error": "quantity deve ser um número positivo"}), 400
+                    # ALTERAÇÃO: Limite máximo para evitar valores absurdos
+                    if qty > 999:
+                        return jsonify({"error": "quantity do extra excede o limite máximo permitido (999)"}), 400
                 except (ValueError, TypeError):
                     return jsonify({"error": "ingredient_id e quantity devem ser números válidos"}), 400
         
+        # NOVO: Obtém base_modifications (opcional)
+        base_modifications = data.get("base_modifications", [])
+        if base_modifications:
+            # Valida formato dos base_modifications
+            if not isinstance(base_modifications, list):
+                return jsonify({"error": "base_modifications deve ser uma lista"}), 400
+            
+            # Valida cada base_modification
+            for bm in base_modifications:
+                if not isinstance(bm, dict):
+                    return jsonify({"error": "Cada base_modification deve ser um objeto"}), 400
+                
+                ing_id = bm.get("ingredient_id")
+                delta = bm.get("delta", 0)
+                
+                if not ing_id:
+                    return jsonify({"error": "ingredient_id é obrigatório em cada base_modification"}), 400
+                
+                try:
+                    ing_id = int(ing_id)
+                    # ALTERAÇÃO: Converter delta preservando sinal negativo (delta pode ser positivo ou negativo)
+                    # delta negativo = remove da receita base, delta positivo = adiciona à receita base
+                    try:
+                        delta = int(delta)
+                    except (ValueError, TypeError):
+                        delta = 0
+                    
+                    if ing_id <= 0:
+                        return jsonify({"error": "ingredient_id deve ser um número positivo"}), 400
+                    # ALTERAÇÃO: Limite máximo para evitar valores absurdos
+                    if ing_id > 2147483647:
+                        return jsonify({"error": "ingredient_id excede o limite máximo permitido"}), 400
+                    # ALTERAÇÃO: Delta deve ser diferente de zero (pode ser positivo ou negativo)
+                    if delta == 0:
+                        return jsonify({"error": "delta deve ser diferente de zero"}), 400
+                    # ALTERAÇÃO: Limite máximo para evitar valores absurdos (positivo ou negativo)
+                    # Usa abs() para permitir deltas negativos (ex: -1 remove 1 porção)
+                    if abs(delta) > 999:
+                        return jsonify({"error": "delta excede o limite máximo permitido (999)"}), 400
+                except (ValueError, TypeError):
+                    return jsonify({"error": "ingredient_id e delta devem ser números válidos"}), 400
+        
         # Calcula capacidade usando a função existente
-        if extras:
-            capacity_result = stock_service.calculate_product_capacity_with_extras(product_id, extras)
+        if extras or base_modifications:
+            capacity_result = stock_service.calculate_product_capacity_with_extras(
+                product_id, 
+                extras=extras,
+                base_modifications=base_modifications
+            )
         else:
             capacity_result = stock_service.calculate_product_capacity(product_id)
         
@@ -336,7 +410,9 @@ def simulate_product_capacity_route():
         
     except Exception as e:
         # ALTERAÇÃO: Não expõe detalhes internos do erro ao cliente
-        logger.error(f"Erro ao simular capacidade do produto {product_id}: {e}", exc_info=True)
+        # ALTERAÇÃO: Usar product_id apenas se estiver definido para evitar erro no log
+        product_id_str = str(product_id) if product_id is not None else "desconhecido"
+        logger.error(f"Erro ao simular capacidade do produto {product_id_str}: {e}", exc_info=True)
         return jsonify({
             "error": "Erro interno ao calcular capacidade",
             "message": "Não foi possível calcular a capacidade do produto. Tente novamente mais tarde."
