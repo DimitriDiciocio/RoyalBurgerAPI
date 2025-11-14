@@ -127,18 +127,25 @@ def _get_image_hash(image_url):
         logger.warning(f"Erro ao gerar hash da imagem: {e}", exc_info=True)
     return None
 
-def _get_product_availability_status(product_id, cur):
+def _get_product_availability_status(product_id, cur, for_listing=False):
     """
     Verifica o status de disponibilidade do produto baseado na capacidade de produção.
     
     NOVO: Usa cálculo de capacidade ao invés de apenas verificar estoque.
     Produto disponível se capacidade >= 1.
+    
+    Args:
+        product_id: ID do produto
+        cur: Cursor do banco
+        for_listing: Se True, usa estoque físico (sem reservas temporárias) para listagem.
+                     Se False, usa estoque disponível (com reservas temporárias) para validação.
     """
     try:
         from . import stock_service
         
-        # Calcula capacidade de produção
-        capacity_info = stock_service.calculate_product_capacity(product_id, cur=cur, include_extras=False)
+        # CORREÇÃO: Para listagem, calcula capacidade sem reservas temporárias
+        # Para validação, calcula capacidade com reservas temporárias
+        capacity_info = stock_service.calculate_product_capacity(product_id, cur=cur, include_extras=False, for_listing=for_listing)
         
         capacity = capacity_info.get('capacity', 0)
         is_available = capacity_info.get('is_available', False)
@@ -169,7 +176,7 @@ def _get_product_availability_status(product_id, cur):
         return "unknown"
 
 
-def _batch_get_product_availability_status(product_ids, cur):
+def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
     """
     OTIMIZAÇÃO: Calcula status de disponibilidade para múltiplos produtos de uma vez.
     Evita N+1 queries ao buscar ingredientes, estoque e calcular capacidade em batch.
@@ -177,6 +184,8 @@ def _batch_get_product_availability_status(product_ids, cur):
     Args:
         product_ids: Lista de IDs de produtos
         cur: Cursor do banco
+        for_listing: Se True, usa estoque físico (sem reservas temporárias) para listagem.
+                     Se False, usa estoque disponível (com reservas temporárias) para validação.
     
     Returns:
         dict: {
@@ -308,12 +317,17 @@ def _batch_get_product_availability_status(product_ids, cur):
             for ing in ingredients:
                 all_ingredient_ids.add(ing['ingredient_id'])
         
-        logger.info(f"[PRODUCT_SERVICE] Buscando estoque disponível para {len(all_ingredient_ids)} ingredientes únicos")
+        logger.info(f"[PRODUCT_SERVICE] Buscando estoque {'físico' if for_listing else 'disponível'} para {len(all_ingredient_ids)} ingredientes únicos")
         
         ingredient_availability = {}
         if all_ingredient_ids:
-            ingredient_availability = stock_service._batch_get_ingredient_available_stock(list(all_ingredient_ids), cur)
-            logger.info(f"[PRODUCT_SERVICE] Estoque disponível retornado para {len(ingredient_availability)} ingredientes")
+            # CORREÇÃO: Para listagem, usa estoque físico (sem reservas temporárias)
+            # Para validação, usa estoque disponível (com reservas temporárias)
+            if for_listing:
+                ingredient_availability = stock_service._batch_get_ingredient_physical_stock(list(all_ingredient_ids), cur)
+            else:
+                ingredient_availability = stock_service._batch_get_ingredient_available_stock(list(all_ingredient_ids), cur)
+            logger.info(f"[PRODUCT_SERVICE] Estoque {'físico' if for_listing else 'disponível'} retornado para {len(ingredient_availability)} ingredientes")
             
             # LOG: Estoque de alguns ingredientes
             for ing_id, stock in list(ingredient_availability.items())[:5]:
@@ -1009,8 +1023,10 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
                 # LOG: Iniciando cálculo de disponibilidade em batch
                 logger.info(f"[PRODUCT_SERVICE] Calculando disponibilidade para {len(product_ids)} produtos: {product_ids[:5]}...")
                 
-                # Calcula disponibilidade de todos os produtos de uma vez
-                batch_availability = _batch_get_product_availability_status(product_ids, cur)
+                # CORREÇÃO: Para listagem (filter_unavailable=True), usa estoque físico (sem reservas temporárias)
+                # Para validação (filter_unavailable=False), usa estoque disponível (com reservas temporárias)
+                for_listing = filter_unavailable
+                batch_availability = _batch_get_product_availability_status(product_ids, cur, for_listing=for_listing)
                 
                 # LOG: Resultados do batch
                 logger.info(f"[PRODUCT_SERVICE] batch_availability retornou {len(batch_availability)} produtos")

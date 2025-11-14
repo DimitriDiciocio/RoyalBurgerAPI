@@ -1537,6 +1537,100 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
             conn.close()
 
 
+def get_ingredient_physical_stock(ingredient_id, cur=None):
+    """
+    Obtém estoque físico de um insumo SEM considerar reservas temporárias.
+    
+    Usado para cálculo de disponibilidade na listagem de produtos.
+    A reserva temporária só é considerada na validação ao adicionar/atualizar na cesta.
+    
+    Args:
+        ingredient_id: ID do insumo
+        cur: Cursor do banco (opcional, se None cria nova conexão)
+    
+    Returns:
+        Decimal: Estoque físico (sem reservas temporárias, mas com reservas confirmadas)
+    """
+    conn = None
+    should_close = False
+    
+    try:
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close = True
+        
+        # Busca informações do insumo
+        cur.execute("""
+            SELECT 
+                CURRENT_STOCK,
+                MIN_STOCK_THRESHOLD,
+                STOCK_UNIT,
+                IS_AVAILABLE
+            FROM INGREDIENTS
+            WHERE ID = ?
+        """, (ingredient_id,))
+        
+        row = cur.fetchone()
+        if not row:
+            return Decimal('0')
+        
+        current_stock, min_threshold, stock_unit, is_available = row
+        
+        if not is_available:
+            return Decimal('0')
+        
+        current_stock_decimal = Decimal(str(current_stock or 0))
+        
+        # Calcula reservas confirmadas (pedidos pendentes/confirmados/preparando)
+        # IMPORTANTE: Considera apenas reservas confirmadas, NÃO reservas temporárias
+        cur.execute("""
+            SELECT 
+                oi.QUANTITY,
+                pi.PORTIONS,
+                i2.BASE_PORTION_QUANTITY,
+                i2.BASE_PORTION_UNIT,
+                i2.STOCK_UNIT
+            FROM ORDER_ITEMS oi
+            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
+            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
+            JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE pi.INGREDIENT_ID = ?
+              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
+        """, (ingredient_id,))
+        
+        confirmed_reservations = Decimal('0')
+        for row in cur.fetchall():
+            oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
+            try:
+                # Calcula consumo convertido para unidade do estoque
+                consumption = calculate_consumption_in_stock_unit(
+                    portions=portions or 0,
+                    base_portion_quantity=base_portion_quantity or 1,
+                    base_portion_unit=base_portion_unit or 'un',
+                    stock_unit=stock_unit or 'un',
+                    item_quantity=oi_quantity or 1
+                )
+                confirmed_reservations += consumption
+            except ValueError as e:
+                logger.warning(f"Erro ao calcular reserva confirmada: {e}")
+                continue
+        
+        # Estoque físico = estoque_real - reservas_confirmadas (SEM reservas temporárias)
+        # NOTA: MIN_STOCK_THRESHOLD é apenas um indicador de alerta para reabastecimento
+        physical_stock = current_stock_decimal - confirmed_reservations
+        
+        # Retorna estoque físico (garantindo que não seja negativo)
+        return max(Decimal('0'), physical_stock)
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao obter estoque físico: {e}", exc_info=True)
+        return Decimal('0')
+    finally:
+        if should_close and conn:
+            conn.close()
+
+
 # =====================================================
 # CÁLCULO DE CAPACIDADE DE PRODUÇÃO
 # =====================================================
@@ -1783,7 +1877,120 @@ def _batch_get_ingredient_available_stock(ingredient_ids, cur):
         return {}
 
 
-def calculate_product_capacity(product_id, cur=None, include_extras=True):
+def _batch_get_ingredient_physical_stock(ingredient_ids, cur):
+    """
+    OTIMIZAÇÃO: Obtém estoque físico para múltiplos ingredientes de uma vez.
+    SEM considerar reservas temporárias (usado para listagem de produtos).
+    
+    Evita N+1 queries ao buscar estoque e reservas confirmadas em batch.
+    
+    Args:
+        ingredient_ids: Lista de IDs de ingredientes
+        cur: Cursor do banco
+    
+    Returns:
+        dict: {ingredient_id: Decimal(estoque_físico)}
+    """
+    if not ingredient_ids:
+        return {}
+    
+    try:
+        placeholders = ', '.join(['?' for _ in ingredient_ids])
+        
+        # Busca informações básicas dos ingredientes
+        cur.execute(f"""
+            SELECT 
+                ID,
+                CURRENT_STOCK,
+                MIN_STOCK_THRESHOLD,
+                STOCK_UNIT,
+                IS_AVAILABLE
+            FROM INGREDIENTS
+            WHERE ID IN ({placeholders})
+        """, tuple(ingredient_ids))
+        
+        ingredients_info = {}
+        ingredient_rows = cur.fetchall()
+        logger.debug(f"[STOCK_SERVICE] Encontrados {len(ingredient_rows)} ingredientes no banco (estoque físico)")
+        
+        for row in ingredient_rows:
+            ing_id, current_stock, min_threshold, stock_unit, is_available = row
+            if not is_available:
+                ingredients_info[ing_id] = {
+                    'current_stock': Decimal('0'),
+                    'min_threshold': Decimal('0'),
+                    'stock_unit': stock_unit,
+                }
+            else:
+                ingredients_info[ing_id] = {
+                    'current_stock': Decimal(str(current_stock or 0)),
+                    'min_threshold': Decimal(str(min_threshold or 0)),
+                    'stock_unit': stock_unit,
+                }
+        
+        # OTIMIZAÇÃO: Busca reservas confirmadas de todos os ingredientes de uma vez
+        # IMPORTANTE: Considera apenas reservas confirmadas, NÃO reservas temporárias
+        cur.execute(f"""
+            SELECT 
+                pi.INGREDIENT_ID,
+                oi.QUANTITY,
+                pi.PORTIONS,
+                i2.BASE_PORTION_QUANTITY,
+                i2.BASE_PORTION_UNIT,
+                i2.STOCK_UNIT
+            FROM ORDER_ITEMS oi
+            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
+            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
+            JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            WHERE pi.INGREDIENT_ID IN ({placeholders})
+              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
+        """, tuple(ingredient_ids))
+        
+        # Calcula reservas confirmadas por ingrediente
+        confirmed_reservations = {ing_id: Decimal('0') for ing_id in ingredient_ids}
+        confirmed_rows = cur.fetchall()
+        
+        for row in confirmed_rows:
+            ing_id, oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
+            if ing_id not in ingredients_info:
+                continue
+            
+            try:
+                # Calcula consumo convertido para unidade do estoque
+                consumption = calculate_consumption_in_stock_unit(
+                    portions=portions or 0,
+                    base_portion_quantity=base_portion_quantity or 1,
+                    base_portion_unit=base_portion_unit or 'un',
+                    stock_unit=stock_unit or 'un',
+                    item_quantity=oi_quantity or 1
+                )
+                confirmed_reservations[ing_id] += consumption
+            except ValueError as e:
+                logger.warning(f"[STOCK_SERVICE] Erro ao calcular reserva confirmada para ingrediente {ing_id}: {e}", exc_info=True)
+                continue
+        
+        # Calcula estoque físico para cada ingrediente (SEM reservas temporárias)
+        physical_stock_map = {}
+        for ing_id in ingredient_ids:
+            if ing_id not in ingredients_info:
+                physical_stock_map[ing_id] = Decimal('0')
+                continue
+            
+            info = ingredients_info[ing_id]
+            current_stock = info['current_stock']
+            confirmed = confirmed_reservations.get(ing_id, Decimal('0'))
+            
+            # Estoque físico = estoque_real - reservas_confirmadas (SEM reservas temporárias)
+            physical_stock = current_stock - confirmed
+            physical_stock_map[ing_id] = max(Decimal('0'), physical_stock)
+        
+        return physical_stock_map
+    except Exception as e:
+        logger.error(f"[STOCK_SERVICE] Erro ao buscar estoque físico em batch: {e}", exc_info=True)
+        return {}
+
+
+def calculate_product_capacity(product_id, cur=None, include_extras=True, for_listing=False):
     """
     Calcula a capacidade de produção de um produto.
     
@@ -1793,6 +2000,8 @@ def calculate_product_capacity(product_id, cur=None, include_extras=True):
         product_id: ID do produto
         cur: Cursor do banco (opcional)
         include_extras: Se True, considera extras além da receita base
+        for_listing: Se True, usa estoque físico (sem reservas temporárias) para listagem.
+                     Se False, usa estoque disponível (com reservas temporárias) para validação.
     
     Returns:
         dict: {
@@ -1887,8 +2096,12 @@ def calculate_product_capacity(product_id, cur=None, include_extras=True):
             if not is_available:
                 continue
             
-            # Obtém estoque disponível
-            available_stock = get_ingredient_available_stock(ing_id, cur)
+            # CORREÇÃO: Para listagem, usa estoque físico (sem reservas temporárias)
+            # Para validação, usa estoque disponível (com reservas temporárias)
+            if for_listing:
+                available_stock = get_ingredient_physical_stock(ing_id, cur)
+            else:
+                available_stock = get_ingredient_available_stock(ing_id, cur)
             
             # SIMPLIFICAÇÃO: Calcula consumo (perdas são opcionais, padrão 0)
             try:

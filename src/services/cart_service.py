@@ -163,23 +163,25 @@ def get_cart_items(cart_id):
                 # extra_row: [CART_ITEM_ID, ID, INGREDIENT_ID, QUANTITY, DELTA, UNIT_PRICE, TYPE, INGREDIENT_NAME]
                 row_id = extra_row[1]
                 ingredient_id = extra_row[2]
-                quantity = int(extra_row[3] or 0)  # QUANTITY é a quantidade total
+                extra_quantity = int(extra_row[3] or 0)  # QUANTITY é a quantidade total de extras
                 delta = int(extra_row[4] or 0)  # DELTA pode ser diferente para base_modifications
                 unit_price = float(extra_row[5] or 0.0)
                 row_type = (extra_row[6] or 'extra').lower()
                 ingredient_name = extra_row[7]
 
                 if row_type == 'extra':
-                    # Para extras, QUANTITY é a quantidade total (incluindo min_quantity)
+                    # CORREÇÃO: Para extras, QUANTITY é a quantidade TOTAL (não por unidade do produto)
+                    # O frontend envia quantity × quantidade_produto, então já é o total
                     extras.append({
                         "id": row_id,
                         "ingredient_id": ingredient_id,
-                        "quantity": quantity,  # Usa QUANTITY (quantidade total)
+                        "quantity": extra_quantity,  # Quantidade total de extras
                         "ingredient_name": ingredient_name,
                         "ingredient_price": unit_price
                     })
-                    if quantity > 0:
-                        extras_total += unit_price * quantity
+                    if extra_quantity > 0:
+                        # CORREÇÃO: extras_total já é o total, não precisa multiplicar pela quantidade do produto
+                        extras_total += unit_price * extra_quantity
                 else:  # base
                     base_modifications.append({
                         "ingredient_id": ingredient_id,
@@ -191,7 +193,10 @@ def get_cart_items(cart_id):
                         base_mods_total += unit_price * delta
             
             # Calcula subtotal do item
-            item_subtotal = (product_price + extras_total + base_mods_total) * quantity
+            # CORREÇÃO: extras_total já é o total de todos os extras (não por unidade)
+            # Então: (preço_base × quantidade_produto) + extras_total + (base_mods_total × quantidade_produto)
+            # base_mods_total é por unidade, então precisa multiplicar pela quantidade
+            item_subtotal = (product_price * quantity) + extras_total + (base_mods_total * quantity)
             
             item = {
                 "id": item_id,
@@ -639,10 +644,14 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                             stock_unit = stock_info['stock_unit']
                             current_stock = stock_info['current_stock']
                             
+                            # CORREÇÃO: qty é o total de extras, dividir pela quantidade do produto para obter porções por unidade
+                            # Porque calculate_consumption_in_stock_unit espera porções por unidade
+                            portions_por_unidade = qty / new_total_quantity if new_total_quantity > 0 else qty
+                            
                             # Calcula consumo para a NOVA quantidade total
                             try:
                                 required_quantity_total = stock_service.calculate_consumption_in_stock_unit(
-                                    portions=qty,
+                                    portions=portions_por_unidade,
                                     base_portion_quantity=float(base_portion_quantity),
                                     base_portion_unit=str(base_portion_unit),
                                     stock_unit=str(stock_unit),
@@ -1485,8 +1494,8 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
             cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE CART_ITEM_ID = ? AND TYPE = 'extra';", (cart_item_id,))
             for extra in extras:
                 ingredient_id = extra.get("ingredient_id")
-                extra_quantity = int(extra.get("quantity", 1))
-                if extra_quantity <= 0:
+                extra_quantity_total = int(extra.get("quantity", 1))  # CORREÇÃO: quantity é o total
+                if extra_quantity_total <= 0:
                     continue
                 cur.execute("SELECT COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID = ? AND IS_AVAILABLE = TRUE;", (ingredient_id,))
                 rowp = cur.fetchone()
@@ -1494,7 +1503,7 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
                     unit_price = float(rowp[0] or 0.0)
                     cur.execute(
                         "INSERT INTO CART_ITEM_EXTRAS (CART_ITEM_ID, INGREDIENT_ID, QUANTITY, TYPE, DELTA, UNIT_PRICE) VALUES (?, ?, ?, 'extra', ?, ?);",
-                        (cart_item_id, ingredient_id, extra_quantity, extra_quantity, unit_price)
+                        (cart_item_id, ingredient_id, extra_quantity_total, extra_quantity_total, unit_price)
                     )
         
         # Atualiza base_modifications se fornecido
