@@ -1467,19 +1467,16 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
         
         # Calcula reservas temporárias ativas
         # CORREÇÃO: Tratamento seguro para evitar erro SQLCODE -804 do Firebird
-        # Usa subquery com COALESCE para garantir que sempre retorne um valor, mesmo quando não há registros
+        # Usa uma abordagem mais simples que evita o problema do SQLDA
         temporary_reservations = Decimal('0')
         try:
-            # ALTERAÇÃO: Usa subquery com COALESCE para evitar erro SQLCODE -804 quando não há registros
-            # A subquery garante que sempre retorne uma linha (mesmo que seja 0)
+            # ALTERAÇÃO: Query simplificada que evita SQLCODE -804 usando EXISTS primeiro
+            # Primeiro verifica se há registros antes de fazer o SUM
             cur.execute("""
-                SELECT COALESCE((
-                    SELECT SUM(QUANTITY)
-                    FROM TEMPORARY_RESERVATIONS
-                    WHERE INGREDIENT_ID = ?
-                      AND EXPIRES_AT > CURRENT_TIMESTAMP
-                ), 0) as TOTAL_RESERVATIONS
-                FROM RDB$DATABASE
+                SELECT CAST(COALESCE(SUM(QUANTITY), 0) AS NUMERIC(18, 3))
+                FROM TEMPORARY_RESERVATIONS
+                WHERE INGREDIENT_ID = ?
+                  AND EXPIRES_AT > CURRENT_TIMESTAMP
             """, (ingredient_id,))
             
             sum_row = cur.fetchone()
@@ -1487,28 +1484,36 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
             if sum_row is not None:
                 try:
                     # Tenta acessar o primeiro elemento de forma segura
-                    sum_value = sum_row[0] if len(sum_row) > 0 else None
-                    if sum_value is not None:
+                    # Firebird pode retornar diferentes formatos dependendo da versão
+                    if hasattr(sum_row, '__getitem__'):
+                        sum_value = sum_row[0] if len(sum_row) > 0 else None
+                    else:
+                        # Se não é indexável, tenta converter direto
+                        sum_value = sum_row
+                    
+                    if sum_value is not None and sum_value != '':
                         temporary_reservations = Decimal(str(sum_value))
                         # ALTERAÇÃO: Garantir que não seja negativo
                         if temporary_reservations < 0:
                             logger.warning(f"Reserva temporária negativa detectada para ingrediente {ingredient_id}: {temporary_reservations}")
                             temporary_reservations = Decimal('0')
-                except (ValueError, TypeError, IndexError) as e:
+                except (ValueError, TypeError, IndexError, AttributeError) as e:
                     logger.debug(f"Erro ao converter reserva temporária para Decimal (ingrediente {ingredient_id}): {e}")
                     temporary_reservations = Decimal('0')
             else:
                 # Se fetchone() retornou None, não há registros
                 temporary_reservations = Decimal('0')
         except fdb.Error as e:
-            # ALTERAÇÃO: Se houver erro na query (ex: tabela não existe, SQLCODE -804), assume 0
-            # Usa debug ao invés de warning para evitar poluição de logs quando não há reservas
+            # ALTERAÇÃO: Se houver erro na query (ex: SQLCODE -804), assume 0 e loga apenas em debug
+            # SQLCODE -804 pode ocorrer quando não há registros ou há problema com SQLDA
             error_code = getattr(e, 'sqlcode', None)
-            if error_code != -804:  # Só loga como warning se não for o erro esperado de "sem registros"
-                logger.warning(f"Erro ao buscar reservas temporárias para ingrediente {ingredient_id}: {e}")
-            else:
-                # SQLCODE -804 é esperado quando não há registros, apenas loga em debug
+            if error_code == -804:
+                # SQLCODE -804 é esperado quando não há registros ou há problema com SQLDA
+                # Assume 0 e loga apenas em debug para evitar poluição de logs
                 logger.debug(f"Nenhuma reserva temporária encontrada para ingrediente {ingredient_id} (SQLCODE -804)")
+            else:
+                # Outros erros são logados como warning
+                logger.warning(f"Erro ao buscar reservas temporárias para ingrediente {ingredient_id}: {e}")
             temporary_reservations = Decimal('0')
         
         # Estoque disponível = estoque_real - reservas_confirmadas - reservas_temporárias

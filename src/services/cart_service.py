@@ -746,6 +746,7 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 rules = _get_product_rules(cur, product_id)
                 # OTIMIZAÇÃO: Busca preços de ingredientes de base em batch
                 base_mod_ingredient_ids = []
+                base_mod_deltas = {}
                 for bm in base_modifications:
                     try:
                         ing_id = int(bm.get("ingredient_id"))
@@ -753,8 +754,85 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                         rule = rules.get(ing_id)
                         if rule and float(rule["portions"]) != 0.0 and delta != 0:
                             base_mod_ingredient_ids.append(ing_id)
+                            base_mod_deltas[ing_id] = delta
                     except (ValueError, TypeError, AttributeError):
                         continue
+                
+                # VALIDAÇÃO: Verifica estoque para base_modifications antes de inserir
+                if base_mod_ingredient_ids:
+                    # Busca nomes de ingredientes e base_portions para mensagens de erro
+                    placeholders = ', '.join(['?' for _ in base_mod_ingredient_ids])
+                    cur.execute(f"SELECT ID, NAME FROM INGREDIENTS WHERE ID IN ({placeholders})", tuple(base_mod_ingredient_ids))
+                    base_mod_names = {}
+                    for row in cur.fetchall():
+                        base_mod_names[row[0]] = row[1]
+                    
+                    # Busca base_portions de cada ingrediente na receita base
+                    base_portions_map = {}
+                    placeholders = ', '.join(['?' for _ in base_mod_ingredient_ids])
+                    cur.execute(f"""
+                        SELECT INGREDIENT_ID, PORTIONS
+                        FROM PRODUCT_INGREDIENTS
+                        WHERE PRODUCT_ID = ? AND INGREDIENT_ID IN ({placeholders})
+                    """, (product_id, *base_mod_ingredient_ids))
+                    for row in cur.fetchall():
+                        base_portions_map[row[0]] = float(row[1] or 0)
+                    
+                    # Busca informações de estoque de todos os ingredientes de base_modifications de uma vez
+                    from .product_service import get_ingredient_max_available_quantity
+                    from .stock_service import get_ingredient_available_stock
+                    
+                    # Valida cada base_modification
+                    for ing_id in base_mod_ingredient_ids:
+                        delta = base_mod_deltas[ing_id]
+                        # Apenas deltas positivos consomem estoque
+                        if delta <= 0:
+                            continue
+                        
+                        # Busca informações do ingrediente
+                        cur.execute("""
+                            SELECT BASE_PORTION_QUANTITY, BASE_PORTION_UNIT, STOCK_UNIT, IS_AVAILABLE
+                            FROM INGREDIENTS
+                            WHERE ID = ?
+                        """, (ing_id,))
+                        ing_row = cur.fetchone()
+                        if not ing_row or not ing_row[3]:  # IS_AVAILABLE
+                            ing_name = base_mod_names.get(ing_id, 'Ingrediente')
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Ingrediente '{ing_name}' não disponível")
+                        
+                        base_portion_quantity = float(ing_row[0] or 1)
+                        base_portion_unit = str(ing_row[1] or 'un')
+                        stock_unit = str(ing_row[2] or 'un')
+                        
+                        # Obtém estoque disponível (considerando reservas temporárias)
+                        available_stock = get_ingredient_available_stock(ing_id, cur)
+                        if not isinstance(available_stock, Decimal):
+                            available_stock = Decimal(str(available_stock or 0))
+                        
+                        # Calcula consumo convertido para unidade do estoque
+                        # Para base_modifications, delta é em porções por unidade
+                        # O consumo total é: delta × BASE_PORTION_QUANTITY × quantity
+                        try:
+                            required_quantity = stock_service.calculate_consumption_in_stock_unit(
+                                portions=delta,
+                                base_portion_quantity=base_portion_quantity,
+                                base_portion_unit=base_portion_unit,
+                                stock_unit=stock_unit,
+                                item_quantity=quantity
+                            )
+                        except ValueError as e:
+                            ing_name = base_mod_names.get(ing_id, 'Ingrediente')
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Erro na conversão de unidades para '{ing_name}': {str(e)}")
+                        
+                        # Compara com estoque disponível
+                        if available_stock < required_quantity:
+                            ing_name = base_mod_names.get(ing_id, 'Ingrediente')
+                            return (False, "INSUFFICIENT_STOCK", 
+                                   f"Estoque insuficiente de '{ing_name}'. "
+                                   f"Necessário: {required_quantity:.3f} {stock_unit}, "
+                                   f"Disponível: {available_stock:.3f} {stock_unit}")
                 
                 base_mod_prices = {}
                 if base_mod_ingredient_ids:

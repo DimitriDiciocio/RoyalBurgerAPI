@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 import logging
-from ..services import cart_service
+from ..services import cart_service, stock_service
 from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 
 cart_bp = Blueprint('cart', __name__)
@@ -616,6 +616,42 @@ def claim_guest_cart_route():
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
+@cart_bp.route('/maintenance/cleanup-expired-reservations', methods=['POST'])
+def cleanup_expired_reservations_route():
+    """
+    Endpoint de manutenção para limpar reservas temporárias expiradas.
+    
+    Este endpoint deve ser chamado periodicamente por um cron job ou scheduler
+    para garantir que reservas expiradas não ocupem espaço desnecessariamente.
+    
+    TTL das reservas: 10 minutos
+    Recomendação: Executar a cada 5-10 minutos
+    
+    Exemplo de cron job (Linux):
+    */5 * * * * curl -X POST http://localhost:5000/api/cart/maintenance/cleanup-expired-reservations
+    """
+    try:
+        # Limpa apenas reservas expiradas (sem parâmetros específicos)
+        success, cleared_count, error_code, message = stock_service.clear_temporary_reservations()
+        
+        if not success:
+            logger.error(f"Erro ao limpar reservas temporárias: {message}")
+            return jsonify({
+                "error": message or "Erro ao limpar reservas temporárias",
+                "cleared_count": 0
+            }), 500
+        
+        logger.info(f"Limpeza de reservas temporárias: {cleared_count} reservas removidas")
+        return jsonify({
+            "message": f"{cleared_count} reservas temporárias expiradas removidas",
+            "cleared_count": cleared_count
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Erro ao limpar reservas temporárias: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
 @cart_bp.route('/sync', methods=['POST'])
 @jwt_required()
 def sync_cart_route():
@@ -672,4 +708,6 @@ def sync_cart_route():
         }), 200
         
     except Exception as e:
+        # ALTERAÇÃO: Adicionado logging estruturado para diagnóstico
+        logger.error(f"Erro ao sincronizar carrinho: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500

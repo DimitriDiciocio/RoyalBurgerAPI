@@ -497,7 +497,7 @@ def remove_ingredient_from_product(product_id, ingredient_id):
         if conn: 
             conn.close()  
 
-def get_ingredients_for_product(product_id):  
+def get_ingredients_for_product(product_id, quantity=1):  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -539,11 +539,14 @@ def get_ingredients_for_product(product_id):
             line_cost = portion_cost * portions
             
             # AJUSTE: Calcular quantidade máxima disponível baseada no estoque
-            # Passa as porções base do ingrediente no produto para cálculo correto
+            # IMPORTANTE: REGRA DE CONSUMO PROPORCIONAL POR QUANTIDADE
+            # Passa quantity (quantidade do produto) para calcular max_available considerando consumo acumulado
+            # O backend calcula: consumo_total = consumo_por_unidade × quantity
+            # Isso garante que o max_quantity dos ingredientes seja calculado considerando todas as unidades
             max_available_info = get_ingredient_max_available_quantity(
                 ingredient_id=ingredient_id,
                 max_quantity_from_rule=max_quantity if max_quantity > 0 else None,
-                item_quantity=1,  # Por padrão, verifica para 1 item
+                item_quantity=quantity,  # CORREÇÃO: Usar quantity passado (não sempre 1)
                 base_portions=portions,  # AJUSTE: Passar porções base do produto
                 cur=cur  # Reutiliza conexão existente
             )

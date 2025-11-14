@@ -740,53 +740,106 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
                 }
             }
         
+        # IMPORTANTE: Usar estoque disponível (já considera reservas), não apenas CURRENT_STOCK
+        from .stock_service import get_ingredient_available_stock
+        available_stock_result = get_ingredient_available_stock(ingredient_id, cur)
+        # get_ingredient_available_stock retorna Decimal diretamente, não um dicionário
+        available_stock_decimal = available_stock_result if isinstance(available_stock_result, Decimal) else Decimal(str(available_stock_result or 0))
+        
         current_stock_decimal = Decimal(str(current_stock or 0))
         base_portion_quantity_decimal = Decimal(str(base_portion_quantity or 1))
         stock_unit_str = stock_unit or 'un'
         base_portion_unit_str = base_portion_unit or 'un'
         
-        # Calcula quantidade máxima baseada no estoque
+        # LOG: Estoque disponível
+        logger.info(
+            f"[get_ingredient_max_available_quantity] Estoque para ingrediente {ingredient_id} (item_quantity={item_quantity}): "
+            f"current_stock={current_stock_decimal} {stock_unit_str}, "
+            f"available_stock={available_stock_decimal} {stock_unit_str}"
+        )
+        
+        # Calcula quantidade máxima baseada no estoque DISPONÍVEL (já considera reservas)
         # Precisa converter da unidade do estoque para a unidade da porção base
         max_from_stock = 0
-        if current_stock_decimal > 0:
+        if available_stock_decimal > 0:
             try:
-                # Converte estoque para unidade da porção base
-                # Usa calculate_consumption_in_stock_unit de forma reversa
-                # Para converter de stock_unit para base_portion_unit, usa a função interna
+                # Converte estoque DISPONÍVEL para unidade da porção base
                 from .stock_service import _convert_unit
                 stock_in_base_unit = _convert_unit(
-                    current_stock_decimal,
+                    available_stock_decimal,  # CORREÇÃO: Usar estoque disponível, não total
                     stock_unit_str,
                     base_portion_unit_str
                 )
                 
-                # Log de debug para verificar conversão
+                # Log de debug para verificar conversão e cálculo
                 logger.debug(
                     f"[get_ingredient_max_available_quantity] Ingrediente {ingredient_id}: "
-                    f"Estoque original: {current_stock_decimal} {stock_unit_str} → "
+                    f"Estoque disponível: {available_stock_decimal} {stock_unit_str} → "
                     f"Convertido: {stock_in_base_unit} {base_portion_unit_str}"
                 )
                 
                 # AJUSTE: Calcula quantas porções extras podem ser adicionadas
                 # Considera as porções base já incluídas no produto
-                # Fórmula: (base_portions * item_quantity + extras * item_quantity) * base_portion_quantity <= current_stock
-                # Simplificando: (base_portions + extras) * base_portion_quantity * item_quantity <= current_stock
-                # Então: extras <= (current_stock / (base_portion_quantity * item_quantity)) - base_portions
+                # Fórmula: (base_portions * item_quantity + extras * item_quantity) * base_portion_quantity <= available_stock
+                # Simplificando: (base_portions + extras) * base_portion_quantity * item_quantity <= available_stock
+                # Então: extras <= (available_stock / (base_portion_quantity * item_quantity)) - base_portions
                 if base_portion_quantity_decimal > 0:
-                    # Converte estoque para quantidade total de porções disponíveis
+                    # Converte estoque DISPONÍVEL para quantidade total de porções disponíveis
                     total_portions_available = stock_in_base_unit / base_portion_quantity_decimal
                     
                     # CORREÇÃO: base_portions é por item, então calcula total de porções base
                     base_portions_decimal = Decimal(str(base_portions or 0))
                     total_base_portions = base_portions_decimal * Decimal(str(item_quantity))
                     
+                    # LOG: Valores de cálculo
+                    logger.info(
+                        f"[get_ingredient_max_available_quantity] Cálculo para ingrediente {ingredient_id} (item_quantity={item_quantity}): "
+                        f"total_portions_available={total_portions_available}, "
+                        f"base_portions_decimal={base_portions_decimal}, "
+                        f"total_base_portions={total_base_portions}"
+                    )
+                    
                     # Se base_portions > 0, é um ingrediente da base
-                    # Nesse caso, retorna o total de porções possíveis (não apenas extras)
-                    # Exemplo: estoque permite 2 porções, já usa 1 na base → retorna 2 (total), não 1 (extra)
+                    # CORREÇÃO CRÍTICA: Para ingredientes base, max_quantity representa o total de porções possíveis (base + extras)
+                    # MAS precisa considerar que quando item_quantity muda, o consumo base muda proporcionalmente
+                    # 
+                    # Exemplo:
+                    # - Estoque disponível = 0.12kg
+                    # - base_portion_quantity = 0.03kg (30g)
+                    # - base_portions = 2 porções por item
+                    # - total_portions_available = 0.12 / 0.03 = 4 porções totais possíveis
+                    #
+                    # Quando item_quantity=2:
+                    #   - total_base_portions = 2 × 2 = 4
+                    #   - max_quantity = 4 (total: 4 base + 0 extras)
+                    #
+                    # Quando item_quantity=1:
+                    #   - total_base_portions = 2 × 1 = 2
+                    #   - max_quantity = 4 (total: 2 base + 2 extras) ← Deveria ser 4, não 2!
+                    #
+                    # O problema é que max_quantity deve ser o total (base + extras), não apenas extras.
+                    # Então quando item_quantity diminui, o consumo base diminui, mas o max_quantity total permanece o mesmo
+                    # porque o estoque disponível total não muda.
+                    #
+                    # Na verdade, para ingredientes base, max_quantity = total_portions_available sempre
+                    # porque representa o total de porções possíveis (base + extras).
+                    # O que muda com item_quantity é quanto desse total já está sendo usado pela base (total_base_portions).
                     if base_portions_decimal > 0:
-                        # Para ingredientes base, retorna o total de porções possíveis
-                        # Arredonda para baixo o total de porções disponíveis
+                        # Para ingredientes base, max_from_stock é o total de porções possíveis (base + extras)
+                        # Este valor é sempre total_portions_available porque representa o estoque total disponível
+                        # Quando item_quantity muda, total_base_portions muda, mas total_portions_available não muda
+                        # porque o estoque disponível total permanece o mesmo
                         max_from_stock = max(0, int(total_portions_available))
+                        
+                        # LOG: Valores detalhados
+                        logger.info(
+                            f"[get_ingredient_max_available_quantity] Ingrediente base {ingredient_id}: "
+                            f"item_quantity={item_quantity}, "
+                            f"base_portions={base_portions_decimal}, "
+                            f"total_base_portions={total_base_portions}, "
+                            f"total_portions_available={total_portions_available}, "
+                            f"max_from_stock={max_from_stock}"
+                        )
                     else:
                         # Para ingredientes extras (base_portions = 0), calcula apenas extras
                         # Calcula quantas porções extras totais podem ser adicionadas
@@ -830,6 +883,15 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
             max_available = max_from_stock
             if max_available > 0:
                 limited_by.append('stock')
+        
+        # LOG: Valores finais
+        logger.info(
+            f"[get_ingredient_max_available_quantity] Resultado final para ingrediente {ingredient_id} (item_quantity={item_quantity}): "
+            f"max_quantity_from_rule={max_quantity_from_rule}, "
+            f"max_from_stock={max_from_stock}, "
+            f"max_available={max_available}, "
+            f"limited_by={limited_by}"
+        )
         
         return {
             'max_available': max_available,
