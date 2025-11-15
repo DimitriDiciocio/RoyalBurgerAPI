@@ -1,5 +1,5 @@
 from ..database import get_db_connection
-from . import stock_service
+from . import stock_service, promotion_service
 import fdb
 import logging
 from decimal import Decimal
@@ -21,6 +21,41 @@ def _validate_cart_id(cart_id):
         raise ValueError("cart_id deve ser um inteiro positivo")
     
     return cart_id
+
+def _apply_promotion_to_price(product_price, promotion):
+    """
+    Aplica desconto de promoção ao preço do produto
+    
+    Args:
+        product_price: Preço original do produto
+        promotion: Dicionário com dados da promoção (pode ser None)
+    
+    Returns:
+        Tuple (preco_final, valor_desconto, tem_promocao)
+    """
+    if not promotion:
+        return (float(product_price), 0.0, False)
+    
+    try:
+        price = float(product_price)
+        discount_percentage = promotion.get('discount_percentage')
+        discount_value = promotion.get('discount_value')
+        
+        # Aplica desconto percentual ou em valor fixo
+        if discount_percentage and discount_percentage > 0:
+            discount = (price * discount_percentage) / 100.0
+            final_price = price - discount
+        elif discount_value and discount_value > 0:
+            discount = float(discount_value)
+            final_price = price - discount
+        else:
+            return (price, 0.0, False)
+        
+        # Garante que o preço final não seja negativo
+        final_price = max(0.0, final_price)
+        return (final_price, discount, True)
+    except (ValueError, TypeError, AttributeError):
+        return (float(product_price), 0.0, False)
 
 def _calculate_cart_totals(items):
     """Calcula totais do carrinho de forma centralizada"""
@@ -192,11 +227,18 @@ def get_cart_items(cart_id):
                     if delta > 0:
                         base_mods_total += unit_price * delta
             
+            # ALTERAÇÃO: Buscar promoção ativa para o produto
+            promotion = promotion_service.get_promotion_by_product_id(product_id, include_expired=False)
+            
+            # ALTERAÇÃO: Aplicar desconto de promoção ao preço base do produto
+            product_price_with_promotion, discount_per_unit, has_promotion = _apply_promotion_to_price(product_price, promotion)
+            
             # Calcula subtotal do item
             # CORREÇÃO: extras_total já é o total de todos os extras (não por unidade)
-            # Então: (preço_base × quantidade_produto) + extras_total + (base_mods_total × quantidade_produto)
+            # Então: (preço_base_com_promocao × quantidade_produto) + extras_total + (base_mods_total × quantidade_produto)
             # base_mods_total é por unidade, então precisa multiplicar pela quantidade
-            item_subtotal = (product_price * quantity) + extras_total + (base_mods_total * quantity)
+            # ALTERAÇÃO: Usar preço com promoção aplicada
+            item_subtotal = (product_price_with_promotion * quantity) + extras_total + (base_mods_total * quantity)
             
             item = {
                 "id": item_id,
@@ -206,7 +248,7 @@ def get_cart_items(cart_id):
                 "product": {
                     "id": product_id,
                     "name": product_name,
-                    "price": product_price,
+                    "price": product_price,  # Preço original (sem desconto)
                     "description": product_description,
                     "image_url": product_image_url,
                     "preparation_time_minutes": product_preparation_time
@@ -215,7 +257,9 @@ def get_cart_items(cart_id):
                 "base_modifications": base_modifications,
                 "base_mods_total": base_mods_total,
                 "extras_total": extras_total,
-                "item_subtotal": item_subtotal
+                "item_subtotal": item_subtotal,  # ALTERAÇÃO: Já inclui desconto de promoção
+                # ALTERAÇÃO: Adicionar informações de promoção para o frontend
+                "promotion": promotion if has_promotion else None
             }
             items.append(item)
         

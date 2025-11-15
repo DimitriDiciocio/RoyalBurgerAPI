@@ -1,6 +1,10 @@
 import fdb
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from ..database import get_db_connection
+
+# ALTERAÇÃO: Logger centralizado para substituir print() em produção
+logger = logging.getLogger(__name__)
 
 
 def _calculate_discount_from_price_and_value(product_price, discount_value):
@@ -53,19 +57,30 @@ def create_promotion(product_id, discount_value=None, discount_percentage=None, 
         if product_price is None:
             return (None, "PRODUCT_NOT_FOUND", "Produto não encontrado")
         
-        # Verifica se já existe uma promoção para este produto
+        # ALTERAÇÃO: Verifica se já existe uma promoção para este produto
         cur.execute("SELECT ID FROM PROMOTIONS WHERE PRODUCT_ID = ?", (product_id,))
-        if cur.fetchone():
-            return (None, "PROMOTION_EXISTS", "Já existe uma promoção para este produto")
+        existing_promo = cur.fetchone()
+        if existing_promo:
+            return (None, "PROMOTION_EXISTS", f"Já existe uma promoção para este produto (ID: {existing_promo[0]})")
         
-        # Valida e converte expires_at
+        # ALTERAÇÃO: Valida e converte expires_at - tratar como hora local (sem conversão de timezone)
         if expires_at:
             if isinstance(expires_at, str):
                 try:
-                    expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                    # Remove 'Z' se presente e tratar como hora local (sem timezone)
+                    if expires_at.endswith('Z'):
+                        expires_at = expires_at[:-1]  # Remove apenas o 'Z'
+                    expires_at = datetime.fromisoformat(expires_at)
+                    # Não adicionar timezone - tratar como naive datetime (hora local)
+                    # O banco de dados armazenará como está
                 except ValueError:
                     return (None, "INVALID_DATE", "Formato de data inválido. Use ISO format (YYYY-MM-DDTHH:MM:SS)")
-            if expires_at <= datetime.now():
+            # ALTERAÇÃO: Comparar com datetime local (sem timezone)
+            now_local = datetime.now()
+            if expires_at.tzinfo is not None:
+                # Se tiver timezone, remover para comparar como local
+                expires_at = expires_at.replace(tzinfo=None)
+            if expires_at <= now_local:
                 return (None, "INVALID_DATE", "Data de expiração deve ser futura")
         else:
             return (None, "INVALID_DATE", "Data de expiração é obrigatória")
@@ -113,12 +128,14 @@ def create_promotion(product_id, discount_value=None, discount_percentage=None, 
         return (promotion, None, None)
         
     except fdb.Error as e:
-        print(f"Erro ao criar promoção: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao criar promoção: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (None, "DATABASE_ERROR", "Erro interno do servidor")
     except Exception as e:
-        print(f"Erro inesperado ao criar promoção: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro inesperado ao criar promoção: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (None, "GENERAL_ERROR", str(e))
@@ -225,10 +242,19 @@ def update_promotion(promotion_id, update_data, user_id=None):
             expires_at = fields_to_update['expires_at']
             if isinstance(expires_at, str):
                 try:
-                    expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                    # Remove 'Z' se presente e tratar como hora local (sem timezone)
+                    if expires_at.endswith('Z'):
+                        expires_at = expires_at[:-1]  # Remove apenas o 'Z'
+                    expires_at = datetime.fromisoformat(expires_at)
+                    # Não adicionar timezone - tratar como naive datetime (hora local)
                 except ValueError:
                     return (False, "INVALID_DATE", "Formato de data inválido. Use ISO format (YYYY-MM-DDTHH:MM:SS)")
-            if expires_at <= datetime.now():
+            # ALTERAÇÃO: Comparar com datetime local (sem timezone)
+            now_local = datetime.now()
+            if expires_at.tzinfo is not None:
+                # Se tiver timezone, remover para comparar como local
+                expires_at = expires_at.replace(tzinfo=None)
+            if expires_at <= now_local:
                 return (False, "INVALID_DATE", "Data de expiração deve ser futura")
             
             cur.execute("""
@@ -241,12 +267,14 @@ def update_promotion(promotion_id, update_data, user_id=None):
         return (True, None, "Promoção atualizada com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao atualizar promoção: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao atualizar promoção: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     except Exception as e:
-        print(f"Erro inesperado ao atualizar promoção: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro inesperado ao atualizar promoção: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (False, "GENERAL_ERROR", str(e))
@@ -282,7 +310,8 @@ def delete_promotion(promotion_id):
         return (True, None, "Promoção removida com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao remover promoção: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao remover promoção: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
@@ -306,29 +335,36 @@ def get_all_promotions(include_expired=False):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # ALTERAÇÃO: Incluir campos necessários do produto e filtrar produtos ativos
         if include_expired:
             sql = """
                 SELECT p.ID, p.PRODUCT_ID, p.DISCOUNT_PERCENTAGE, p.DISCOUNT_VALUE, 
                        p.EXPIRES_AT, p.CREATED_AT, p.UPDATED_AT, p.CREATED_BY, p.UPDATED_BY,
-                       pr.NAME, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
+                       pr.NAME, pr.DESCRIPTION, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
+                       pr.PREPARATION_TIME_MINUTES, pr.CATEGORY_ID,
                        u1.FULL_NAME as CREATED_BY_NAME, u2.FULL_NAME as UPDATED_BY_NAME
                 FROM PROMOTIONS p
-                JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
+                INNER JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
                 LEFT JOIN USERS u1 ON p.CREATED_BY = u1.ID
                 LEFT JOIN USERS u2 ON p.UPDATED_BY = u2.ID
+                WHERE pr.IS_ACTIVE = TRUE
                 ORDER BY p.CREATED_AT DESC
             """
         else:
+            # ALTERAÇÃO: Filtrar promoções não expiradas E produtos ativos conforme roteiro
+            # ALTERAÇÃO: Comparar EXPIRES_AT (sem timezone) com CURRENT_TIMESTAMP (sem timezone) usando CAST
             sql = """
                 SELECT p.ID, p.PRODUCT_ID, p.DISCOUNT_PERCENTAGE, p.DISCOUNT_VALUE, 
                        p.EXPIRES_AT, p.CREATED_AT, p.UPDATED_AT, p.CREATED_BY, p.UPDATED_BY,
-                       pr.NAME, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
+                       pr.NAME, pr.DESCRIPTION, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
+                       pr.PREPARATION_TIME_MINUTES, pr.CATEGORY_ID,
                        u1.FULL_NAME as CREATED_BY_NAME, u2.FULL_NAME as UPDATED_BY_NAME
                 FROM PROMOTIONS p
-                JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
+                INNER JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
                 LEFT JOIN USERS u1 ON p.CREATED_BY = u1.ID
                 LEFT JOIN USERS u2 ON p.UPDATED_BY = u2.ID
-                WHERE p.EXPIRES_AT > CURRENT_TIMESTAMP
+                WHERE CAST(p.EXPIRES_AT AS TIMESTAMP) > CAST(CURRENT_TIMESTAMP AS TIMESTAMP)
+                  AND pr.IS_ACTIVE = TRUE
                 ORDER BY p.CREATED_AT DESC
             """
         
@@ -339,8 +375,8 @@ def get_all_promotions(include_expired=False):
             promotion = {
                 "id": row[0],
                 "product_id": row[1],
-                "discount_percentage": float(row[2]),
-                "discount_value": float(row[3]),
+                "discount_percentage": float(row[2]) if row[2] else 0.0,
+                "discount_value": float(row[3]) if row[3] else 0.0,
                 "expires_at": row[4].isoformat() if isinstance(row[4], datetime) else str(row[4]),
                 "created_at": row[5].isoformat() if isinstance(row[5], datetime) else str(row[5]),
                 "updated_at": row[6].isoformat() if isinstance(row[6], datetime) else str(row[6]),
@@ -349,24 +385,49 @@ def get_all_promotions(include_expired=False):
                 "product": {
                     "id": row[1],
                     "name": row[9],
-                    "price": float(row[10]),
-                    "image_url": row[11],
-                    "is_active": bool(row[12])
+                    "description": row[10] if row[10] else "",
+                    "price": str(float(row[11])),
+                    "image_url": row[12] if row[12] else None,
+                    "is_active": bool(row[13]),
+                    "preparation_time_minutes": row[14] if row[14] else 0,
+                    "category_id": row[15] if row[15] else None
                 },
-                "created_by_name": row[13],
-                "updated_by_name": row[14]
+                "created_by_name": row[16] if row[16] else None,
+                "updated_by_name": row[17] if row[17] else None
             }
             
-            # Calcula preço final com desconto
-            final_price = float(row[10]) - float(row[3])
+            # ALTERAÇÃO: Calcula preço final com desconto (valor ou percentual)
+            # Se tem discount_value, usa ele; senão calcula do percentual
+            product_price = float(row[11])
+            discount_value = float(row[3]) if row[3] else 0.0
+            discount_percentage = float(row[2]) if row[2] else 0.0
+            
+            if discount_value > 0:
+                final_price = product_price - discount_value
+            elif discount_percentage > 0:
+                final_price = product_price * (1 - discount_percentage / 100)
+            else:
+                final_price = product_price
+            
             promotion["final_price"] = round(final_price, 2)
+            
+            # ALTERAÇÃO: Adicionar hash da imagem se existir
+            # Usa a mesma função que product_service para consistência
+            if row[12]:
+                try:
+                    # Importar função de product_service que já tem a implementação
+                    from . import product_service
+                    promotion["product"]["image_hash"] = product_service._get_image_hash(row[12])
+                except Exception:
+                    promotion["product"]["image_hash"] = None
             
             promotions.append(promotion)
         
         return promotions
         
     except fdb.Error as e:
-        print(f"Erro ao listar promoções: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao listar promoções: {e}", exc_info=True)
         return []
     finally:
         if conn:
@@ -436,19 +497,21 @@ def get_promotion_by_id(promotion_id):
         return None
         
     except fdb.Error as e:
-        print(f"Erro ao buscar promoção por ID: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao buscar promoção por ID: {e}", exc_info=True)
         return None
     finally:
         if conn:
             conn.close()
 
 
-def get_promotion_by_product_id(product_id):
+def get_promotion_by_product_id(product_id, include_expired=False):
     """
-    Obtém a promoção ativa de um produto específico
+    Obtém a promoção de um produto específico
     
     Args:
         product_id: ID do produto
+        include_expired: Se True, inclui promoções expiradas
     
     Returns:
         Dicionário com dados da promoção ou None
@@ -458,14 +521,25 @@ def get_promotion_by_product_id(product_id):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        sql = """
-            SELECT ID, PRODUCT_ID, DISCOUNT_PERCENTAGE, DISCOUNT_VALUE, 
-                   EXPIRES_AT, CREATED_AT, UPDATED_AT, CREATED_BY, UPDATED_BY
-            FROM PROMOTIONS
-            WHERE PRODUCT_ID = ? AND EXPIRES_AT > CURRENT_TIMESTAMP
-        """
+        # ALTERAÇÃO: Buscar qualquer promoção se include_expired=True, senão apenas ativas
+        if include_expired:
+            sql = """
+                SELECT ID, PRODUCT_ID, DISCOUNT_PERCENTAGE, DISCOUNT_VALUE, 
+                       EXPIRES_AT, CREATED_AT, UPDATED_AT, CREATED_BY, UPDATED_BY
+                FROM PROMOTIONS
+                WHERE PRODUCT_ID = ?
+                ORDER BY CREATED_AT DESC
+            """
+            cur.execute(sql, (product_id,))
+        else:
+            sql = """
+                SELECT ID, PRODUCT_ID, DISCOUNT_PERCENTAGE, DISCOUNT_VALUE, 
+                       EXPIRES_AT, CREATED_AT, UPDATED_AT, CREATED_BY, UPDATED_BY
+                FROM PROMOTIONS
+                WHERE PRODUCT_ID = ? AND CAST(EXPIRES_AT AS TIMESTAMP) > CAST(CURRENT_TIMESTAMP AS TIMESTAMP)
+            """
+            cur.execute(sql, (product_id,))
         
-        cur.execute(sql, (product_id,))
         row = cur.fetchone()
         
         if row:
@@ -484,7 +558,8 @@ def get_promotion_by_product_id(product_id):
         return None
         
     except fdb.Error as e:
-        print(f"Erro ao buscar promoção por produto: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao buscar promoção por produto: {e}", exc_info=True)
         return None
     finally:
         if conn:
@@ -537,7 +612,8 @@ def recalculate_promotion_discount_value(product_id):
         return (True, None, None)
         
     except fdb.Error as e:
-        print(f"Erro ao recalcular desconto da promoção: {e}")
+        # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
+        logger.error(f"Erro ao recalcular desconto da promoção: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")

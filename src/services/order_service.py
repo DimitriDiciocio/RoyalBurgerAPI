@@ -4,7 +4,7 @@ import string
 import logging
 from datetime import datetime, date, timedelta
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service, table_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service, table_service, promotion_service
 from .printing_service import print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
 from ..config import Config
@@ -124,8 +124,46 @@ def _validate_ingredients_and_extras(items, cur):
         if unavailable_ingredient:
             raise ValueError(f"Desculpe, o ingrediente '{unavailable_ingredient[0]}' está esgotado.")
 
-def _calculate_order_total(items, cur):
-    """Calcula total do pedido incluindo extras e base_modifications"""
+def _apply_promotion_to_price(product_price, promotion):
+    """
+    Aplica desconto de promoção ao preço do produto
+    
+    Args:
+        product_price: Preço original do produto
+        promotion: Dicionário com dados da promoção (pode ser None)
+    
+    Returns:
+        Tuple (preco_final, valor_desconto, tem_promocao)
+    """
+    if not promotion:
+        return (float(product_price), 0.0, False)
+    
+    try:
+        price = float(product_price)
+        discount_percentage = promotion.get('discount_percentage')
+        discount_value = promotion.get('discount_value')
+        
+        # Aplica desconto percentual ou em valor fixo
+        if discount_percentage and discount_percentage > 0:
+            discount = (price * discount_percentage) / 100.0
+            final_price = price - discount
+        elif discount_value and discount_value > 0:
+            discount = float(discount_value)
+            final_price = price - discount
+        else:
+            return (price, 0.0, False)
+        
+        # Garante que o preço final não seja negativo
+        final_price = max(0.0, final_price)
+        return (final_price, discount, True)
+    except (ValueError, TypeError, AttributeError):
+        return (float(product_price), 0.0, False)
+
+def _calculate_order_total(items, cur, promotions_map=None):
+    """
+    Calcula total do pedido incluindo extras e base_modifications
+    ALTERAÇÃO: Agora aplica promoções se fornecido promotions_map
+    """
     product_prices = {}
     order_total = 0.0  # Inicia como float
     product_ids = {item['product_id'] for item in items}
@@ -137,7 +175,18 @@ def _calculate_order_total(items, cur):
         product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
         
         for item in items:
-            price = product_prices.get(item['product_id'], 0.0)
+            product_id = item['product_id']
+            original_price = product_prices.get(product_id, 0.0)
+            
+            # ALTERAÇÃO: Aplicar promoção se fornecida
+            if promotions_map and product_id in promotions_map:
+                promotion = promotions_map[product_id]
+                price, _, _ = _apply_promotion_to_price(original_price, promotion)
+            else:
+                # ALTERAÇÃO: Buscar promoção ativa se não fornecida
+                promotion = promotion_service.get_promotion_by_product_id(product_id, include_expired=False)
+                price, _, _ = _apply_promotion_to_price(original_price, promotion)
+            
             quantity = item.get('quantity', 1)
             order_total += float(price) * int(quantity)
 
@@ -188,8 +237,11 @@ def _calculate_order_total(items, cur):
 
     return float(order_total)
 
-def _add_order_items(order_id, items, cur):
-    """Adiciona itens ao pedido"""
+def _add_order_items(order_id, items, cur, promotions_map=None):
+    """
+    Adiciona itens ao pedido
+    ALTERAÇÃO: Agora aplica promoções e salva preços com desconto
+    """
     product_prices = {}
     product_ids = {item['product_id'] for item in items}
     
@@ -216,13 +268,23 @@ def _add_order_items(order_id, items, cur):
         product_id = item.get('product_id')
         quantity = item.get('quantity')
         # Proteção: usa .get() para evitar KeyError se produto foi removido entre validação e inserção
-        unit_price = product_prices.get(product_id)
-        if unit_price is None:
+        original_price = product_prices.get(product_id)
+        if original_price is None:
             raise ValueError(f"Produto {product_id} não encontrado ou preço indisponível")
+        
+        # ALTERAÇÃO: Aplicar promoção ao preço antes de salvar
+        if promotions_map and product_id in promotions_map:
+            promotion = promotions_map[product_id]
+            unit_price, _, _ = _apply_promotion_to_price(original_price, promotion)
+        else:
+            # ALTERAÇÃO: Buscar promoção ativa se não fornecida
+            promotion = promotion_service.get_promotion_by_product_id(product_id, include_expired=False)
+            unit_price, _, _ = _apply_promotion_to_price(original_price, promotion)
         
         # Garante que o preço é float
         unit_price = float(unit_price)
 
+        # ALTERAÇÃO: Salvar preço COM desconto aplicado no banco
         sql_item = "INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?) RETURNING ID;"
         cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
         new_order_item_id = cur.fetchone()[0]
@@ -374,8 +436,11 @@ def _calculate_estimated_delivery_time(order_status, order_type):
         'order_type': order_type
     }
 
-def create_order(user_id, address_id, items, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
-    """Cria um novo pedido validando TUDO"""
+def create_order(user_id, address_id, items, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None):
+    """
+    Cria um novo pedido validando TUDO
+    ALTERAÇÃO: Agora aceita promotions para aplicar descontos
+    """
     
     try:
         # Valida order_type
@@ -395,6 +460,14 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             conn = get_db_connection()
             cur = conn.cursor()
             
+            # ALTERAÇÃO: Processar promoções fornecidas
+            promotions_map = {}
+            if promotions and isinstance(promotions, list):
+                for promo in promotions:
+                    product_id = promo.get('product_id')
+                    if product_id:
+                        promotions_map[product_id] = promo
+            
             # Busca configurações uma única vez
             settings = settings_service.get_all_settings()
             if not settings:
@@ -408,8 +481,8 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             # Validações de ingredientes e extras
             _validate_ingredients_and_extras(items, cur)
             
-            # Calcula total dos itens
-            subtotal = _calculate_order_total(items, cur)
+            # ALTERAÇÃO: Calcula total dos itens aplicando promoções
+            subtotal = _calculate_order_total(items, cur, promotions_map=promotions_map)
             subtotal = float(subtotal)  # Garante que é float
             
             # Adiciona taxa de entrega se for delivery
@@ -463,8 +536,8 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
                     new_change_amount = paid_amount_float - new_total
                     cur.execute("UPDATE ORDERS SET CHANGE_FOR_AMOUNT = ? WHERE ID = ?;", (new_change_amount, new_order_id))
 
-            # Adiciona itens ao pedido
-            _add_order_items(new_order_id, items, cur)
+            # ALTERAÇÃO: Adiciona itens ao pedido aplicando promoções
+            _add_order_items(new_order_id, items, cur, promotions_map=promotions_map)
             
             # Deduz estoque quando o pedido é criado (usa cursor existente para manter transação)
             success, error_code, message = stock_service.deduct_stock_for_order(new_order_id, cur)
@@ -1193,10 +1266,11 @@ def cancel_order_by_customer(order_id, user_id):
     return cancel_order(order_id, user_id, is_manager=False)
 
 
-def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY):
+def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None):
     """
     Fluxo 4: Finalização (Converter Carrinho em Pedido)
     Cria um pedido a partir do carrinho do usuário
+    ALTERAÇÃO: Agora aceita promotions para aplicar descontos
     """
     conn = None
     try:
@@ -1217,8 +1291,19 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if not cart_data:
             return (None, "EMPTY_CART", "Carrinho está vazio")
         
+        # ALTERAÇÃO: Processar promoções fornecidas
+        promotions_map = {}
+        if promotions and isinstance(promotions, list):
+            for promo in promotions:
+                product_id = promo.get('product_id')
+                if product_id:
+                    promotions_map[product_id] = promo
+        
         # VALIDAÇÃO DE ESTOQUE - antes de criar o pedido
-        stock_valid, stock_error_code, stock_error_message = stock_service.validate_stock_for_items(cart_data["items"], cur)
+        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho na validação
+        # Isso evita conflito quando há exatamente a quantidade necessária em estoque
+        cart_id = cart_data.get("cart_id")
+        stock_valid, stock_error_code, stock_error_message = stock_service.validate_stock_for_items(cart_data["items"], cur, cart_id=cart_id)
         if not stock_valid:
             return (None, stock_error_code, stock_error_message)
         
@@ -1242,8 +1327,73 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if not settings:
             settings = {}
         
-        # Calcula total do carrinho
-        total_amount = float(cart_data["total_amount"] or 0)  # Garante float
+        # ALTERAÇÃO: Buscar preços dos produtos ANTES de calcular totais
+        cart_product_ids = {it["product_id"] for it in cart_data["items"]}
+        product_prices = {}
+        if cart_product_ids:
+            placeholders = ', '.join(['?' for _ in cart_product_ids])
+            cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(cart_product_ids))
+            product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
+        
+        # ALTERAÇÃO: Buscar preços de extras e base_modifications ANTES de calcular totais
+        extra_ids = set()
+        base_mod_ids = set()
+        for it in cart_data["items"]:
+            for ex in it.get("extras", []):
+                ex_id = ex.get("ingredient_id")
+                if ex_id:
+                    extra_ids.add(ex_id)
+            for bm in it.get("base_modifications", []):
+                bm_id = bm.get("ingredient_id")
+                if bm_id:
+                    base_mod_ids.add(bm_id)
+        
+        extra_prices = {}
+        if extra_ids:
+            placeholders = ', '.join(['?' for _ in extra_ids])
+            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE, 0) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
+            extra_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
+        
+        base_mod_prices = {}
+        if base_mod_ids:
+            placeholders = ', '.join(['?' for _ in base_mod_ids])
+            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ids))
+            base_mod_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
+        
+        # ALTERAÇÃO: Recalcular total do carrinho aplicando promoções fornecidas
+        # Se promoções foram fornecidas, recalcular subtotal considerando descontos
+        # Caso contrário, usar o total do carrinho (que já tem promoções aplicadas se houver)
+        if promotions_map:
+            # Recalcular subtotal aplicando promoções fornecidas
+            subtotal = 0.0
+            for item in cart_data["items"]:
+                product_id = item["product_id"]
+                original_price = float(product_prices.get(product_id, 0.0))
+                
+                # Aplicar promoção se fornecida
+                if product_id in promotions_map:
+                    promotion = promotions_map[product_id]
+                    price_with_promo, _, _ = _apply_promotion_to_price(original_price, promotion)
+                else:
+                    price_with_promo = original_price
+                
+                quantity = item.get("quantity", 1)
+                extras_total = sum(
+                    float(extra_prices.get(ex.get("ingredient_id", 0), 0.0)) * int(ex.get("quantity", 0))
+                    for ex in item.get("extras", [])
+                )
+                base_mods_total = sum(
+                    float(base_mod_prices.get(bm.get("ingredient_id", 0), 0.0)) * abs(int(bm.get("delta", 0)))
+                    for bm in item.get("base_modifications", [])
+                )
+                
+                item_subtotal = (price_with_promo * quantity) + extras_total + (base_mods_total * quantity)
+                subtotal += item_subtotal
+            
+            total_amount = float(subtotal)
+        else:
+            # Usar total do carrinho (já tem promoções aplicadas se houver)
+            total_amount = float(cart_data["total_amount"] or 0)  # Garante float
         
         # Adiciona taxa de entrega se for delivery
         delivery_fee = 0.0
@@ -1301,45 +1451,8 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                 new_change_amount = paid_amount_float - new_total
                 cur.execute("UPDATE ORDERS SET CHANGE_FOR_AMOUNT = ? WHERE ID = ?;", (new_change_amount, order_id))
         
-        # Preços dos produtos do carrinho
-        cart_product_ids = {it["product_id"] for it in cart_data["items"]}
-        product_prices = {}
-        if cart_product_ids:
-            placeholders = ', '.join(['?' for _ in cart_product_ids])
-            cur.execute(f"SELECT ID, PRICE FROM PRODUCTS WHERE ID IN ({placeholders});", tuple(cart_product_ids))
-            # Converte Decimal para float ao extrair do banco
-            product_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
-
-        # Preços dos extras do carrinho
-        # CORREÇÃO: Coletar todos os IDs de ingredientes extras únicos
-        extra_ids = set()
-        base_mod_ids = set()
-        for it in cart_data["items"]:
-            for ex in it.get("extras", []):
-                ex_id = ex.get("ingredient_id")
-                if ex_id:
-                    extra_ids.add(ex_id)
-            for bm in it.get("base_modifications", []):
-                bm_id = bm.get("ingredient_id")
-                if bm_id:
-                    base_mod_ids.add(bm_id)
-        
-        extra_prices = {}
-        if extra_ids:
-            placeholders = ', '.join(['?' for _ in extra_ids])
-            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE, 0) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(extra_ids))
-            # Converte Decimal para float ao extrair do banco
-            extra_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
-            logger.info(f"[create_order_from_cart] Preços de extras carregados: {len(extra_prices)} preços de {len(extra_ids)} ingredientes")
-        else:
-            logger.warning("[create_order_from_cart] Nenhum ingrediente extra encontrado nos itens do carrinho")
-        
-        base_mod_prices = {}
-        if base_mod_ids:
-            placeholders = ', '.join(['?' for _ in base_mod_ids])
-            cur.execute(f"SELECT ID, COALESCE(ADDITIONAL_PRICE, PRICE) FROM INGREDIENTS WHERE ID IN ({placeholders});", tuple(base_mod_ids))
-            # Converte Decimal para float ao extrair do banco
-            base_mod_prices = {row[0]: float(row[1] or 0) for row in cur.fetchall()}
+        # ALTERAÇÃO: Preços já foram buscados acima, apenas log para debug
+        logger.info(f"[create_order_from_cart] Preços de extras carregados: {len(extra_prices)} preços de {len(extra_ids)} ingredientes")
 
         # DEBUG: Log detalhado dos itens do carrinho
         logger.info(f"[create_order_from_cart] Processando {len(cart_data['items'])} itens do carrinho")
@@ -1350,18 +1463,26 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                         f"extras={item_debug.get('extras', [])}, "
                         f"base_modifications_count={len(item_debug.get('base_modifications', []))}")
         
-        # Copia itens do carrinho para o pedido (com preços)
+        # ALTERAÇÃO: Copia itens do carrinho para o pedido (com preços e promoções aplicadas)
         for item in cart_data["items"]:
             product_id = item["product_id"]
             quantity = item["quantity"]
             # CORREÇÃO: Valida se produto existe antes de inserir
-            unit_price = product_prices.get(product_id)
-            if unit_price is None:
+            original_price = product_prices.get(product_id)
+            if original_price is None:
                 raise ValueError(f"Produto {product_id} não encontrado ou preço indisponível")
 
-            # Insere item principal com UNIT_PRICE
+            # ALTERAÇÃO: Aplicar promoção ao preço antes de salvar
+            if promotions_map and product_id in promotions_map:
+                promotion = promotions_map[product_id]
+                unit_price_float, _, _ = _apply_promotion_to_price(original_price, promotion)
+            else:
+                # ALTERAÇÃO: Buscar promoção ativa se não fornecida
+                promotion = promotion_service.get_promotion_by_product_id(product_id, include_expired=False)
+                unit_price_float, _, _ = _apply_promotion_to_price(original_price, promotion)
+            
             # Garante que unit_price é float
-            unit_price_float = float(unit_price)
+            unit_price_float = float(unit_price_float)
             
             sql_item = """
                 INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE)

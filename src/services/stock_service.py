@@ -165,14 +165,20 @@ def calculate_consumption_in_stock_unit(portions, base_portion_quantity, base_po
     return consumption_in_stock_unit
 
 
-def validate_stock_for_items(items, cur):
+def validate_stock_for_items(items, cur, cart_id=None):
     """
     Valida se há estoque suficiente para os itens SEM deduzir o estoque.
     Usado antes de criar o pedido para evitar criar pedidos sem estoque disponível.
     
+    ALTERAÇÃO: Adicionado parâmetro cart_id para excluir reservas temporárias do próprio
+    carrinho na validação. Isso evita conflito quando há exatamente a quantidade necessária
+    em estoque, pois as reservas temporárias do carrinho serão convertidas em reservas
+    confirmadas quando o pedido for criado.
+    
     Args:
         items: Lista de itens do pedido/carrinho
         cur: Cursor do banco de dados
+        cart_id: ID do carrinho (opcional) - se fornecido, exclui reservas temporárias deste carrinho
     
     Returns:
         tuple: (success: bool, error_code: str, message: str)
@@ -509,12 +515,13 @@ def validate_stock_for_items(items, cur):
         if not required_ingredients:
             return (True, None, None)
         
-        # Buscar estoque atual dos ingredientes necessários
-        # SEGURANÇA: Query parametrizada, ing_ids são chaves do dict (validados como inteiros)
+        # ALTERAÇÃO: Usar get_ingredient_available_stock ao invés de CURRENT_STOCK diretamente
+        # Isso considera reservas confirmadas e temporárias (exceto do próprio carrinho se cart_id fornecido)
+        # Buscar informações básicas dos ingredientes necessários
         ing_ids = list(required_ingredients.keys())
         placeholders = ', '.join(['?' for _ in ing_ids])
         sql_check = f"""
-            SELECT ID, NAME, CURRENT_STOCK, STOCK_UNIT
+            SELECT ID, NAME, STOCK_UNIT
             FROM INGREDIENTS
             WHERE ID IN ({placeholders})
         """
@@ -522,9 +529,11 @@ def validate_stock_for_items(items, cur):
         
         # Validar estoque disponível (todas as quantidades já estão convertidas para STOCK_UNIT)
         for row in cur.fetchall():
-            ing_id, ing_name, current_stock, stock_unit = row
+            ing_id, ing_name, stock_unit = row
             needed = required_ingredients.get(ing_id, Decimal('0'))
-            available = Decimal(str(current_stock or 0))
+            # ALTERAÇÃO: Usar get_ingredient_available_stock que considera reservas
+            # Se cart_id fornecido, exclui reservas temporárias do próprio carrinho
+            available = get_ingredient_available_stock(ing_id, cur, exclude_cart_id=cart_id)
             
             if needed > available:
                 return (
@@ -1386,13 +1395,17 @@ def clear_temporary_reservations(session_id=None, user_id=None, cart_id=None):
             conn.close()
 
 
-def get_ingredient_available_stock(ingredient_id, cur=None):
+def get_ingredient_available_stock(ingredient_id, cur=None, exclude_cart_id=None):
     """
     Obtém estoque disponível de um insumo considerando reservas.
+    
+    ALTERAÇÃO: Adicionado parâmetro exclude_cart_id para excluir reservas temporárias
+    de um carrinho específico (útil na validação antes de finalizar pedido).
     
     Args:
         ingredient_id: ID do insumo
         cur: Cursor do banco (opcional, se None cria nova conexão)
+        exclude_cart_id: ID do carrinho cujas reservas temporárias devem ser excluídas (opcional)
     
     Returns:
         Decimal: Estoque disponível na unidade do estoque
@@ -1466,18 +1479,30 @@ def get_ingredient_available_stock(ingredient_id, cur=None):
                 continue
         
         # Calcula reservas temporárias ativas
-        # CORREÇÃO: Tratamento seguro para evitar erro SQLCODE -804 do Firebird
-        # Usa uma abordagem mais simples que evita o problema do SQLDA
+        # ALTERAÇÃO: Se exclude_cart_id for fornecido, exclui reservas temporárias desse carrinho
+        # Isso é necessário porque essas reservas serão convertidas em reservas confirmadas
+        # quando o pedido for criado, então não devem ser descontadas na validação
         temporary_reservations = Decimal('0')
         try:
             # ALTERAÇÃO: Query simplificada que evita SQLCODE -804 usando EXISTS primeiro
             # Primeiro verifica se há registros antes de fazer o SUM
-            cur.execute("""
-                SELECT CAST(COALESCE(SUM(QUANTITY), 0) AS NUMERIC(18, 3))
-                FROM TEMPORARY_RESERVATIONS
-                WHERE INGREDIENT_ID = ?
-                  AND EXPIRES_AT > CURRENT_TIMESTAMP
-            """, (ingredient_id,))
+            if exclude_cart_id:
+                # Exclui reservas temporárias do carrinho especificado
+                cur.execute("""
+                    SELECT CAST(COALESCE(SUM(QUANTITY), 0) AS NUMERIC(18, 3))
+                    FROM TEMPORARY_RESERVATIONS
+                    WHERE INGREDIENT_ID = ?
+                      AND EXPIRES_AT > CURRENT_TIMESTAMP
+                      AND (CART_ID IS NULL OR CART_ID != ?)
+                """, (ingredient_id, exclude_cart_id))
+            else:
+                # Inclui todas as reservas temporárias
+                cur.execute("""
+                    SELECT CAST(COALESCE(SUM(QUANTITY), 0) AS NUMERIC(18, 3))
+                    FROM TEMPORARY_RESERVATIONS
+                    WHERE INGREDIENT_ID = ?
+                      AND EXPIRES_AT > CURRENT_TIMESTAMP
+                """, (ingredient_id,))
             
             sum_row = cur.fetchone()
             # ALTERAÇÃO: Validação mais robusta do resultado

@@ -2155,35 +2155,34 @@ def get_most_ordered_products(page=1, page_size=10):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Conta total de produtos com vendas
+        # ALTERAÇÃO: Conta total de produtos com vendas - considerar pedidos entregues E completos
         cur.execute("""
             SELECT COUNT(DISTINCT p.ID)
             FROM PRODUCTS p
             INNER JOIN ORDER_ITEMS oi ON p.ID = oi.PRODUCT_ID
             INNER JOIN ORDERS o ON oi.ORDER_ID = o.ID
             WHERE p.IS_ACTIVE = TRUE 
-              AND o.STATUS = 'completed'
+              AND o.STATUS IN ('delivered', 'completed')
         """)
         total = cur.fetchone()[0] or 0
         
-        # Query paginada que conta quantidades vendidas
-        cur.execute("""
-            SELECT 
-                p.ID,
-                p.NAME,
-                p.DESCRIPTION,
-                p.PRICE,
-                p.IMAGE_URL,
-                SUM(oi.QUANTITY) as total_sold
+        # ALTERAÇÃO: Query paginada que conta quantidades vendidas - incluir campos necessários para exibição
+        # ALTERAÇÃO: Considerar pedidos entregues E completos conforme roteiro
+        # ALTERAÇÃO: Firebird não suporta FETCH FIRST com placeholders, usar interpolação segura
+        query = f"""
+            SELECT FIRST {page_size} SKIP {offset}
+                p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.IMAGE_URL, 
+                p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID,
+                SUM(oi.QUANTITY) as total_pedidos
             FROM PRODUCTS p
             INNER JOIN ORDER_ITEMS oi ON p.ID = oi.PRODUCT_ID
             INNER JOIN ORDERS o ON oi.ORDER_ID = o.ID
             WHERE p.IS_ACTIVE = TRUE 
-              AND o.STATUS = 'completed'
-            GROUP BY p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.IMAGE_URL
-            ORDER BY total_sold DESC
-            FETCH FIRST ? ROWS SKIP ?
-        """, (page_size, offset))
+              AND o.STATUS IN ('delivered', 'completed')
+            GROUP BY p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.IMAGE_URL, p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID
+            ORDER BY total_pedidos DESC
+        """
+        cur.execute(query)
         
         items = []
         for row in cur.fetchall():
@@ -2193,7 +2192,10 @@ def get_most_ordered_products(page=1, page_size=10):
                 "description": row[2],
                 "price": str(row[3]),
                 "image_url": row[4] if row[4] else None,
-                "total_sold": int(row[5]) if row[5] else 0
+                "preparation_time_minutes": row[5] if row[5] else 0,
+                "category_id": row[6] if row[6] else None,
+                "is_active": True,  # Já filtrado na query
+                "total_pedidos": int(row[7]) if row[7] else 0
             })
             
             # Adiciona hash da imagem se existir
@@ -2247,30 +2249,29 @@ def get_recently_added_products(page=1, page_size=10):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Conta total de produtos ativos
+        # ALTERAÇÃO: Conta total de produtos ativos
         cur.execute("""
             SELECT COUNT(*) FROM PRODUCTS 
             WHERE IS_ACTIVE = TRUE
         """)
         total = cur.fetchone()[0] or 0
         
-        # Query paginada que busca produtos ativos ordenados por ID descendente
-        # Nota: Firebird não tem CREATED_AT em PRODUCTS por padrão, usa ID como proxy
-        cur.execute("""
-            SELECT 
-                p.ID,
-                p.NAME,
-                p.DESCRIPTION,
-                p.PRICE,
-                p.IMAGE_URL,
-                p.CATEGORY_ID,
+        # ALTERAÇÃO: Query paginada que busca produtos ativos ordenados por ID descendente
+        # Nota: A tabela PRODUCTS não possui campo CREATED_AT, então usa ID DESC como proxy
+        # ID é auto-incremento, então produtos com ID maior são mais recentes
+        # ALTERAÇÃO: Incluir campos necessários para exibição (preparation_time_minutes, etc.)
+        # ALTERAÇÃO: Firebird não suporta FETCH FIRST com placeholders, usar interpolação segura
+        query = f"""
+            SELECT FIRST {page_size} SKIP {offset}
+                p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.IMAGE_URL,
+                p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID,
                 c.NAME as CATEGORY_NAME
             FROM PRODUCTS p
             LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID
             WHERE p.IS_ACTIVE = TRUE
             ORDER BY p.ID DESC
-            FETCH FIRST ? ROWS SKIP ?
-        """, (page_size, offset))
+        """
+        cur.execute(query)
         
         items = []
         for row in cur.fetchall():
@@ -2280,8 +2281,10 @@ def get_recently_added_products(page=1, page_size=10):
                 "description": row[2],
                 "price": str(row[3]),
                 "image_url": row[4] if row[4] else None,
-                "category_id": row[5],
-                "category_name": row[6] if row[6] else "Sem categoria"
+                "preparation_time_minutes": row[5] if row[5] else 0,
+                "category_id": row[6] if row[6] else None,
+                "category_name": row[7] if row[7] else "Sem categoria",
+                "is_active": True  # Já filtrado na query
             })
             
             # Adiciona hash da imagem se existir

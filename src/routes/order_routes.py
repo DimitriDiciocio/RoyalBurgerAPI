@@ -39,6 +39,7 @@ def create_order_route():
     cpf_on_invoice = data.get('cpf_on_invoice')
     points_to_redeem = data.get('points_to_redeem', 0)
     use_cart = data.get('use_cart', False)  # Nova opção para usar carrinho
+    promotions = data.get('promotions')  # ALTERAÇÃO: Informações de promoções para aplicar descontos
     
     # Validações básicas
     if not payment_method:
@@ -60,7 +61,7 @@ def create_order_route():
     
     # Escolhe o método de criação baseado na opção
     if use_cart:
-        # Cria pedido a partir do carrinho
+        # ALTERAÇÃO: Cria pedido a partir do carrinho com promoções
         new_order, error_code, error_message = order_service.create_order_from_cart(
             user_id,
             address_id if order_type == 'delivery' else None,
@@ -69,10 +70,11 @@ def create_order_route():
             notes,
             cpf_on_invoice,
             points_to_redeem,
-            order_type
+            order_type,
+            promotions  # ALTERAÇÃO: Passar promoções para aplicar descontos
         )
     else:
-        # Cria pedido tradicional
+        # ALTERAÇÃO: Cria pedido tradicional com promoções
         new_order, error_code, error_message = order_service.create_order(  
             user_id,
             address_id if order_type == 'delivery' else None,
@@ -82,7 +84,8 @@ def create_order_route():
             notes,
             cpf_on_invoice,
             points_to_redeem,
-            order_type
+            order_type,
+            promotions  # ALTERAÇÃO: Passar promoções para aplicar descontos
         )
     if new_order:  
         return jsonify(new_order), 201  

@@ -85,7 +85,9 @@ def list_promotions_route():
     """
     Lista todas as promoções ativas com detalhes dos produtos
     """
-    include_expired = request.args.get('include_expired', type=bool, default=False)
+    # ALTERAÇÃO: Corrigido parsing de boolean - type=bool no Flask converte qualquer string não vazia para True
+    # Usar comparação explícita com 'true' para garantir comportamento correto
+    include_expired = request.args.get('include_expired', 'false').lower() == 'true'
     
     promotions = promotion_service.get_all_promotions(include_expired=include_expired)
     
@@ -111,14 +113,19 @@ def get_promotion_by_id_route(promotion_id):
 @promotion_bp.route('/product/<int:product_id>', methods=['GET'])
 def get_promotion_by_product_id_route(product_id):
     """
-    Obtém a promoção ativa de um produto específico
+    Obtém a promoção de um produto específico
+    Query params:
+        include_expired: Se True, inclui promoções expiradas (padrão: False)
     """
-    promotion = promotion_service.get_promotion_by_product_id(product_id)
+    # ALTERAÇÃO: Corrigido parsing de boolean - type=bool no Flask converte qualquer string não vazia para True
+    # Usar comparação explícita com 'true' para garantir comportamento correto
+    include_expired = request.args.get('include_expired', 'false').lower() == 'true'
+    promotion = promotion_service.get_promotion_by_product_id(product_id, include_expired=include_expired)
     
     if promotion:
         return jsonify(promotion), 200
     
-    return jsonify({"error": "Nenhuma promoção ativa encontrada para este produto"}), 404
+    return jsonify({"error": "Nenhuma promoção encontrada para este produto"}), 404
 
 
 @promotion_bp.route('/<int:promotion_id>', methods=['PUT'])
