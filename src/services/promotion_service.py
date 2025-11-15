@@ -125,6 +125,70 @@ def create_promotion(product_id, discount_value=None, discount_percentage=None, 
             "updated_by": row[8]
         }
         
+        # ALTERAÇÃO: Enviar notificações e emails para clientes sobre a nova promoção
+        # Respeita preferências de notificação de cada usuário
+        try:
+            from . import notification_service, product_service, user_service, email_service
+            
+            # Obter informações do produto para a mensagem
+            product = product_service.get_product_by_id(product_id)
+            product_name = product.get('name', 'produto') if product else 'produto'
+            
+            # Formatar mensagem da promoção
+            if conversion_method == 'reais':
+                discount_text = f"R$ {discount_value:.2f} de desconto"
+            else:
+                discount_text = f"{discount_percentage:.0f}% de desconto"
+            
+            message = f"🎉 Nova promoção! {discount_text} em {product_name}! Aproveite já!"
+            link = f"/menu?promotion={promotion['id']}"
+            
+            # Enviar notificação para todos os clientes (respeitando preferências)
+            notification_service.create_notification_for_roles(
+                roles=['customer'],
+                message=message,
+                link=link,
+                notification_type='promotion'
+            )
+            
+            # ALTERAÇÃO: Enviar emails de promoção respeitando preferências
+            try:
+                # Obter todos os clientes
+                customers = user_service.get_users_by_role(['customer'])
+                
+                # Obter URL da aplicação
+                from ..config import Config
+                
+                emails_sent = 0
+                for customer in customers:
+                    # Verificar preferências de notificação
+                    preferences = user_service.get_notification_preferences(customer['id'])
+                    
+                    # Enviar email apenas se o cliente tiver preferência habilitada
+                    if preferences and preferences.get('notify_promotions', True):
+                        try:
+                            email_service.send_email(
+                                to=customer['email'],
+                                subject=f"🎉 Nova Promoção: {product_name} - Royal Burger",
+                                template='promotion_notification',
+                                user={'full_name': customer['full_name']},
+                                promotion=promotion,
+                                product=product if product else {'name': product_name, 'description': ''},
+                                app_url=Config.APP_URL
+                            )
+                            emails_sent += 1
+                        except Exception as email_err:
+                            # Log erro individual mas continua para outros clientes
+                            logger.warning(f"Erro ao enviar email de promoção para {customer['email']}: {email_err}")
+                
+                logger.info(f"Emails de promoção enviados: {emails_sent} de {len(customers)} clientes")
+            except Exception as email_batch_err:
+                # Não falha a criação da promoção se houver erro ao enviar emails
+                logger.warning(f"Erro ao enviar emails de promoção: {email_batch_err}", exc_info=True)
+        except Exception as e:
+            # Não falha a criação da promoção se houver erro ao enviar notificações
+            logger.warning(f"Erro ao enviar notificações de promoção: {e}", exc_info=True)
+        
         return (promotion, None, None)
         
     except fdb.Error as e:

@@ -62,6 +62,7 @@ class Config:
     MAIL_USERNAME = _MAIL_ADDRESS  
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')  
     MAIL_DEFAULT_SENDER = (os.environ.get('MAIL_DISPLAY_NAME', 'Royal Burger'), _MAIL_ADDRESS)
+    APP_URL = os.environ.get('APP_URL', 'http://localhost:5000')
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size
     UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads', 'products')  
 

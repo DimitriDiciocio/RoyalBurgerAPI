@@ -553,6 +553,25 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             # Notificação para cozinha
             _notify_kitchen(new_order_id)
             
+            # ALTERAÇÃO: Enviar email de confirmação de pedido
+            try:
+                customer = user_service.get_user_by_id(user_id)
+                if customer and customer.get('email'):
+                    # Buscar dados completos do pedido para o email
+                    order_details = get_order_details(new_order_id, user_id, 'customer')
+                    if order_details:
+                        email_service.send_email(
+                            to=customer['email'],
+                            subject=f"Pedido #{new_order_id} confirmado - Royal Burger",
+                            template='order_confirmation',
+                            user=customer,
+                            order=order_details,
+                            app_url=Config.APP_URL
+                        )
+            except Exception as e:
+                # Não falha a criação do pedido se houver erro ao enviar email
+                logger.warning(f"Erro ao enviar email de confirmação do pedido {new_order_id}: {e}", exc_info=True)
+            
             return ({"order_id": new_order_id, "confirmation_code": confirmation_code, "status": "pending"}, None, None)
 
         except fdb.Error as e:
@@ -921,18 +940,30 @@ def update_order_status(order_id, new_status):
         # OTIMIZAÇÃO DE PERFORMANCE: Envia notificações de forma assíncrona (não bloqueia resposta)
         # user_id já foi obtido na query inicial, então pode ser usado diretamente
         
-        # Envia notificação após commit bem-sucedido (não bloqueia se falhar)
+        # ALTERAÇÃO: Envia notificação após commit bem-sucedido (não bloqueia se falhar)
+        # Respeita preferências de notificação do usuário
         if user_id:
             try:
                 # Para pickup com status ready ou in_progress (fallback), mensagem personalizada
                 if (db_status == 'ready' or db_status == 'in_progress') and order_type == ORDER_TYPE_PICKUP:
                     notification_message = f"Seu pedido #{order_id} está pronto para retirada no balcão!"
                     notification_link = f"/my-orders/{order_id}"
-                    notification_service.create_notification(user_id, notification_message, notification_link)
+                    notification_service.create_notification(user_id, notification_message, notification_link, notification_type='order')
                 elif db_status != 'delivered':  # Para delivered, notificação já foi enviada em outro lugar
-                    notification_message = f"O status do seu pedido #{order_id} foi atualizado para {new_status}"
+                    # ALTERAÇÃO: Usar db_status para mensagem consistente
+                    status_messages = {
+                        'pending': 'Aguardando Confirmação',
+                        'in_progress': 'Em Andamento',
+                        'awaiting_payment': 'Aguardando Pagamento',
+                        'preparing': 'Em Preparação',
+                        'ready': 'Pronto',
+                        'on_the_way': 'A Caminho',
+                        'cancelled': 'Cancelado'
+                    }
+                    status_text = status_messages.get(db_status, db_status)
+                    notification_message = f"O status do seu pedido #{order_id} foi atualizado para {status_text}"
                     notification_link = f"/my-orders/{order_id}"
-                    notification_service.create_notification(user_id, notification_message, notification_link)
+                    notification_service.create_notification(user_id, notification_message, notification_link, notification_type='order')
             except Exception as e:
                 logger.error(f"Erro ao enviar notificação para pedido {order_id}: {e}", exc_info=True)
                 # Não falha a operação por erro na notificação
@@ -943,15 +974,15 @@ def update_order_status(order_id, new_status):
             try:
                 customer = user_service.get_user_by_id(user_id)
                 if customer:
-                    # OTIMIZAÇÃO: Email pode ser enviado de forma assíncrona em produção
-                    # Por enquanto, envia de forma síncrona mas captura erros
+                    # ALTERAÇÃO: Usar db_status em vez de new_status para garantir tradução correta
+                    # db_status é o status que foi salvo no banco (já mapeado corretamente)
                     email_service.send_email(
                         to=customer['email'],
                         subject=f"Atualização sobre seu pedido #{order_id}",
                         template='order_status_update',
                         user=customer,
                         order={"order_id": order_id},
-                        new_status=new_status
+                        new_status=db_status  # Usar db_status que é o status salvo no banco
                     )
             except Exception as e:
                 logger.error(f"Erro ao enviar email para pedido {order_id}: {e}", exc_info=True)
@@ -1227,7 +1258,8 @@ def cancel_order(order_id, user_id, is_manager=False):
                 message = f"Seu pedido #{order_id} foi cancelado com sucesso!"
             
             link = f"/my-orders/{order_id}"
-            notification_service.create_notification(target_user_id, message, link)
+            # ALTERAÇÃO: Passa notification_type='order' para respeitar preferências
+            notification_service.create_notification(target_user_id, message, link, notification_type='order')
 
             customer = user_service.get_user_by_id(target_user_id)
             if customer:
@@ -1652,11 +1684,27 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         except Exception as e:
             logger.warning(f"Falha ao imprimir ticket do pedido {order_id}: {e}", exc_info=True)
         
-        # Envia notificação
+        # ALTERAÇÃO: Envia notificação e email de confirmação
         try:
             notification_service.send_order_confirmation(user_id, order_data)
         except Exception as e:
             logger.error(f"Falha ao enviar notificação de confirmação do pedido {order_id}: {e}", exc_info=True)
+        
+        # ALTERAÇÃO: Enviar email de confirmação de pedido
+        try:
+            customer = user_service.get_user_by_id(user_id)
+            if customer and customer.get('email') and order_data:
+                email_service.send_email(
+                    to=customer['email'],
+                    subject=f"Pedido #{order_id} confirmado - Royal Burger",
+                    template='order_confirmation',
+                    user=customer,
+                    order=order_data,
+                    app_url=Config.APP_URL
+                )
+        except Exception as e:
+            # Não falha a criação do pedido se houver erro ao enviar email
+            logger.warning(f"Erro ao enviar email de confirmação do pedido {order_id}: {e}", exc_info=True)
         
         return (order_data, None, "Pedido criado com sucesso a partir do carrinho")
         

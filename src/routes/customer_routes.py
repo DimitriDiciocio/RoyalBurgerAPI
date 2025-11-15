@@ -141,6 +141,62 @@ def update_customer_route(user_id):
         else:  
             return jsonify({"error": "Falha ao atualizar dados do cliente"}), 500  
 
+@customer_bp.route('/<int:user_id>/notification-preferences', methods=['GET'])
+@jwt_required()
+def get_notification_preferences_route(user_id):
+    """
+    Obtém as preferências de notificação do usuário.
+    """
+    claims = get_jwt()
+    if 'admin' not in claims.get('roles', []) and get_jwt_identity() != str(user_id):
+        return jsonify({"msg": "Acesso não autorizado"}), 403
+    
+    preferences = user_service.get_notification_preferences(user_id)
+    if preferences is None:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    
+    return jsonify(preferences), 200
+
+@customer_bp.route('/<int:user_id>/notification-preferences', methods=['PUT'])
+@jwt_required()
+def update_notification_preferences_route(user_id):
+    """
+    Atualiza as preferências de notificação do usuário.
+    Body esperado: { "notify_order_updates": true/false, "notify_promotions": true/false }
+    """
+    claims = get_jwt()
+    if 'admin' not in claims.get('roles', []) and get_jwt_identity() != str(user_id):
+        return jsonify({"msg": "Acesso não autorizado"}), 403
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    # Validar que pelo menos um campo foi fornecido
+    if 'notify_order_updates' not in data and 'notify_promotions' not in data:
+        return jsonify({"error": "Pelo menos uma preferência deve ser fornecida"}), 400
+    
+    # Validar tipos booleanos
+    if 'notify_order_updates' in data and not isinstance(data['notify_order_updates'], bool):
+        return jsonify({"error": "notify_order_updates deve ser um valor booleano (true/false)"}), 400
+    
+    if 'notify_promotions' in data and not isinstance(data['notify_promotions'], bool):
+        return jsonify({"error": "notify_promotions deve ser um valor booleano (true/false)"}), 400
+    
+    success, error_code, message = user_service.update_notification_preferences(user_id, data)
+    
+    if success:
+        return jsonify({"msg": message}), 200
+    else:
+        if error_code == "USER_NOT_FOUND":
+            return jsonify({"error": message}), 404
+        elif error_code == "NO_VALID_FIELDS":
+            return jsonify({"error": message}), 400
+        elif error_code == "DATABASE_ERROR":
+            return jsonify({"error": message}), 500
+        else:
+            return jsonify({"error": "Falha ao atualizar preferências de notificação"}), 500
+
 @customer_bp.route('/<int:user_id>', methods=['DELETE'])  
 @jwt_required()  
 def delete_customer_route(user_id):  

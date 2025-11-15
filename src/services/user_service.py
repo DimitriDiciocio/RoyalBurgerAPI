@@ -223,6 +223,89 @@ def get_users_by_role(roles):
     finally:
         if conn: conn.close()
 
+def get_notification_preferences(user_id):
+    """
+    Obtém as preferências de notificação do usuário.
+    Retorna um dicionário com as preferências ou None se o usuário não for encontrado.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        sql = """
+            SELECT NOTIFY_ORDER_UPDATES, NOTIFY_PROMOTIONS 
+            FROM USERS 
+            WHERE ID = ? AND IS_ACTIVE = TRUE;
+        """
+        cur.execute(sql, (user_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            return None
+        
+        # Firebird retorna True/False como 1/0, converter para boolean
+        notify_order_updates = bool(row[0]) if row[0] is not None else True
+        notify_promotions = bool(row[1]) if row[1] is not None else True
+        
+        return {
+            'notify_order_updates': notify_order_updates,
+            'notify_promotions': notify_promotions
+        }
+    except fdb.Error as e:
+        logger.error(f"Erro ao obter preferências de notificação: {e}")
+        return None
+    finally:
+        if conn: conn.close()
+
+def update_notification_preferences(user_id, preferences):
+    """
+    Atualiza as preferências de notificação do usuário.
+    preferences: dict com 'notify_order_updates' e/ou 'notify_promotions' (boolean)
+    Retorna (sucesso, error_code, mensagem)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verificar se o usuário existe
+        sql_check = "SELECT 1 FROM USERS WHERE ID = ? AND IS_ACTIVE = TRUE;"
+        cur.execute(sql_check, (user_id,))
+        if not cur.fetchone():
+            return (False, "USER_NOT_FOUND", "Usuário não encontrado.")
+        
+        # Validar e preparar campos para atualização
+        updates = []
+        values = []
+        
+        if 'notify_order_updates' in preferences:
+            notify_order = bool(preferences['notify_order_updates'])
+            updates.append("NOTIFY_ORDER_UPDATES = ?")
+            values.append(notify_order)
+        
+        if 'notify_promotions' in preferences:
+            notify_promo = bool(preferences['notify_promotions'])
+            updates.append("NOTIFY_PROMOTIONS = ?")
+            values.append(notify_promo)
+        
+        if not updates:
+            return (False, "NO_VALID_FIELDS", "Nenhuma preferência válida fornecida.")
+        
+        values.append(user_id)
+        sql_update = f"UPDATE USERS SET {', '.join(updates)} WHERE ID = ?;"
+        cur.execute(sql_update, tuple(values))
+        conn.commit()
+        
+        return (True, None, "Preferências de notificação atualizadas com sucesso.")
+    
+    except fdb.Error as e:
+        if conn: conn.rollback()
+        logger.error(f"Erro ao atualizar preferências de notificação: {e}")
+        return (False, "DATABASE_ERROR", "Erro interno do servidor.")
+    finally:
+        if conn: conn.close()
+
 def get_user_by_id(user_id):
     conn = None
     try:
@@ -230,7 +313,7 @@ def get_user_by_id(user_id):
         cur = conn.cursor()
         sql = (
             "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE, DATE_OF_BIRTH, IS_ACTIVE, CREATED_AT, "
-            "IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED "
+            "IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED, NOTIFY_ORDER_UPDATES, NOTIFY_PROMOTIONS "
             "FROM USERS WHERE ID = ?;"
         )
         cur.execute(sql, (user_id,))
@@ -248,6 +331,8 @@ def get_user_by_id(user_id):
                 "created_at": row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,
                 "is_email_verified": bool(row[9]) if row[9] is not None else False,
                 "two_factor_enabled": bool(row[10]) if row[10] is not None else False,
+                "notify_order_updates": bool(row[11]) if row[11] is not None else True,
+                "notify_promotions": bool(row[12]) if row[12] is not None else True,
             }
         return None
     except fdb.Error as e:
@@ -335,7 +420,7 @@ def update_user(user_id, update_data, is_admin_request=False):
             if new_role not in valid_roles:
                 return (False, "INVALID_ROLE", "Cargo inválido. Cargos válidos: admin, manager, attendant, delivery, customer")
 
-        allowed_fields = ['full_name', 'date_of_birth', 'phone', 'cpf']
+        allowed_fields = ['full_name', 'date_of_birth', 'phone', 'cpf', 'notify_order_updates', 'notify_promotions']
         if is_admin_request:
             allowed_fields.extend(['email', 'role'])
         fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}

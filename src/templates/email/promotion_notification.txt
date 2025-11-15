@@ -1,0 +1,50 @@
+Nova Promoção - Royal Burger
+
+Olá {{ user.full_name }},
+
+Temos uma SUPER PROMOÇÃO especialmente para você!
+
+========================================
+🔥 PROMOÇÃO IMPERDÍVEL 🔥
+========================================
+
+{% if promotion.discount_value %}
+DESCONTO: R$ {{ "%.2f"|format(promotion.discount_value) }} OFF
+{% elif promotion.discount_percentage %}
+DESCONTO: {{ "%.0f"|format(promotion.discount_percentage) }}% OFF
+{% else %}
+DESCONTO ESPECIAL
+{% endif %}
+
+PRODUTO: {{ product.name }}
+
+{% if promotion.expires_at %}
+⏰ Válido até {{ promotion.expires_at }}
+{% endif %}
+
+========================================
+
+Não perca essa oportunidade! Aproveite agora mesmo e garanta seu {{ product.name }} com um desconto incrível!
+
+{% if product.description %}
+SOBRE O PRODUTO:
+{{ product.description }}
+{% endif %}
+
+Acesse nossa promoção: {{ app_url }}/menu{% if promotion.id %}?promotion={{ promotion.id }}{% endif %}
+
+Por que escolher o Royal Burger?
+✅ Ingredientes frescos e selecionados
+✅ Preparo artesanal com muito carinho
+✅ Entrega rápida e segura
+✅ Atendimento de excelência
+
+Não deixe essa promoção passar! Corra e garanta já o seu pedido! 🍔
+
+Atenciosamente,
+Equipe Royal Burger
+
+---
+Este é um e-mail automático, por favor não responda.
+Você está recebendo este e-mail porque está cadastrado em nossa lista de clientes.
+

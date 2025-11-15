@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nova Promoção - Royal Burger</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        line-height: 1.6;
+        color: #333333;
+        background-color: #f5f5f5;
+        padding: 20px;
+      }
+      .email-container {
+        max-width: 600px;
+        margin: 0 auto;
+        background-color: #ffffff;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .header {
+        background: linear-gradient(135deg, #d4af37 0%, #b8941f 100%);
+        color: #ffffff;
+        padding: 30px 20px;
+        text-align: center;
+      }
+      .header h1 {
+        font-size: 28px;
+        margin-bottom: 5px;
+        font-weight: 700;
+      }
+      .header h2 {
+        font-size: 18px;
+        font-weight: 400;
+        opacity: 0.95;
+      }
+      .content {
+        padding: 35px;
+        background-color: #ffffff;
+      }
+      .greeting {
+        font-size: 16px;
+        margin-bottom: 20px;
+        color: #333333;
+      }
+      .promotion-box {
+        background: linear-gradient(135deg, #d4af37 0%, #f4d03f 100%);
+        color: #ffffff;
+        padding: 35px 25px;
+        border-radius: 8px;
+        text-align: center;
+        margin: 30px 0;
+        box-shadow: 0 4px 8px rgba(212, 175, 55, 0.3);
+      }
+      .promotion-box h2 {
+        font-size: 24px;
+        margin-bottom: 15px;
+        font-weight: 700;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+      }
+      .discount-amount {
+        font-size: 42px;
+        font-weight: 700;
+        margin: 20px 0;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+      }
+      .product-name {
+        font-size: 22px;
+        margin: 20px 0;
+        font-weight: 600;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+      }
+      .expires-box {
+        background-color: rgba(255, 255, 255, 0.25);
+        padding: 12px;
+        border-radius: 6px;
+        margin-top: 20px;
+        font-size: 14px;
+        backdrop-filter: blur(10px);
+      }
+      .product-description-box {
+        background-color: #f9f9f9;
+        border-left: 4px solid #d4af37;
+        border-radius: 6px;
+        padding: 20px;
+        margin: 25px 0;
+      }
+      .product-description-box strong {
+        color: #d4af37;
+        font-size: 15px;
+        display: block;
+        margin-bottom: 10px;
+      }
+      .product-description-box p {
+        color: #555555;
+        font-size: 14px;
+        line-height: 1.8;
+        margin: 0;
+      }
+      .features-box {
+        background-color: #f9f9f9;
+        border-left: 4px solid #d4af37;
+        border-radius: 6px;
+        padding: 25px;
+        margin: 25px 0;
+      }
+      .features-box h3 {
+        color: #d4af37;
+        font-size: 18px;
+        margin-bottom: 15px;
+        font-weight: 600;
+      }
+      .features-list {
+        list-style: none;
+        padding: 0;
+      }
+      .features-list li {
+        padding: 8px 0;
+        font-size: 14px;
+        color: #555555;
+        border-bottom: 1px solid #e0e0e0;
+      }
+      .features-list li:last-child {
+        border-bottom: none;
+      }
+      .button {
+        display: inline-block;
+        padding: 16px 32px;
+        background: linear-gradient(135deg, #d4af37 0%, #b8941f 100%);
+        color: #ffffff;
+        text-decoration: none;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 16px;
+        margin: 20px 0;
+        text-align: center;
+        transition: opacity 0.3s;
+        box-shadow: 0 2px 4px rgba(212, 175, 55, 0.3);
+      }
+      .button:hover {
+        opacity: 0.9;
+      }
+      .button-container {
+        text-align: center;
+        margin: 30px 0;
+      }
+      .footer {
+        background-color: #f9f9f9;
+        padding: 25px;
+        text-align: center;
+        border-top: 1px solid #e0e0e0;
+      }
+      .footer p {
+        color: #666666;
+        font-size: 13px;
+        margin: 5px 0;
+        line-height: 1.5;
+      }
+      .signature {
+        margin-top: 25px;
+        padding-top: 20px;
+        border-top: 1px solid #e0e0e0;
+      }
+      .signature p {
+        color: #333333;
+        font-size: 15px;
+        margin: 5px 0;
+      }
+      @media only screen and (max-width: 600px) {
+        body {
+          padding: 10px;
+        }
+        .content {
+          padding: 25px;
+        }
+        .header {
+          padding: 25px 15px;
+        }
+        .promotion-box {
+          padding: 25px 20px;
+        }
+        .discount-amount {
+          font-size: 32px;
+        }
+        .product-name {
+          font-size: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="email-container">
+      <div class="header">
+        <div style="display: inline-flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 187.5 187.5" style="vertical-align: middle;">
+            <path fill="#ffffff" d="M 116.90625 62.8125 C 116.496094 61.632812 116.109375 60.773438 115.894531 59.871094 C 114.90625 55.660156 117.640625 52.636719 121.929688 53.179688 C 125.800781 53.667969 129.242188 57.980469 126.113281 61.15625 C 124.136719 63.167969 123.542969 61.867188 125.152344 66.222656 C 140.726562 108.289062 139.054688 107.289062 141.894531 105.070312 C 144.195312 103.273438 150.503906 97.089844 156.890625 91.285156 C 169.867188 79.488281 174.382812 81.371094 173.996094 76.304688 C 173.59375 71.003906 176.636719 67.121094 181.074219 68.628906 C 185.988281 70.304688 186.761719 76.464844 182.101562 79.796875 C 177.457031 83.121094 184.320312 71.902344 164.386719 134.375 C 159.621094 149.308594 164.453125 142.539062 119.449219 137.523438 C 107.234375 136.164062 62.113281 128.890625 45.523438 131.117188 C 22.125 134.253906 19.511719 139.132812 17.964844 132.71875 C 6.242188 83.859375 8.984375 77.710938 5.207031 75.867188 C -0.238281 73.199219 0.402344 62.578125 8.214844 64.273438 C 11.890625 65.070312 13.199219 67.390625 12.914062 69.816406 C 12.207031 75.746094 7.234375 68.976562 42.140625 93.796875 C 47.488281 97.597656 45.230469 98.0625 54.738281 70.109375 C 56.8125 64.023438 58.601562 60.132812 59.871094 55.875 C 49.464844 45.144531 63.027344 37.859375 68.234375 45.882812 C 70.191406 48.898438 68.480469 50.726562 66.785156 53.289062 C 69.632812 60.863281 70.800781 60.023438 85.40625 96.109375 C 87.832031 102.117188 87.328125 100.460938 116.90625 62.8125 Z M 61.65625 46.332031 C 59.023438 47.550781 60.207031 51.054688 61.597656 51.585938 C 64.242188 52.585938 67.398438 46.191406 61.65625 46.332031 Z M 181.347656 74.59375 C 181.714844 72.773438 178.792969 71.265625 178.03125 73.460938 C 176.226562 78.722656 180.667969 77.980469 181.347656 74.59375 Z M 5.535156 69.777344 C 5.589844 71.886719 7.378906 72.585938 8.082031 71.578125 C 10.773438 67.726562 5.460938 66.839844 5.535156 69.777344 Z M 123.039062 58.777344 C 123.566406 57.09375 120.238281 55.996094 119.570312 57.925781 C 118.875 59.945312 122.371094 60.929688 123.039062 58.777344 Z"/>
+            <path fill="#ffffff" d="M 136.402344 114.65625 C 175.257812 97.1875 173.433594 90.554688 154.417969 133.019531 C 152.394531 137.546875 86.949219 128.167969 28.386719 124.457031 C 26.175781 124.316406 26.058594 123.054688 25.613281 120.667969 C 18.082031 80.875 15.378906 85.011719 43.03125 107.191406 C 44.425781 106.648438 42.921875 108.148438 63.488281 81.640625 C 68.035156 75.78125 66.835938 76.960938 83.933594 103.917969 C 86.386719 107.785156 85.867188 107.804688 89.28125 105.421875 C 122.183594 82.382812 119.539062 81.941406 122.992188 88.699219 C 137.46875 116.957031 133.324219 109.054688 136.402344 114.65625 Z M 29.921875 119.832031 C 31.402344 120.734375 145.511719 130.835938 150.757812 130.515625 C 151.519531 129.597656 150.289062 132.332031 160.824219 108.925781 C 160.9375 108.675781 160.78125 108.308594 160.730469 107.753906 C 134.308594 119.246094 135.851562 122.753906 132.136719 115.492188 C 118.609375 89.046875 119.683594 90.695312 118.5 90.066406 C 114.382812 92.738281 121.367188 87.917969 89.722656 110.089844 C 83.585938 114.386719 86.097656 114.769531 68.988281 87.925781 C 66.671875 84.285156 66.816406 83.984375 64.125 87.449219 C 42.695312 115.066406 45.167969 114.359375 40.210938 110.210938 C 25.070312 97.550781 28.519531 100.179688 26.046875 98.890625 C 26.011719 101.953125 28.773438 116.6875 29.921875 119.832031 Z"/>
+          </svg>
+          <h1 style="margin: 0; display: inline;">Royal Burger</h1>
+        </div>
+        <h2>🎉 Nova Promoção Exclusiva!</h2>
+      </div>
+
+      <div class="content">
+        <p class="greeting">Olá, <strong>{{ user.full_name }}</strong>!</p>
+
+        <p style="font-size: 15px; color: #555555; margin-bottom: 25px;">
+          Temos uma <strong style="color: #d4af37;">super promoção</strong> especialmente para você!
+        </p>
+
+        <div class="promotion-box">
+          <h2>🔥 PROMOÇÃO IMPERDÍVEL 🔥</h2>
+          <div class="discount-amount">
+            {% if promotion.discount_value %}
+              R$ {{ "%.2f"|format(promotion.discount_value) }} OFF
+            {% elif promotion.discount_percentage %}
+              {{ "%.0f"|format(promotion.discount_percentage) }}% OFF
+            {% else %}
+              DESCONTO ESPECIAL
+            {% endif %}
+          </div>
+          <div class="product-name">
+            {{ product.name }}
+          </div>
+          {% if promotion.expires_at %}
+          <div class="expires-box">
+            ⏰ Válido até {{ promotion.expires_at }}
+          </div>
+          {% endif %}
+        </div>
+
+        <p style="font-size: 15px; color: #555555; margin: 25px 0;">
+          Não perca essa oportunidade! Aproveite agora mesmo e garanta seu <strong>{{ product.name }}</strong> com um desconto incrível!
+        </p>
+
+        {% if product.description %}
+        <div class="product-description-box">
+          <strong>📝 Sobre o produto:</strong>
+          <p>{{ product.description }}</p>
+        </div>
+        {% endif %}
+
+        <div class="button-container">
+          <a href="{{ app_url }}/menu{% if promotion.id %}?promotion={{ promotion.id }}{% endif %}" class="button">
+            Ver Promoção e Fazer Pedido
+          </a>
+        </div>
+
+        <div class="features-box">
+          <h3>✨ Por que escolher o Royal Burger?</h3>
+          <ul class="features-list">
+            <li>✅ Ingredientes frescos e selecionados</li>
+            <li>✅ Preparo artesanal com muito carinho</li>
+            <li>✅ Entrega rápida e segura</li>
+            <li>✅ Atendimento de excelência</li>
+          </ul>
+        </div>
+
+        <div class="signature">
+          <p>Não deixe essa promoção passar! Corra e garanta já o seu pedido!</p>
+          <p style="margin-top: 15px;">
+            Atenciosamente,<br />
+            <strong>Equipe Royal Burger</strong>
+          </p>
+        </div>
+      </div>
+
+      <div class="footer">
+        <p>Este é um e-mail automático, por favor não responda.</p>
+        <p>Você está recebendo este e-mail porque está cadastrado em nossa lista de clientes.</p>
+        <p>Royal Burger - Sua lanchonete premium</p>
+        <p style="margin-top: 10px; font-size: 12px; color: #999999;">
+          © 2024 Royal Burger. Todos os direitos reservados.
+        </p>
+      </div>
+    </div>
+  </body>
+</html>

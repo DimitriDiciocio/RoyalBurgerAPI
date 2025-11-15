@@ -1,0 +1,65 @@
+Pedido Confirmado - Royal Burger
+
+Olá {{ user.full_name }},
+
+Seu pedido foi recebido com sucesso! Em breve, nossa equipe começará a prepará-lo.
+
+DETALHES DO PEDIDO
+==================
+
+Número do Pedido: #{{ order.id or order.order_id }}
+Status: {{ order.status|title }}
+
+{% if order.confirmation_code %}
+Código de Confirmação: {{ order.confirmation_code }}
+{% endif %}
+
+Método de Pagamento: {{ order.payment_method|title }}
+
+{% if order.order_type %}
+Tipo de Pedido: 
+{% if order.order_type == 'delivery' %}
+  Entrega
+{% elif order.order_type == 'pickup' %}
+  Retirada no Balcão
+{% else %}
+  {{ order.order_type|title }}
+{% endif %}
+{% endif %}
+
+{% if order.address %}
+Endereço de Entrega:
+{{ order.address.street }}, {{ order.address.number }}
+{% if order.address.complement %}{{ order.address.complement }}{% endif %}
+{{ order.address.neighborhood }} - {{ order.address.city }}/{{ order.address.state }}
+CEP: {{ order.address.zip_code }}
+{% endif %}
+
+{% if order.items %}
+ITENS DO PEDIDO
+===============
+
+{% for item in order.items %}
+{{ item.quantity }}x {{ item.product_name }}{% if item.unit_price %} - R$ {{ "%.2f"|format(item.unit_price * item.quantity) }}{% endif %}
+{% endfor %}
+
+TOTAL: R$ {{ "%.2f"|format(order.total_amount) }}
+{% endif %}
+
+{% if order.notes %}
+OBSERVAÇÕES: {{ order.notes }}
+{% endif %}
+
+Você pode acompanhar o status do seu pedido em tempo real através do nosso aplicativo ou site.
+
+Acesse: {{ app_url }}/my-orders/{{ order.id or order.order_id }}
+
+Obrigado por escolher o Royal Burger!
+Bom apetite! 🍔
+
+Atenciosamente,
+Equipe Royal Burger
+
+---
+Este é um e-mail automático, por favor não responda.
+

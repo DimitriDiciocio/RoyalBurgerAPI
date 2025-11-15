@@ -493,11 +493,15 @@ CREATE TABLE USERS (
 	CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	IS_EMAIL_VERIFIED BOOLEAN DEFAULT FALSE,
 	TWO_FACTOR_ENABLED BOOLEAN DEFAULT FALSE,
+	NOTIFY_ORDER_UPDATES BOOLEAN DEFAULT TRUE,
+	NOTIFY_PROMOTIONS BOOLEAN DEFAULT TRUE,
 	CONSTRAINT INTEG_12 UNIQUE (CPF),
 	CONSTRAINT INTEG_4 PRIMARY KEY (ID)
 );
 CREATE UNIQUE INDEX "RDB$6" ON USERS (CPF);
 CREATE UNIQUE INDEX RDB$PRIMARY3 ON USERS (ID);
+CREATE INDEX IDX_USERS_NOTIFY_ORDER_UPDATES ON USERS (NOTIFY_ORDER_UPDATES);
+CREATE INDEX IDX_USERS_NOTIFY_PROMOTIONS ON USERS (NOTIFY_PROMOTIONS);
 
 -- STORE_HOURS definition
 -- Drop table
@@ -594,6 +598,10 @@ TABELAS DE FUNCIONALIDADES:
 - RESTAURANT_TABLES: Mesas do restaurante (gestão de salão)
 - TEMPORARY_RESERVATIONS: Reservas temporárias de insumos (soft locks) para carrinho
 
+CAMPOS DE PREFERÊNCIAS DE NOTIFICAÇÃO (USERS):
+- NOTIFY_ORDER_UPDATES: Receber notificações sobre atualizações de pedidos (padrão: TRUE)
+- NOTIFY_PROMOTIONS: Receber notificações sobre promoções e novidades (padrão: TRUE)
+
 FUNCIONALIDADES IMPLEMENTADAS:
 - Sistema de autenticação com JWT
 - Verificação de email
@@ -606,6 +614,7 @@ FUNCIONALIDADES IMPLEMENTADAS:
 - Pontos de fidelidade
 - Gestão financeira
 - Notificações
+- Preferências de notificação personalizadas por usuário
 - Ordenação de categorias (DISPLAY_ORDER)
 - Horários de funcionamento da loja
 - Gestão de salão (mesas e atendentes) - pedidos on-site
