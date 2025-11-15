@@ -1080,7 +1080,8 @@ def update_order_status(order_id, new_status):
                         template='order_status_update',
                         user=customer,
                         order={"order_id": order_id},
-                        new_status=db_status  # Usar db_status que é o status salvo no banco
+                        new_status=db_status,  # Usar db_status que é o status salvo no banco
+                        app_url=Config.APP_URL
                     )
             except Exception as e:
                 logger.error(f"Erro ao enviar email para pedido {order_id}: {e}", exc_info=True)
@@ -1367,7 +1368,8 @@ def cancel_order(order_id, user_id, is_manager=False):
                     template='order_status_update', 
                     user=customer,
                     order={"order_id": order_id},
-                    new_status='cancelled'
+                    new_status='cancelled',
+                    app_url=Config.APP_URL
                 )
         except Exception as e:
             logger.warning(f"Falha ao enviar notificação de cancelamento para o pedido {order_id}: {e}", exc_info=True)

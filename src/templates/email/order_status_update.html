@@ -42,7 +42,7 @@
         opacity: 0.95;
       }
       .content {
-        padding: 30px;
+        padding: 35px;
         background-color: #ffffff;
       }
       .greeting {
@@ -50,22 +50,69 @@
         margin-bottom: 20px;
         color: #333333;
       }
+      .status-message {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-left: 4px solid #28a745;
+        border-radius: 6px;
+        padding: 20px;
+        margin: 20px 0;
+      }
+      .status-message.status-warning {
+        background-color: #fff3cd;
+        border-color: #ffeaa7;
+        border-left-color: #ffc107;
+      }
+      .status-message.status-info {
+        background-color: #cce5ff;
+        border-color: #b3d9ff;
+        border-left-color: #17a2b8;
+      }
+      .status-message.status-error {
+        background-color: #f8d7da;
+        border-color: #f5c6cb;
+        border-left-color: #dc3545;
+      }
+      .status-message.status-success {
+        background-color: #d1ecf1;
+        border-color: #bee5eb;
+        border-left-color: #28a745;
+      }
+      .status-message p {
+        color: #155724;
+        font-size: 15px;
+        margin: 0;
+        font-weight: 500;
+      }
+      .status-message.status-warning p {
+        color: #856404;
+      }
+      .status-message.status-info p {
+        color: #004085;
+      }
+      .status-message.status-error p {
+        color: #721c24;
+      }
+      .status-message.status-success p {
+        color: #0c5460;
+      }
       .order-info-box {
         background-color: #f9f9f9;
         border-left: 4px solid #d4af37;
-        padding: 20px;
-        border-radius: 4px;
-        margin: 20px 0;
+        padding: 25px;
+        border-radius: 6px;
+        margin: 25px 0;
       }
       .order-info-box h3 {
         color: #d4af37;
         font-size: 18px;
-        margin-bottom: 15px;
+        margin-bottom: 20px;
         font-weight: 600;
       }
       .order-detail {
-        margin: 10px 0;
+        margin: 12px 0;
         font-size: 15px;
+        color: #555555;
       }
       .order-detail strong {
         color: #333333;
@@ -131,7 +178,7 @@
       }
       .button-container {
         text-align: center;
-        margin: 25px 0;
+        margin: 30px 0;
       }
       .footer {
         background-color: #f9f9f9;
@@ -160,16 +207,10 @@
           padding: 10px;
         }
         .content {
-          padding: 20px;
+          padding: 25px;
         }
         .header {
           padding: 25px 15px;
-        }
-        .header h1 {
-          font-size: 24px;
-        }
-        .header h2 {
-          font-size: 16px;
         }
       }
     </style>
@@ -189,6 +230,36 @@
 
       <div class="content">
         <p class="greeting">Olá, <strong>{{ user.full_name }}</strong>!</p>
+
+        {% if new_status == 'preparing' or new_status == 'in_progress' %}
+        <div class="status-message status-warning">
+          <p>🍳 Nossa cozinha já está preparando seu delicioso pedido! Em breve ele estará pronto.</p>
+        </div>
+        {% elif new_status == 'ready' %}
+        <div class="status-message status-success">
+          <p>✅ Seu pedido está pronto para retirada no balcão! Você já pode vir buscar seu pedido.</p>
+        </div>
+        {% elif new_status == 'on_the_way' %}
+        <div class="status-message status-info">
+          <p>🚚 Seu pedido já saiu para entrega! Nosso entregador está a caminho. Bom apetite em breve!</p>
+        </div>
+        {% elif new_status == 'completed' or new_status == 'delivered' %}
+        <div class="status-message status-success">
+          <p>🎉 Pedido entregue! Esperamos que tenha gostado. Não se esqueça de deixar sua avaliação!</p>
+        </div>
+        {% elif new_status == 'cancelled' %}
+        <div class="status-message status-error">
+          <p>❌ Seu pedido foi cancelado. Se tiver alguma dúvida ou precisar de ajuda, entre em contato conosco.</p>
+        </div>
+        {% elif new_status == 'pending' %}
+        <div class="status-message status-warning">
+          <p>⏳ Seu pedido está aguardando confirmação. Em breve ele será processado!</p>
+        </div>
+        {% elif new_status == 'awaiting_payment' %}
+        <div class="status-message status-warning">
+          <p>💳 Seu pedido está aguardando confirmação do pagamento. Em breve será processado!</p>
+        </div>
+        {% endif %}
 
         <div class="order-info-box">
           <h3>📦 Informações do Pedido</h3>
@@ -219,27 +290,9 @@
           </p>
         </div>
 
-        <div class="message-box">
-          {% if new_status == 'pending' %}
-            <p>⏳ Seu pedido está aguardando confirmação. Em breve ele será processado!</p>
-          {% elif new_status == 'in_progress' %}
-            <p>🔄 Seu pedido está em andamento. Nossa equipe já está trabalhando nele!</p>
-          {% elif new_status == 'awaiting_payment' %}
-            <p>💳 Seu pedido está aguardando confirmação do pagamento. Em breve será processado!</p>
-          {% elif new_status == 'preparing' %}
-            <p>🍳 Nossa cozinha já está preparando seu delicioso pedido! Em breve ele estará pronto.</p>
-          {% elif new_status == 'ready' %}
-            <p>✅ Seu pedido está pronto para retirada no balcão! Você já pode vir buscar seu pedido.</p>
-          {% elif new_status == 'on_the_way' %}
-            <p>🚚 Seu pedido já saiu para entrega! Nosso entregador está a caminho. Bom apetite em breve!</p>
-          {% elif new_status == 'completed' or new_status == 'delivered' %}
-            <p>🎉 Pedido entregue! Esperamos que tenha gostado. Não se esqueça de deixar sua avaliação!</p>
-          {% elif new_status == 'cancelled' %}
-            <p>❌ Seu pedido foi cancelado. Se tiver alguma dúvida ou precisar de ajuda, entre em contato conosco.</p>
-          {% else %}
-            <p>O status do seu pedido foi atualizado. Acompanhe pelo nosso sistema.</p>
-          {% endif %}
-        </div>
+        <p style="font-size: 15px; color: #555555; margin: 25px 0;">
+          Você pode acompanhar o status do seu pedido em tempo real através do nosso aplicativo ou site.
+        </p>
 
         <div class="button-container">
           <a href="{{ app_url }}/my-orders/{{ order.order_id }}" class="button">
@@ -249,7 +302,10 @@
 
         <div class="signature">
           <p>Obrigado por escolher o <strong>Royal Burger</strong>!</p>
-          <p>
+          {% if new_status != 'cancelled' and new_status != 'completed' and new_status != 'delivered' %}
+          <p style="margin-top: 10px;">Bom apetite!</p>
+          {% endif %}
+          <p style="margin-top: 15px;">
             Atenciosamente,<br />
             <strong>Equipe Royal Burger</strong>
           </p>
