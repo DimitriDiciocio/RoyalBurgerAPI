@@ -4,7 +4,7 @@ from ..database import get_db_connection
 from . import groups_service, stock_service
 from ..utils.image_handler import get_product_image_url
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 
 # ALTERAÇÃO: Logger definido no topo do módulo para uso em todas as funções
@@ -2234,14 +2234,22 @@ def get_most_ordered_products(page=1, page_size=10):
             conn.close()
 
 
-def get_recently_added_products(page=1, page_size=10):
+def get_recently_added_products(page=1, page_size=10, days=30):
     """
     Busca os produtos mais recentemente adicionados ao catálogo.
-    Retorna produtos ordenados por data de criação (ID descendente).
-    Utiliza paginação padrão do sistema.
+    Retorna produtos criados nos últimos N dias, ordenados por data de criação descendente.
+    
+    Args:
+        page: Número da página (padrão: 1)
+        page_size: Tamanho da página (padrão: 10)
+        days: Período em dias para considerar como novidade (padrão: 30 dias)
+    
+    Returns:
+        Dict com items (lista de produtos) e pagination (metadados de paginação)
     """
     page = max(int(page or 1), 1)
     page_size = max(int(page_size or 10), 1)
+    days = max(int(days or 30), 1)  # Mínimo 1 dia, padrão 30 dias
     offset = (page - 1) * page_size
     
     conn = None
@@ -2249,32 +2257,40 @@ def get_recently_added_products(page=1, page_size=10):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # ALTERAÇÃO: Conta total de produtos ativos
+        # ALTERAÇÃO: Calcula data limite baseada no período configurado
+        # Produtos considerados novidades são aqueles criados nos últimos N dias
+        date_limit = datetime.now() - timedelta(days=days)
+        
+        # ALTERAÇÃO: Conta total de produtos ativos criados no período
+        # Se CREATED_AT for NULL (produtos antigos sem data), não são considerados novidades
         cur.execute("""
             SELECT COUNT(*) FROM PRODUCTS 
-            WHERE IS_ACTIVE = TRUE
-        """)
+            WHERE IS_ACTIVE = TRUE 
+            AND CREATED_AT IS NOT NULL
+            AND CREATED_AT >= ?
+        """, (date_limit,))
         total = cur.fetchone()[0] or 0
         
-        # ALTERAÇÃO: Query paginada que busca produtos ativos ordenados por ID descendente
-        # Nota: A tabela PRODUCTS não possui campo CREATED_AT, então usa ID DESC como proxy
-        # ID é auto-incremento, então produtos com ID maior são mais recentes
-        # ALTERAÇÃO: Incluir campos necessários para exibição (preparation_time_minutes, etc.)
+        # ALTERAÇÃO: Query paginada que busca produtos ativos ordenados por CREATED_AT descendente
+        # Filtra apenas produtos criados nos últimos N dias
         # ALTERAÇÃO: Firebird não suporta FETCH FIRST com placeholders, usar interpolação segura
         query = f"""
             SELECT FIRST {page_size} SKIP {offset}
                 p.ID, p.NAME, p.DESCRIPTION, p.PRICE, p.IMAGE_URL,
                 p.PREPARATION_TIME_MINUTES, p.CATEGORY_ID,
-                c.NAME as CATEGORY_NAME
+                c.NAME as CATEGORY_NAME, p.CREATED_AT
             FROM PRODUCTS p
             LEFT JOIN CATEGORIES c ON p.CATEGORY_ID = c.ID
             WHERE p.IS_ACTIVE = TRUE
-            ORDER BY p.ID DESC
+            AND p.CREATED_AT IS NOT NULL
+            AND p.CREATED_AT >= ?
+            ORDER BY p.CREATED_AT DESC
         """
-        cur.execute(query)
+        cur.execute(query, (date_limit,))
         
         items = []
         for row in cur.fetchall():
+            created_at = row[8]  # CREATED_AT está na posição 8
             items.append({
                 "id": row[0],
                 "name": row[1],
@@ -2284,6 +2300,7 @@ def get_recently_added_products(page=1, page_size=10):
                 "preparation_time_minutes": row[5] if row[5] else 0,
                 "category_id": row[6] if row[6] else None,
                 "category_name": row[7] if row[7] else "Sem categoria",
+                "created_at": created_at.strftime('%Y-%m-%d %H:%M:%S') if created_at else None,
                 "is_active": True  # Já filtrado na query
             })
             

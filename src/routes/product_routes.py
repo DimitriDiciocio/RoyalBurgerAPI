@@ -766,10 +766,18 @@ def get_most_ordered_products_route():
 
 @product_bp.route('/recently-added', methods=['GET'])
 def get_recently_added_products_route():
-    """Retorna os produtos mais recentemente adicionados ao catálogo."""
+    """
+    Retorna os produtos mais recentemente adicionados ao catálogo.
+    
+    Query parameters:
+        - page: Número da página (padrão: 1)
+        - page_size: Tamanho da página (padrão: 10)
+        - days: Período em dias para considerar como novidade (padrão: 30 dias)
+    """
     page = request.args.get('page', type=int, default=1)
     page_size = request.args.get('page_size', type=int, default=10)
-    result = product_service.get_recently_added_products(page=page, page_size=page_size)
+    days = request.args.get('days', type=int, default=30)  # ALTERAÇÃO: Parâmetro configurável para período
+    result = product_service.get_recently_added_products(page=page, page_size=page_size, days=days)
     return jsonify(result), 200
 
 
