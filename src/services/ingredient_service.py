@@ -226,7 +226,7 @@ def update_ingredient(ingredient_id, data):
             
             # Recalcular STOCK_STATUS baseado no novo estoque
             from ..services.stock_service import _determine_new_status
-            from decimal import Decimal
+            # ALTERAÇÃO: Usar Decimal importado no topo do módulo
             new_status = _determine_new_status(Decimal(str(new_stock)), Decimal(str(min_threshold)), current_status)
             
             # Adicionar STOCK_STATUS aos campos a atualizar
@@ -709,30 +709,61 @@ def check_ingredient_name_exists(name):
 
 
 def get_stock_summary():  
+    """
+    Retorna resumo de estoque via consultas SQL.
+    ALTERAÇÃO: Adicionados CASTs explícitos para evitar erro SQLDA (-804)
+    """
     conn = None  
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
+        
+        # ALTERAÇÃO: Query consolidada com CASTs explícitos para evitar erro SQLDA
+        # Calcular todos os valores em uma única query para melhor performance
         cur.execute("""
-            SELECT SUM(CURRENT_STOCK * PRICE) as total_value
-            FROM INGREDIENTS 
-            WHERE CURRENT_STOCK > 0
-        """)  
-        result = cur.fetchone()  
-        total_stock_value = float(result[0]) if result and result[0] else 0.0  
-        cur.execute("""
-            SELECT 
-                SUM(CASE WHEN CURRENT_STOCK = 0 THEN 1 ELSE 0 END) as out_of_stock,
-                SUM(CASE WHEN CURRENT_STOCK > 0 AND CURRENT_STOCK <= MIN_STOCK_THRESHOLD THEN 1 ELSE 0 END) as low_stock,
-                SUM(CASE WHEN CURRENT_STOCK > MIN_STOCK_THRESHOLD THEN 1 ELSE 0 END) as in_stock
+            SELECT
+                -- Valor total do estoque (apenas itens com estoque > 0 e preço válido)
+                CAST(COALESCE(SUM(
+                    CASE 
+                        WHEN CURRENT_STOCK > 0 AND PRICE IS NOT NULL AND PRICE > 0 
+                        THEN CURRENT_STOCK * PRICE 
+                        ELSE 0 
+                    END
+                ), 0) AS NUMERIC(18,2)) as total_value,
+                
+                -- Itens sem estoque
+                CAST(COALESCE(SUM(
+                    CASE WHEN CURRENT_STOCK = 0 OR CURRENT_STOCK IS NULL THEN 1 ELSE 0 END
+                ), 0) AS INTEGER) as out_of_stock,
+                
+                -- Estoque baixo (entre 0 e threshold)
+                CAST(COALESCE(SUM(
+                    CASE 
+                        WHEN CURRENT_STOCK > 0 
+                             AND CURRENT_STOCK <= COALESCE(MIN_STOCK_THRESHOLD, 0)
+                        THEN 1 
+                        ELSE 0 
+                    END
+                ), 0) AS INTEGER) as low_stock,
+                
+                -- Em estoque adequado (acima do threshold)
+                CAST(COALESCE(SUM(
+                    CASE 
+                        WHEN CURRENT_STOCK > COALESCE(MIN_STOCK_THRESHOLD, 0)
+                        THEN 1 
+                        ELSE 0 
+                    END
+                ), 0) AS INTEGER) as in_stock
             FROM INGREDIENTS
         """)  
+        
         row = cur.fetchone()  
+        
         return {  
-            "total_stock_value": total_stock_value,
-            "out_of_stock_count": int(row[0]) if row and row[0] else 0,
-            "low_stock_count": int(row[1]) if row and row[1] else 0,
-            "in_stock_count": int(row[2]) if row and row[2] else 0
+            "total_stock_value": float(row[0]) if row and row[0] is not None else 0.0,
+            "out_of_stock_count": int(row[1]) if row and row[1] is not None else 0,
+            "low_stock_count": int(row[2]) if row and row[2] is not None else 0,
+            "in_stock_count": int(row[3]) if row and row[3] is not None else 0
         }
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
@@ -744,7 +775,8 @@ def get_stock_summary():
             "in_stock_count": 0
         }
     finally:  
-        if conn: conn.close()  
+        if conn: 
+            conn.close()  
 
 
 def generate_purchase_order():  
@@ -838,7 +870,7 @@ def consume_ingredients_for_product(product_id, quantity=1):
         
         # CORREÇÃO: Executar baixa de estoque para todos os ingredientes e atualizar STOCK_STATUS
         from ..services.stock_service import _determine_new_status
-        from decimal import Decimal
+        # ALTERAÇÃO: Usar Decimal importado no topo do módulo
         
         for item in consumption_plan:
             # Buscar MIN_STOCK_THRESHOLD e STOCK_STATUS atual

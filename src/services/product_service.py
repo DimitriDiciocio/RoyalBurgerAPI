@@ -5,7 +5,7 @@ from . import groups_service, stock_service
 from ..utils.image_handler import get_product_image_url
 from decimal import Decimal
 from datetime import datetime, timedelta
-from functools import lru_cache
+# ALTERAÇÃO: Removido import não utilizado lru_cache
 
 # ALTERAÇÃO: Logger definido no topo do módulo para uso em todas as funções
 logger = logging.getLogger(__name__)  
@@ -954,22 +954,28 @@ def _is_cache_valid(cache_key):
     elapsed = (datetime.now() - _product_list_cache_timestamp[cache_key]).total_seconds()
     return elapsed < _product_list_cache_ttl
 
-def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False, filter_unavailable=True):  
+def list_products(name_filter=None, category_id=None, page=1, page_size=10, include_inactive=False, only_inactive=False, filter_unavailable=True):  
     """
     Lista produtos com cache em memória para melhor performance.
     Cache TTL: 60 segundos. Invalidado automaticamente quando produtos são modificados.
     
     ALTERAÇÃO: Agora usa calculate_product_capacity() diretamente para filtrar produtos
     com capacidade >= 1 ao invés de apenas verificar availability_status.
+    
+    ALTERAÇÃO: Adiciona suporte ao parâmetro only_inactive para filtrar apenas produtos inativos.
     """
     page = max(int(page or 1), 1)  
     page_size = max(int(page_size or 10), 1)  
     offset = (page - 1) * page_size  
     
+    # ALTERAÇÃO: Se only_inactive=True, deve incluir inativos na query
+    if only_inactive:
+        include_inactive = True
+    
     # OTIMIZAÇÃO: Verifica cache antes de consultar banco
     # Nota: Cache desabilitado para filtros de nome (busca dinâmica) e produtos inativos
     # Cache apenas para listagens padrão (sem filtro de nome, apenas ativos)
-    use_cache = not name_filter and not include_inactive
+    use_cache = not name_filter and not include_inactive and not only_inactive
     cache_key = _get_cache_key(name_filter, category_id, page, page_size, include_inactive)
     
     if use_cache and _is_cache_valid(cache_key) and cache_key in _product_list_cache:
@@ -979,14 +985,20 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        where_clauses = [] if include_inactive else ["p.IS_ACTIVE = TRUE"]  
+        # ALTERAÇÃO: Se only_inactive=True, filtrar apenas inativos; senão usar lógica padrão
+        if only_inactive:
+            where_clauses = ["p.IS_ACTIVE = FALSE"]  
+        elif include_inactive:
+            where_clauses = []  # Inclui ativos e inativos
+        else:
+            where_clauses = ["p.IS_ACTIVE = TRUE"]  # Apenas ativos
         params = []  
         if name_filter:  
             where_clauses.append("UPPER(p.NAME) LIKE UPPER(?)")  
-            params.append(f"%{name_filter}%")  
+            params.append(f"%{name_filter}%")
         if category_id:  
             where_clauses.append("p.CATEGORY_ID = ?")  
-            params.append(category_id)  
+            params.append(category_id)
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"  
         # total  
         # ALTERAÇÃO: Query parametrizada - where_sql é construído de forma segura (apenas cláusulas fixas)
@@ -1004,7 +1016,7 @@ def list_products(name_filter=None, category_id=None, page=1, page_size=10, incl
             WHERE {where_sql} 
             ORDER BY p.NAME
         """
-        cur.execute(query, tuple(params))  
+        cur.execute(query, tuple(params))
         
         # Coleta todos os product_ids primeiro
         product_rows = cur.fetchall()

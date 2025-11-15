@@ -4,32 +4,62 @@ from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt  
 from ..services.printing_service import generate_kitchen_ticket_pdf, print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
+import logging  # ALTERAÇÃO: Import centralizado para logging estruturado
 
-order_bp = Blueprint('orders', __name__)  
+order_bp = Blueprint('orders', __name__)
+logger = logging.getLogger(__name__)  # ALTERAÇÃO: Logger centralizado  
 
 @order_bp.route('/', methods=['POST'])  
-@require_role('customer')  
+@jwt_required()
 def create_order_route():  
     is_open, message = store_service.is_store_open()  
     if not is_open:  
         return jsonify({"error": message}), 409  
     claims = get_jwt()
+    user_roles = claims.get('roles', [])
     
-    # Valida e extrai user_id de forma segura
-    user_id_raw = claims.get('sub')
-    if not user_id_raw:
-        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
-    try:
-        user_id = int(user_id_raw)
-    except (ValueError, TypeError):
-        return jsonify({"error": "Token inválido: user_id inválido"}), 401
+    # ALTERAÇÃO: Verificar permissão - customer pode criar qualquer pedido, attendant apenas on-site
+    is_customer = 'customer' in user_roles
+    is_attendant = 'attendant' in user_roles
+    
+    if not is_customer and not is_attendant:
+        return jsonify({"msg": "Acesso não autorizado para esta função."}), 403
     
     data = request.get_json()
     
-    # Valida order_type (delivery ou pickup)
+    # ALTERAÇÃO: Valida order_type (delivery, pickup ou on_site)
     order_type = data.get('order_type', 'delivery')
-    if order_type not in ['delivery', 'pickup']:
-        return jsonify({"error": "order_type deve ser 'delivery' ou 'pickup'"}), 400
+    if order_type not in ['delivery', 'pickup', 'on_site']:
+        return jsonify({"error": "order_type deve ser 'delivery', 'pickup' ou 'on_site'"}), 400
+    
+    # ALTERAÇÃO: Attendants só podem criar pedidos on-site
+    if is_attendant and order_type != 'on_site':
+        return jsonify({"error": "Atendentes só podem criar pedidos on-site"}), 403
+    
+    # ALTERAÇÃO: Customers não podem criar pedidos on-site (apenas via aplicativo para delivery/pickup)
+    if is_customer and order_type == 'on_site':
+        return jsonify({"error": "Clientes não podem criar pedidos on-site. Use delivery ou pickup."}), 403
+    
+    # ALTERAÇÃO: Para pedidos on-site, user_id pode vir do request (atendente cria para o cliente)
+    # Para outros tipos, sempre usa o user_id do token
+    if order_type == 'on_site' and is_attendant:
+        # Atendente pode criar pedido para outro cliente (user_id no request)
+        customer_user_id = data.get('customer_user_id') or data.get('user_id')
+        if not customer_user_id:
+            return jsonify({"error": "customer_user_id é obrigatório para pedidos on-site criados por atendentes"}), 400
+        try:
+            user_id = int(customer_user_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": "customer_user_id deve ser um número inteiro válido"}), 400
+    else:
+        # Valida e extrai user_id de forma segura do token
+        user_id_raw = claims.get('sub')
+        if not user_id_raw:
+            return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+        try:
+            user_id = int(user_id_raw)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Token inválido: user_id inválido"}), 401
     
     address_id = data.get('address_id')
     items = data.get('items')
@@ -40,14 +70,24 @@ def create_order_route():
     points_to_redeem = data.get('points_to_redeem', 0)
     use_cart = data.get('use_cart', False)  # Nova opção para usar carrinho
     promotions = data.get('promotions')  # ALTERAÇÃO: Informações de promoções para aplicar descontos
+    table_id = data.get('table_id')  # ALTERAÇÃO: ID da mesa para pedidos on-site
     
     # Validações básicas
     if not payment_method:
         return jsonify({"error": "payment_method é obrigatório"}), 400
     
-    # address_id só obrigatório para delivery
+    # ALTERAÇÃO: address_id só obrigatório para delivery, table_id opcional para on-site
     if order_type == 'delivery' and not address_id:
         return jsonify({"error": "address_id é obrigatório para pedidos de entrega"}), 400
+    
+    # ALTERAÇÃO: Validar mesa apenas se table_id for fornecido para pedidos on-site
+    if order_type == 'on_site' and table_id is not None:
+        try:
+            table_id = int(table_id)
+            if table_id <= 0:
+                return jsonify({"error": "table_id deve ser um número inteiro válido"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "table_id deve ser um número inteiro válido"}), 400
     
     # Se não usar carrinho, items é obrigatório
     if not use_cart and not items:
@@ -71,7 +111,8 @@ def create_order_route():
             cpf_on_invoice,
             points_to_redeem,
             order_type,
-            promotions  # ALTERAÇÃO: Passar promoções para aplicar descontos
+            promotions,  # ALTERAÇÃO: Passar promoções para aplicar descontos
+            table_id  # ALTERAÇÃO: Passar table_id para pedidos on-site
         )
     else:
         # ALTERAÇÃO: Cria pedido tradicional com promoções
@@ -85,7 +126,8 @@ def create_order_route():
             cpf_on_invoice,
             points_to_redeem,
             order_type,
-            promotions  # ALTERAÇÃO: Passar promoções para aplicar descontos
+            promotions,  # ALTERAÇÃO: Passar promoções para aplicar descontos
+            table_id  # ALTERAÇÃO: Passar table_id para pedidos on-site
         )
     if new_order:  
         return jsonify(new_order), 201  
@@ -99,6 +141,8 @@ def create_order_route():
         return jsonify({"error": error_message}), 400  
     elif error_code == "INGREDIENT_UNAVAILABLE":  
         return jsonify({"error": error_message}), 422  
+    elif error_code in ["TABLE_NOT_FOUND", "TABLE_NOT_AVAILABLE"]:
+        return jsonify({"error": error_message}), 404 if error_code == "TABLE_NOT_FOUND" else 409
     elif error_code == "DATABASE_ERROR":  
         return jsonify({"error": error_message}), 500  
     
@@ -145,9 +189,7 @@ def calculate_order_total_route():
         # Erro de validação - mensagem segura para o cliente
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        # ALTERAÇÃO: Logging estruturado implementado
-        import logging
-        logger = logging.getLogger(__name__)
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
         logger.error(f"Erro ao calcular total do pedido: {e}", exc_info=True)
         # Não expõe detalhes sensíveis ao cliente
         return jsonify({"error": "Erro ao processar solicitação"}), 500
@@ -196,7 +238,23 @@ def get_all_orders_route():
         page_size = 50
     if page_size > 100:  # Limite máximo para evitar sobrecarga
         page_size = 100
-    orders = order_service.get_all_orders(page=page, page_size=page_size)  
+    
+    # ALTERAÇÃO: Ler filtros se presentes
+    search = request.args.get('search', '').strip() or None
+    status = request.args.get('status', '').strip() or None
+    channel = request.args.get('channel', '').strip() or None
+    period = request.args.get('period', '').strip() or None
+    
+    # ALTERAÇÃO: Passar filtros para o service
+    orders = order_service.get_all_orders(
+        page=page, 
+        page_size=page_size,
+        search=search,
+        status=status,
+        channel=channel,
+        period=period
+    )
+    
     return jsonify(orders), 200  
 
 @order_bp.route('/<int:order_id>/status', methods=['PATCH'])  
@@ -287,7 +345,9 @@ def print_kitchen_ticket_route(order_id):
         status_code = 200 if result.get('status') == 'printed' else 500
         return jsonify(result), status_code
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # ALTERAÇÃO: Usar logger ao invés de expor detalhes do erro diretamente
+        logger.error(f"Erro ao imprimir ticket do pedido {order_id}: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": "Erro ao imprimir ticket"}), 500
 
 
 @order_bp.route('/<int:order_id>/reprint', methods=['POST'])
@@ -315,7 +375,9 @@ def reprint_kitchen_ticket_event_route(order_id):
         socketio.emit('new_kitchen_order', payload)
         return jsonify({"status": "emitted", "order_id": order_id}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # ALTERAÇÃO: Usar logger ao invés de expor detalhes do erro diretamente
+        logger.error(f"Erro ao emitir evento de reimpressão do pedido {order_id}: {e}", exc_info=True)
+        return jsonify({"error": "Erro ao emitir evento de reimpressão"}), 500
 
 
 @order_bp.route('/<int:order_id>/kitchen-ticket.pdf', methods=['GET'])

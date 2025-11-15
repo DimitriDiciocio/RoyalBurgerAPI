@@ -1,12 +1,13 @@
 import fdb  
 import bcrypt  
 import logging
-from datetime import datetime, timedelta  
+# ALTERAÇÃO: Adicionar date ao import para uso em validações de filtros
+from datetime import datetime, timedelta, date  
 from . import email_service
 from . import loyalty_service
 from ..database import get_db_connection  
 from . import auth_service
-from ..utils import token_helper  
+# ALTERAÇÃO: Removido import não utilizado token_helper
 from ..utils import validators
 
 logger = logging.getLogger(__name__)  
@@ -29,7 +30,9 @@ def convert_date_format(date_string):
                     full_year = 2000 + yy if yy <= 50 else 1900 + yy
                     year = str(full_year)
                 return f"{year}-{month}-{day}"
-    except:
+    except (ValueError, AttributeError, IndexError) as e:
+        # ALTERAÇÃO: Especificar exceções esperadas ao invés de catch-all genérico
+        logger.debug(f"Erro ao converter formato de data '{date_string}': {e}")
         pass
     
     return date_string
@@ -139,7 +142,10 @@ def create_user(user_data):
             try:
                 loyalty_service.add_welcome_points(new_user_id, cur)
             except Exception as e:
-                pass
+                # ALTERAÇÃO: Logar exceção ao invés de silenciar completamente
+                # Falha em pontos de boas-vindas não deve impedir criação do usuário, mas deve ser registrada
+                logger.warning(f"Falha ao adicionar pontos de boas-vindas para usuário {new_user_id}: {e}", exc_info=True)
+                # Re-lança apenas para fazer rollback se necessário (mas não deve chegar aqui devido ao commit depois)
         
         # Commit de tudo junto (usuário + pontos)
         conn.commit()
@@ -336,9 +342,20 @@ def get_user_by_id(user_id):
             }
         return None
     except fdb.Error as e:
-        return None
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar usuário por ID {user_id} (fdb.Error): {e}", exc_info=True)
+        raise  # Re-lança para tratamento na rota
+    except Exception as e:
+        # ALTERAÇÃO: Usar logger ao invés de print() e capturar outras exceções não esperadas
+        logger.error(f"Erro inesperado ao buscar usuário por ID {user_id}: {e}", exc_info=True)
+        raise  # Re-lança para tratamento na rota
     finally:
-        if conn: conn.close()
+        if conn:
+            try:
+                conn.close()
+            except Exception as e:
+                # ALTERAÇÃO: Usar logger ao invés de print() para erros ao fechar conexão
+                logger.warning(f"Erro ao fechar conexão ao buscar usuário por ID {user_id}: {e}", exc_info=True)
 
 def get_user_by_email(email):
     conn = None
@@ -858,10 +875,12 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
                 params.append(f"%{filters['email']}%")
             
             if filters.get('search'):
-                # Busca geral em nome, email e telefone
-                conditions.append("(UPPER(FULL_NAME) LIKE UPPER(?) OR UPPER(EMAIL) LIKE UPPER(?) OR UPPER(PHONE) LIKE UPPER(?))")
-                search_term = f"%{filters['search']}%"
-                params.extend([search_term, search_term, search_term])
+                # ALTERAÇÃO: Busca geral em nome, email e telefone - melhorar tratamento de valores None
+                search_term = filters['search']
+                if search_term and str(search_term).strip():
+                    search_term = f"%{str(search_term).strip()}%"
+                    conditions.append("(UPPER(FULL_NAME) LIKE UPPER(?) OR UPPER(EMAIL) LIKE UPPER(?) OR UPPER(PHONE) LIKE UPPER(?))")
+                    params.extend([search_term, search_term, search_term])
             
             if filters.get('role'):
                 if isinstance(filters['role'], list):
@@ -883,7 +902,9 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
                     from datetime import datetime as dt
                     try:
                         created_after = dt.strptime(created_after, '%Y-%m-%d').date()
-                    except:
+                    except (ValueError, TypeError) as e:
+                        # ALTERAÇÃO: Especificar exceções esperadas ao invés de catch-all genérico
+                        logger.debug(f"Erro ao converter created_after '{created_after}': {e}")
                         pass
                 if isinstance(created_after, date) and not isinstance(created_after, datetime):
                     from datetime import datetime
@@ -897,7 +918,9 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
                     from datetime import datetime as dt
                     try:
                         created_before = dt.strptime(created_before, '%Y-%m-%d').date()
-                    except:
+                    except (ValueError, TypeError) as e:
+                        # ALTERAÇÃO: Especificar exceções esperadas ao invés de catch-all genérico
+                        logger.debug(f"Erro ao converter created_before '{created_before}': {e}")
                         pass
                 if isinstance(created_before, date) and not isinstance(created_before, datetime):
                     from datetime import datetime, timedelta
@@ -908,6 +931,25 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
         if conditions:
             base_sql += " AND " + " AND ".join(conditions)
         
+        # ALTERAÇÃO: Contagem total ANTES de adicionar ORDER BY e ROWS
+        # Construir query de contagem de forma explícita para evitar problemas com replace
+        count_sql = "SELECT COUNT(*) FROM USERS WHERE 1=1"
+        if conditions:
+            count_sql += " AND " + " AND ".join(conditions)
+        
+        try:
+            cur.execute(count_sql, params)
+            count_result = cur.fetchone()
+            # ALTERAÇÃO: Tratamento seguro para evitar erro quando fetchone() retorna None
+            if count_result and len(count_result) > 0:
+                total = count_result[0] if count_result[0] is not None else 0
+            else:
+                logger.warning(f"Query de contagem retornou resultado vazio. SQL: {count_sql[:200]}... Params: {params}")
+                total = 0
+        except Exception as count_error:
+            logger.error(f"Erro ao executar query de contagem: {count_error}. SQL: {count_sql[:200]}... Params: {params}", exc_info=True)
+            total = 0
+        
         # Ordenação
         valid_sort_fields = ['full_name', 'email', 'role', 'created_at', 'is_active']
         if sort_by not in valid_sort_fields:
@@ -915,14 +957,6 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
         
         sort_order = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
         base_sql += f" ORDER BY {sort_by} {sort_order}"
-        
-        # Contagem total
-        count_sql = base_sql.replace(
-            "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, ROLE, IS_ACTIVE, CREATED_AT, IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED",
-            "SELECT COUNT(*)"
-        )
-        cur.execute(count_sql, params)
-        total = cur.fetchone()[0]
         
         # Paginação
         offset = (page - 1) * per_page
@@ -1007,6 +1041,25 @@ def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_nam
         if conditions:
             base_sql += " AND " + " AND ".join(conditions)
         
+        # ALTERAÇÃO: Contagem total ANTES de adicionar ORDER BY e ROWS
+        # Construir query de contagem de forma explícita para evitar problemas com replace
+        count_sql = "SELECT COUNT(*) FROM USERS WHERE ROLE = 'customer'"
+        if conditions:
+            count_sql += " AND " + " AND ".join(conditions)
+        
+        try:
+            cur.execute(count_sql, params)
+            count_result = cur.fetchone()
+            # ALTERAÇÃO: Tratamento seguro para evitar erro quando fetchone() retorna None
+            if count_result and len(count_result) > 0:
+                total = count_result[0] if count_result[0] is not None else 0
+            else:
+                logger.warning(f"Query de contagem de clientes retornou resultado vazio. SQL: {count_sql[:200]}... Params: {params}")
+                total = 0
+        except Exception as count_error:
+            logger.error(f"Erro ao executar query de contagem de clientes: {count_error}. SQL: {count_sql[:200]}... Params: {params}", exc_info=True)
+            total = 0
+        
         # Ordenação
         valid_sort_fields = ['full_name', 'email', 'cpf', 'created_at', 'is_active']
         if sort_by not in valid_sort_fields:
@@ -1014,14 +1067,6 @@ def get_customers_paginated(page=1, per_page=20, filters=None, sort_by='full_nam
         
         sort_order = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
         base_sql += f" ORDER BY {sort_by} {sort_order}"
-        
-        # Contagem total
-        count_sql = base_sql.replace(
-            "SELECT ID, FULL_NAME, EMAIL, PHONE, CPF, DATE_OF_BIRTH, IS_ACTIVE, CREATED_AT, IS_EMAIL_VERIFIED, TWO_FACTOR_ENABLED",
-            "SELECT COUNT(*)"
-        )
-        cur.execute(count_sql, params)
-        total = cur.fetchone()[0]
         
         # Paginação (offset já calculado pelo validate_pagination_params)
         base_sql += f" ROWS {offset + 1} TO {offset + per_page}"

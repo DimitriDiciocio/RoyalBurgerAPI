@@ -1,6 +1,9 @@
 import fdb
+import logging
 from ..database import get_db_connection
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # Cache de configurações em memória para melhor performance
 _settings_cache = None
@@ -113,11 +116,20 @@ def get_all_settings(use_cache=True):
         
         return settings
     except fdb.Error as e:
-        print(f"Erro ao buscar configurações: {e}")
-        return None
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar configurações (fdb.Error): {e}", exc_info=True)
+        raise  # Re-lança para tratamento na rota
+    except Exception as e:
+        # ALTERAÇÃO: Usar logger ao invés de print() e capturar outras exceções não esperadas
+        logger.error(f"Erro inesperado ao buscar configurações: {e}", exc_info=True)
+        raise  # Re-lança para tratamento na rota
     finally:
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                # ALTERAÇÃO: Usar logger ao invés de print() para erros ao fechar conexão
+                logger.warning(f"Erro ao fechar conexão ao buscar configurações: {e}", exc_info=True)
 
 def update_settings(settings_data, user_id):
     """
@@ -227,7 +239,8 @@ def update_settings(settings_data, user_id):
             return True
             
     except fdb.Error as e:
-        print(f"Erro ao atualizar configurações: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao atualizar configurações: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return False
@@ -282,7 +295,8 @@ def get_settings_history():
         
         return history
     except fdb.Error as e:
-        print(f"Erro ao buscar histórico: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar histórico de configurações: {e}", exc_info=True)
         return []
     finally:
         if conn:
@@ -349,7 +363,8 @@ def rollback_setting(history_id, user_id):
         
         return True
     except fdb.Error as e:
-        print(f"Erro ao fazer rollback: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao fazer rollback de configurações (history_id={history_id}): {e}", exc_info=True)
         if conn:
             conn.rollback()
         return False

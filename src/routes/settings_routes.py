@@ -2,8 +2,10 @@ from flask import Blueprint, request, jsonify
 from ..services import settings_service
 from ..services.auth_service import require_role
 from flask_jwt_extended import get_jwt
+import logging  # ALTERAÇÃO: Import centralizado para logging estruturado
 
 settings_bp = Blueprint('settings', __name__)
+logger = logging.getLogger(__name__)  # ALTERAÇÃO: Logger centralizado
 
 @settings_bp.route('/public', methods=['GET'])
 def get_public_settings_route():
@@ -37,8 +39,10 @@ def get_public_settings_route():
             }
         }), 200
     except Exception as e:
-        print(f"Erro ao buscar configurações públicas: {e}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar configurações públicas: {e}", exc_info=True)
+        # ALTERAÇÃO: Retornar erro 500 com mensagem genérica para evitar exposição de informações sensíveis
+        return jsonify({"error": "Erro interno do servidor ao buscar configurações públicas"}), 500
 
 @settings_bp.route('/', methods=['GET'])
 @require_role('admin')
@@ -50,8 +54,10 @@ def get_all_settings_route():
             return jsonify({"settings": settings}), 200
         return jsonify({"error": "Configurações não encontradas"}), 404
     except Exception as e:
-        print(f"Erro ao buscar configurações: {e}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar configurações: {e}", exc_info=True)
+        # ALTERAÇÃO: Retornar erro 500 com mensagem genérica para evitar exposição de informações sensíveis
+        return jsonify({"error": "Erro interno do servidor ao buscar configurações"}), 500
 
 @settings_bp.route('/', methods=['POST'])
 @require_role('admin')
@@ -84,7 +90,8 @@ def get_settings_history_route():
         history = settings_service.get_settings_history()
         return jsonify({"history": history}), 200
     except Exception as e:
-        print(f"Erro ao buscar histórico: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar histórico: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 @settings_bp.route('/rollback', methods=['POST'])

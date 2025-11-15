@@ -45,50 +45,56 @@ def get_dashboard_metrics():
         start_datetime = datetime.combine(today, datetime.min.time())
         end_datetime = datetime.combine(today + timedelta(days=1), datetime.min.time())
         
-        # OTIMIZAÇÃO: Query única consolidada para métricas principais (substitui 6 queries)
-        # NOTA: Esta query já está otimizada, mas pode ser melhorada com índices em CREATED_AT e STATUS
+        # OTIMIZAÇÃO: Query única consolidada para métricas principais (substitui 5 queries)
+        # ALTERAÇÃO: Tempo médio de preparo calculado separadamente para evitar problemas de tipo SQLDA
+        # ALTERAÇÃO: CASTs explícitos em todos os campos numéricos para evitar erro SQLDA
         metrics_query = """
             SELECT
                 -- Total de pedidos hoje
-                (SELECT COUNT(*) FROM ORDERS 
-                 WHERE CREATED_AT >= ? AND CREATED_AT < ?) as total_orders,
+                CAST((SELECT COUNT(*) FROM ORDERS 
+                 WHERE CREATED_AT >= ? AND CREATED_AT < ?) AS INTEGER) as total_orders,
                 
-                -- Receita hoje (sem cancelados)
-                (SELECT COALESCE(SUM(TOTAL_AMOUNT), 0) FROM ORDERS 
-                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS != 'cancelled') as revenue,
+                -- Receita hoje (sem cancelados) - CAST explícito para evitar erro SQLDA
+                CAST((SELECT COALESCE(SUM(TOTAL_AMOUNT), 0) FROM ORDERS 
+                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS != 'cancelled') AS NUMERIC(18,2)) as revenue,
                 
-                -- Ticket médio hoje
-                (SELECT COALESCE(AVG(TOTAL_AMOUNT), 0) FROM ORDERS 
-                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS != 'cancelled') as avg_ticket,
+                -- Ticket médio hoje - CAST explícito para evitar erro SQLDA
+                CAST((SELECT COALESCE(AVG(TOTAL_AMOUNT), 0) FROM ORDERS 
+                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS != 'cancelled') AS NUMERIC(18,2)) as avg_ticket,
                 
                 -- Pedidos entregues hoje
-                (SELECT COUNT(*) FROM ORDERS 
-                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS = 'delivered') as completed,
+                CAST((SELECT COUNT(*) FROM ORDERS 
+                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS = 'delivered') AS INTEGER) as completed,
                 
                 -- Pedidos cancelados hoje
-                (SELECT COUNT(*) FROM ORDERS 
-                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS = 'cancelled') as cancelled,
-                
-                -- Tempo médio de preparo (em minutos)
-                (SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60), 0)
-                 FROM ORDERS 
-                 WHERE CREATED_AT >= ? AND CREATED_AT < ?
-                   AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL) as avg_prep_time,
+                CAST((SELECT COUNT(*) FROM ORDERS 
+                 WHERE CREATED_AT >= ? AND CREATED_AT < ? AND STATUS = 'cancelled') AS INTEGER) as cancelled,
                 
                 -- Pedidos em andamento (não precisa de data)
-                (SELECT COUNT(*) FROM ORDERS 
-                 WHERE STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')) as ongoing,
+                CAST((SELECT COUNT(*) FROM ORDERS 
+                 WHERE STATUS IN ('pending', 'confirmed', 'preparing', 'ready', 'out_for_delivery')) AS INTEGER) as ongoing,
                 
                 -- Estoque baixo
-                (SELECT COUNT(*) FROM INGREDIENTS 
-                 WHERE CURRENT_STOCK <= MIN_STOCK_THRESHOLD) as low_stock
+                CAST((SELECT COUNT(*) FROM INGREDIENTS 
+                 WHERE CURRENT_STOCK <= MIN_STOCK_THRESHOLD) AS INTEGER) as low_stock
             FROM RDB$DATABASE
         """
         
-        # Executar query consolidada (5 subconsultas de hoje, cada uma com 2 parâmetros = 10 parâmetros)
+        # ALTERAÇÃO: Executar query consolidada (5 subconsultas de hoje, cada uma com 2 parâmetros = 10 parâmetros)
+        # total_orders, revenue, avg_ticket, completed, cancelled
         params = (start_datetime, end_datetime) * 5
         cur.execute(metrics_query, params)
         metrics_row = cur.fetchone()
+        
+        # ALTERAÇÃO: Calcular tempo médio de preparo em query separada para evitar problemas de tipo SQLDA
+        cur.execute("""
+            SELECT COALESCE(AVG(CAST(DATEDIFF(DAY, CREATED_AT, UPDATED_AT) AS NUMERIC(18,6)) * 1440), 0)
+            FROM ORDERS 
+            WHERE CREATED_AT >= ? AND CREATED_AT < ?
+              AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
+        """, (start_datetime, end_datetime))
+        avg_prep_time_result = cur.fetchone()
+        avg_prep_time = float(avg_prep_time_result[0]) if avg_prep_time_result and avg_prep_time_result[0] is not None else 0.0
         
         # Query separada para distribuição por tipo (mais simples que consolidar)
         cur.execute("""
@@ -116,14 +122,15 @@ def get_dashboard_metrics():
                 "created_at": row[4].isoformat() if row[4] else None
             })
         
+        # ALTERAÇÃO: Ajustar índices após remover avg_prep_time da query principal
         result = {  
             "total_orders_today": metrics_row[0] or 0,
             "revenue_today": float(metrics_row[1]) if metrics_row[1] else 0.0,
             "average_ticket": round(float(metrics_row[2]) if metrics_row[2] else 0.0, 2),
-            "average_preparation_time": round(float(metrics_row[5]) if metrics_row[5] else 0.0, 1),
+            "average_preparation_time": round(avg_prep_time, 1),  # ALTERAÇÃO: Usar valor calculado separadamente
             "completed_orders": metrics_row[3] or 0,
-            "ongoing_orders": metrics_row[6] or 0,
-            "low_stock_items_count": metrics_row[7] or 0,
+            "ongoing_orders": metrics_row[5] or 0,  # ALTERAÇÃO: Índice ajustado (era 6, agora é 5)
+            "low_stock_items_count": metrics_row[6] or 0,  # ALTERAÇÃO: Índice ajustado (era 7, agora é 6)
             "cancelled_orders": metrics_row[4] or 0,
             "order_distribution": order_distribution,
             "recent_orders": recent_orders
@@ -149,4 +156,128 @@ def get_dashboard_metrics():
             "recent_orders": []
         }
     finally:  
-        if conn: conn.close()  
+        if conn: conn.close()
+
+
+def get_menu_dashboard_metrics():
+    """
+    Retorna métricas do dashboard de cardápio (produtos) via consultas SQL.
+    Calcula: total de itens, preço médio, margem média, tempo médio de preparo.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Query consolidada para métricas de produtos
+        metrics_query = """
+            SELECT
+                -- Total de produtos
+                CAST(COUNT(*) AS INTEGER) as total_products,
+                
+                -- Total de produtos inativos
+                CAST(SUM(CASE WHEN IS_ACTIVE = FALSE THEN 1 ELSE 0 END) AS INTEGER) as inactive_products,
+                
+                -- Preço médio (apenas produtos com preço > 0)
+                CAST(COALESCE(AVG(CASE WHEN PRICE > 0 THEN PRICE ELSE NULL END), 0) AS NUMERIC(18,2)) as avg_price,
+                
+                -- Margem média (apenas produtos com preço > 0 e cost_price preenchido)
+                CAST(COALESCE(AVG(
+                    CASE 
+                        WHEN PRICE > 0 AND COST_PRICE IS NOT NULL AND COST_PRICE >= 0 THEN 
+                            ((PRICE - COST_PRICE) / PRICE) * 100
+                        ELSE NULL
+                    END
+                ), 0) AS NUMERIC(18,2)) as avg_margin,
+                
+                -- Tempo médio de preparo (apenas produtos com tempo > 0)
+                CAST(COALESCE(AVG(CASE WHEN PREPARATION_TIME_MINUTES > 0 THEN PREPARATION_TIME_MINUTES ELSE NULL END), 0) AS NUMERIC(18,2)) as avg_preparation_time
+            FROM PRODUCTS
+        """
+        
+        cur.execute(metrics_query)
+        row = cur.fetchone()
+        
+        result = {
+            "total_products": row[0] or 0,
+            "inactive_products": row[1] or 0,
+            "avg_price": float(row[2]) if row[2] else 0.0,
+            "avg_margin": float(row[3]) if row[3] else 0.0,
+            "avg_preparation_time": float(row[4]) if row[4] else 0.0
+        }
+        
+        return result
+    except fdb.Error as e:
+        logger.error(f"Erro ao buscar métricas do dashboard de cardápio: {e}", exc_info=True)
+        return {
+            "total_products": 0,
+            "inactive_products": 0,
+            "avg_price": 0.0,
+            "avg_margin": 0.0,
+            "avg_preparation_time": 0.0
+        }
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_promotions_dashboard_metrics():
+    """
+    Retorna métricas do dashboard de promoções via consultas SQL.
+    Calcula: total de promoções, ativas, expiradas, desconto médio.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        now = datetime.now()
+        
+        # Query consolidada para métricas de promoções
+        # ALTERAÇÃO: PROMOTIONS não tem campo IS_ACTIVE, apenas EXPIRES_AT determina se está ativa
+        metrics_query = """
+            SELECT
+                -- Total de promoções
+                CAST(COUNT(*) AS INTEGER) as total_promotions,
+                
+                -- Promoções ativas (não expiradas)
+                CAST(SUM(CASE WHEN EXPIRES_AT > ? THEN 1 ELSE 0 END) AS INTEGER) as active_promotions,
+                
+                -- Promoções expiradas
+                CAST(SUM(CASE WHEN EXPIRES_AT <= ? THEN 1 ELSE 0 END) AS INTEGER) as expired_promotions,
+                
+                -- Desconto médio das promoções ativas (usando discount_percentage quando disponível)
+                CAST(COALESCE(AVG(
+                    CASE 
+                        WHEN EXPIRES_AT > ? AND DISCOUNT_PERCENTAGE IS NOT NULL AND DISCOUNT_PERCENTAGE > 0 THEN 
+                            DISCOUNT_PERCENTAGE
+                        ELSE NULL
+                    END
+                ), 0) AS NUMERIC(18,2)) as avg_discount
+            FROM PROMOTIONS
+        """
+        
+        # Parâmetros: now para cada subconsulta (3 vezes)
+        params = (now, now, now)
+        cur.execute(metrics_query, params)
+        row = cur.fetchone()
+        
+        result = {
+            "total_promotions": row[0] or 0,
+            "active_promotions": row[1] or 0,
+            "expired_promotions": row[2] or 0,
+            "avg_discount": float(row[3]) if row[3] else 0.0
+        }
+        
+        return result
+    except fdb.Error as e:
+        logger.error(f"Erro ao buscar métricas do dashboard de promoções: {e}", exc_info=True)
+        return {
+            "total_promotions": 0,
+            "active_promotions": 0,
+            "expired_promotions": 0,
+            "avg_discount": 0.0
+        }
+    finally:
+        if conn:
+            conn.close()

@@ -234,12 +234,19 @@ def logout_route():
 @user_bp.route('/profile', methods=['GET'])
 @jwt_required()
 def get_my_profile_route():
-    claims = get_jwt()
-    user_id = int(claims.get('sub'))
-    user = user_service.get_user_by_id(user_id)
-    if user:
-        return jsonify(user), 200
-    return jsonify({"error": "Usuário não encontrado"}), 404
+    """Retorna o perfil do usuário autenticado"""
+    try:
+        claims = get_jwt()
+        user_id = int(claims.get('sub'))
+        user = user_service.get_user_by_id(user_id)
+        if user:
+            return jsonify(user), 200
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    except Exception as e:
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao buscar perfil do usuário: {e}", exc_info=True)
+        # ALTERAÇÃO: Retornar erro 500 com mensagem genérica para evitar exposição de informações sensíveis
+        return jsonify({"error": "Erro interno do servidor ao buscar perfil"}), 500
 
 
 @user_bp.route('/', methods=['GET'])

@@ -28,11 +28,16 @@ def list_products_route():
     filter_unavailable_param = request.args.get('filter_unavailable', '').lower()
     filter_unavailable = filter_unavailable_param in ('true', '1', 'yes') if filter_unavailable_param else False
     
+    # ALTERAÇÃO: Aceita parâmetro only_inactive para filtrar apenas produtos inativos
+    # Requer include_inactive=true para funcionar
+    only_inactive_param = request.args.get('only_inactive', '').lower()
+    only_inactive = only_inactive_param in ('true', '1', 'yes') if only_inactive_param else False
+    
     # ALTERAÇÃO: Reduzir logging excessivo - evitar logar detalhes de produtos em produção
     # Log apenas informações essenciais para debug quando necessário
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"list_products: page={page}, page_size={page_size}, "
-                    f"include_inactive={include_inactive}, filter_unavailable={filter_unavailable}")
+                    f"include_inactive={include_inactive}, only_inactive={only_inactive}, filter_unavailable={filter_unavailable}")
     
     result = product_service.list_products(
         name_filter=name, 
@@ -40,6 +45,7 @@ def list_products_route():
         page=page, 
         page_size=page_size, 
         include_inactive=include_inactive,
+        only_inactive=only_inactive,  # ALTERAÇÃO: Adiciona suporte ao filtro only_inactive
         filter_unavailable=filter_unavailable  # Aceita parâmetro da query string
     )
     

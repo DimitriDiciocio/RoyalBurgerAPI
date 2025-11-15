@@ -436,18 +436,46 @@ def _calculate_estimated_delivery_time(order_status, order_type):
         'order_type': order_type
     }
 
-def create_order(user_id, address_id, items, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None):
+def create_order(user_id, address_id, items, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None, table_id=None):
     """
     Cria um novo pedido validando TUDO
     ALTERAÇÃO: Agora aceita promotions para aplicar descontos
+    ALTERAÇÃO: Agora aceita table_id para pedidos on-site
     """
     
     try:
         # Valida order_type
         _validate_order_type(order_type)
         
-        # Validações básicas (address_id pode ser None para pickup)
-        _validate_order_data(user_id, address_id, items, payment_method)
+        # ALTERAÇÃO: Validação de mesa para pedidos on-site (opcional)
+        if order_type == ORDER_TYPE_ON_SITE:
+            # Se table_id foi fornecido, valida que está correto e disponível
+            if table_id is not None:
+                if not isinstance(table_id, int) or table_id <= 0:
+                    return (None, "VALIDATION_ERROR", "table_id deve ser um número inteiro válido")
+                # Verifica se a mesa existe e está disponível
+                if not table_service.is_table_available(table_id):
+                    table_info = table_service.get_table_by_id(table_id)
+                    if not table_info:
+                        return (None, "TABLE_NOT_FOUND", "Mesa não encontrada")
+                    return (None, "TABLE_NOT_AVAILABLE", f"Mesa {table_info.get('name', table_id)} não está disponível")
+        elif table_id is not None:
+            # Se table_id foi fornecido mas order_type não é on_site, rejeitar
+            return (None, "VALIDATION_ERROR", "table_id só pode ser fornecido para pedidos on-site")
+        
+        # Validações básicas (address_id pode ser None para pickup e on-site)
+        if order_type != ORDER_TYPE_ON_SITE:
+            _validate_order_data(user_id, address_id, items, payment_method)
+        else:
+            # Para pedidos on-site, address_id deve ser None
+            if address_id is not None:
+                return (None, "VALIDATION_ERROR", "address_id deve ser None para pedidos on-site")
+            # Valida apenas items e payment_method
+            if not items or not isinstance(items, list) or len(items) == 0:
+                return (None, "VALIDATION_ERROR", "O pedido deve conter pelo menos um item")
+            if not payment_method or not isinstance(payment_method, str):
+                return (None, "VALIDATION_ERROR", "Método de pagamento é obrigatório")
+        
         _validate_cpf(cpf_on_invoice)
         
         # Verifica se a loja está aberta
@@ -507,13 +535,16 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
                 except (ValueError, TypeError):
                     return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
 
-            # Cria o pedido (address_id None para pickup)
+            # Cria o pedido (address_id None para pickup e on-site, table_id só para on-site quando fornecido)
             confirmation_code = _generate_confirmation_code()
+            # ALTERAÇÃO: STATUS inicial 'active_table' apenas para pedidos on-site COM mesa vinculada
+            initial_status = ORDER_STATUS_ACTIVE_TABLE if (order_type == ORDER_TYPE_ON_SITE and table_id is not None) else 'pending'
             sql_order = """
-                INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE, ORDER_TYPE, CHANGE_FOR_AMOUNT)
-                VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?) RETURNING ID;
+                INSERT INTO ORDERS (USER_ID, ADDRESS_ID, TABLE_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, NOTES, CONFIRMATION_CODE, ORDER_TYPE, CHANGE_FOR_AMOUNT)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID;
             """
             final_address_id = address_id if order_type == ORDER_TYPE_DELIVERY else None
+            final_table_id = table_id if order_type == ORDER_TYPE_ON_SITE else None
             # Calcula o troco: amount_paid - order_total (ou None se não for dinheiro)
             # Garante que todos os valores são float para evitar erro Decimal + float
             order_total_float = float(order_total)
@@ -521,8 +552,16 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             if paid_amount is not None:
                 paid_amount_float = float(paid_amount)
                 change_amount = paid_amount_float - order_total_float
-            cur.execute(sql_order, (user_id, final_address_id, order_total_float, payment_method, notes, confirmation_code, order_type, change_amount))
+            cur.execute(sql_order, (user_id, final_address_id, final_table_id, initial_status, order_total_float, payment_method, notes, confirmation_code, order_type, change_amount))
             new_order_id = cur.fetchone()[0]
+            
+            # ALTERAÇÃO: Vincular pedido à mesa e marcar como ocupada se for on-site e table_id fornecido
+            if order_type == ORDER_TYPE_ON_SITE and table_id is not None:
+                if not table_service.set_table_occupied(table_id, new_order_id):
+                    # Se falhou ao vincular mesa, reverte tudo
+                    conn.rollback()
+                    logger.error(f"Erro ao vincular pedido {new_order_id} à mesa {table_id}")
+                    return (None, "DATABASE_ERROR", "Erro ao vincular pedido à mesa")
 
             # Debita pontos se houver
             if points_to_redeem and points_to_redeem > 0:
@@ -730,8 +769,8 @@ def get_orders_by_user_id(user_id, page=1, page_size=50):
         if conn:
             conn.close()
 
-def get_all_orders(page=1, page_size=50):
-    """Busca todos os pedidos para a visão do administrador com paginação."""
+def get_all_orders(page=1, page_size=50, search=None, status=None, channel=None, period=None):
+    """Busca todos os pedidos para a visão do administrador com paginação e filtros."""
     # OTIMIZAÇÃO: Validação de parâmetros de paginação usando função utilitária (seção 1.9 e 1.10)
     from ..utils.validators import validate_pagination_params
     try:
@@ -746,6 +785,57 @@ def get_all_orders(page=1, page_size=50):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # ALTERAÇÃO: Construir WHERE clause baseado nos filtros
+        where_clauses = []
+        params = []
+        
+        # Filtro de busca (código de confirmação ou nome do cliente)
+        if search:
+            where_clauses.append("(UPPER(o.CONFIRMATION_CODE) LIKE UPPER(?) OR UPPER(u.FULL_NAME) LIKE UPPER(?))")
+            search_pattern = f"%{search}%"
+            params.append(search_pattern)
+            params.append(search_pattern)
+        
+        # Filtro de status
+        if status:
+            where_clauses.append("o.STATUS = ?")
+            params.append(status)
+        
+        # Filtro de canal (tipo de pedido)
+        if channel:
+            # Mapear channel para ORDER_TYPE
+            channel_map = {
+                'delivery': ORDER_TYPE_DELIVERY,
+                'pickup': ORDER_TYPE_PICKUP,
+                'on_site': ORDER_TYPE_ON_SITE
+            }
+            order_type_value = channel_map.get(channel.lower())
+            if order_type_value is not None:
+                where_clauses.append("o.ORDER_TYPE = ?")
+                params.append(order_type_value)
+        
+        # Filtro de período
+        if period:
+            now = datetime.now()
+            
+            if period.lower() == 'today':
+                # Desde início do dia de hoje
+                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                where_clauses.append("o.CREATED_AT >= ?")
+                params.append(start_date)
+            elif period.lower() == 'week':
+                # Últimos 7 dias
+                start_date = now - timedelta(days=7)
+                where_clauses.append("o.CREATED_AT >= ?")
+                params.append(start_date)
+            elif period.lower() == 'month':
+                # Últimos 30 dias
+                start_date = now - timedelta(days=30)
+                where_clauses.append("o.CREATED_AT >= ?")
+                params.append(start_date)
+        
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        
         # OTIMIZAÇÃO: Query com paginação usando FIRST/SKIP do Firebird
         sql = f"""
             SELECT FIRST {page_size} SKIP {offset}
@@ -753,9 +843,12 @@ def get_all_orders(page=1, page_size=50):
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
+            WHERE {where_sql}
             ORDER BY o.CREATED_AT DESC
         """
-        cur.execute(sql)
+        
+        cur.execute(sql, tuple(params))
+        
         orders = []
         for row in cur.fetchall():
             # CORREÇÃO: Consistência com get_orders_by_user_id - extrair order_type primeiro
@@ -777,12 +870,15 @@ def get_all_orders(page=1, page_size=50):
                 "address": address_str
             })
         
-        # Buscar total para paginação
-        cur.execute("SELECT COUNT(*) FROM ORDERS")
+        # ALTERAÇÃO: Buscar total para paginação usando os mesmos filtros
+        count_where_sql = where_sql
+        count_query = f"SELECT COUNT(*) FROM ORDERS o JOIN USERS u ON o.USER_ID = u.ID WHERE {count_where_sql}"
+        cur.execute(count_query, tuple(params))
         total = cur.fetchone()[0] or 0
+        
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
         
-        return {
+        result = {
             "items": orders,
             "pagination": {
                 "total": total,
@@ -791,6 +887,8 @@ def get_all_orders(page=1, page_size=50):
                 "total_pages": total_pages
             }
         }
+        
+        return result
     except fdb.Error as e:
         logger.error(f"Erro ao buscar todos os pedidos: {e}", exc_info=True)
         return {"items": [], "pagination": {"total": 0, "page": page, "page_size": page_size, "total_pages": 0}}
@@ -1298,16 +1396,33 @@ def cancel_order_by_customer(order_id, user_id):
     return cancel_order(order_id, user_id, is_manager=False)
 
 
-def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None):
+def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None, table_id=None):
     """
     Fluxo 4: Finalização (Converter Carrinho em Pedido)
     Cria um pedido a partir do carrinho do usuário
     ALTERAÇÃO: Agora aceita promotions para aplicar descontos
+    ALTERAÇÃO: Agora aceita table_id para pedidos on-site
     """
     conn = None
     try:
         # Valida order_type
         _validate_order_type(order_type)
+        
+        # ALTERAÇÃO: Validação de mesa para pedidos on-site (opcional)
+        if order_type == ORDER_TYPE_ON_SITE:
+            # Se table_id foi fornecido, valida que está correto e disponível
+            if table_id is not None:
+                if not isinstance(table_id, int) or table_id <= 0:
+                    return (None, "VALIDATION_ERROR", "table_id deve ser um número inteiro válido")
+                # Verifica se a mesa existe e está disponível
+                if not table_service.is_table_available(table_id):
+                    table_info = table_service.get_table_by_id(table_id)
+                    if not table_info:
+                        return (None, "TABLE_NOT_FOUND", "Mesa não encontrada")
+                    return (None, "TABLE_NOT_AVAILABLE", f"Mesa {table_info.get('name', table_id)} não está disponível")
+        elif table_id is not None:
+            # Se table_id foi fornecido mas order_type não é on_site, rejeitar
+            return (None, "VALIDATION_ERROR", "table_id só pode ser fornecido para pedidos on-site")
         
         # Inicia transação
         conn = get_db_connection()
@@ -1343,13 +1458,17 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if cpf_on_invoice and not validators.is_valid_cpf(cpf_on_invoice):
             return (None, "INVALID_CPF", f"O CPF informado '{cpf_on_invoice}' é inválido.")
         
-        # Verifica endereço apenas se for delivery (evita query desnecessária para pickup)
+        # Verifica endereço apenas se for delivery (evita query desnecessária para pickup e on-site)
         if order_type == ORDER_TYPE_DELIVERY:
             if not address_id:
                 return (None, "INVALID_ADDRESS", "address_id é obrigatório para pedidos de entrega")
             cur.execute("SELECT ID FROM ADDRESSES WHERE ID = ? AND USER_ID = ? AND IS_ACTIVE = TRUE;", (address_id, user_id))
             if not cur.fetchone():
                 return (None, "INVALID_ADDRESS", "Endereço não encontrado ou não pertence ao usuário.")
+        elif order_type == ORDER_TYPE_ON_SITE:
+            # Para pedidos on-site, address_id deve ser None
+            if address_id is not None:
+                return (None, "VALIDATION_ERROR", "address_id deve ser None para pedidos on-site")
         
         # Gera código de confirmação
         confirmation_code = _generate_confirmation_code()
@@ -1453,13 +1572,16 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             except (ValueError, TypeError):
                 return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
         
-        # Cria o pedido (address_id None para pickup)
+        # Cria o pedido (address_id None para pickup e on-site, table_id só para on-site quando fornecido)
+        # ALTERAÇÃO: STATUS inicial 'active_table' apenas para pedidos on-site COM mesa vinculada
+        initial_status = ORDER_STATUS_ACTIVE_TABLE if (order_type == ORDER_TYPE_ON_SITE and table_id is not None) else 'pending'
         sql_order = """
-            INSERT INTO ORDERS (USER_ID, ADDRESS_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, 
+            INSERT INTO ORDERS (USER_ID, ADDRESS_ID, TABLE_ID, STATUS, TOTAL_AMOUNT, PAYMENT_METHOD, 
                                 NOTES, CONFIRMATION_CODE, ORDER_TYPE, CHANGE_FOR_AMOUNT)
-            VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?) RETURNING ID;
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID;
         """
         final_address_id = address_id if order_type == ORDER_TYPE_DELIVERY else None
+        final_table_id = table_id if order_type == ORDER_TYPE_ON_SITE else None
         # Calcula o troco: amount_paid - total_with_delivery (ou None se não for dinheiro)
         # Garante que todos os valores são float
         total_with_delivery_float = float(total_with_delivery)
@@ -1467,8 +1589,16 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
         if paid_amount is not None:
             paid_amount_float = float(paid_amount)
             change_amount = paid_amount_float - total_with_delivery_float
-        cur.execute(sql_order, (user_id, final_address_id, total_with_delivery_float, payment_method, notes, confirmation_code, order_type, change_amount))
+        cur.execute(sql_order, (user_id, final_address_id, final_table_id, initial_status, total_with_delivery_float, payment_method, notes, confirmation_code, order_type, change_amount))
         order_id = cur.fetchone()[0]
+        
+        # ALTERAÇÃO: Vincular pedido à mesa e marcar como ocupada se for on-site e table_id fornecido
+        if order_type == ORDER_TYPE_ON_SITE and table_id is not None:
+            if not table_service.set_table_occupied(table_id, order_id):
+                # Se falhou ao vincular mesa, reverte tudo
+                conn.rollback()
+                logger.error(f"Erro ao vincular pedido {order_id} à mesa {table_id}")
+                return (None, "DATABASE_ERROR", "Erro ao vincular pedido à mesa")
 
         # Debita pontos (se houver) e atualiza o total do pedido
         if points_to_redeem > 0:
@@ -1758,7 +1888,9 @@ def get_orders_with_filters(filters=None):
                 if isinstance(start_date, str):
                     try:
                         start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                    except:
+                    except (ValueError, TypeError) as e:
+                        # ALTERAÇÃO: Especificar exceções esperadas ao invés de catch-all genérico
+                        logger.debug(f"Erro ao converter start_date '{start_date}': {e}")
                         pass
                 if isinstance(start_date, date) and not isinstance(start_date, datetime):
                     start_date = datetime.combine(start_date, datetime.min.time())
@@ -1771,7 +1903,9 @@ def get_orders_with_filters(filters=None):
                 if isinstance(end_date, str):
                     try:
                         end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                    except:
+                    except (ValueError, TypeError) as e:
+                        # ALTERAÇÃO: Especificar exceções esperadas ao invés de catch-all genérico
+                        logger.debug(f"Erro ao converter end_date '{end_date}': {e}")
                         pass
                 if isinstance(end_date, date) and not isinstance(end_date, datetime):
                     end_date = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
