@@ -44,12 +44,14 @@ def get_all_settings(use_cache=True):
         cur = conn.cursor()
         
         # Busca a última versão completa das configurações
+        # ALTERAÇÃO FASE 3: Incluir campos de taxas de pagamento
         cur.execute("""
             SELECT 
                 ID,
                 META_RECEITA_MENSAL, META_PEDIDOS_MENSAIS,
                 PRAZO_INICIACAO, PRAZO_PREPARO, PRAZO_ENVIO, PRAZO_ENTREGA,
                 TAXA_ENTREGA, TAXA_CONVERSAO_GANHO_CLUBE, TAXA_CONVERSAO_RESGATE_CLUBE, TAXA_EXPIRACAO_PONTOS_CLUBE,
+                TAXA_CARTAO_CREDITO, TAXA_CARTAO_DEBITO, TAXA_PIX, TAXA_IFOOD, TAXA_UBER_EATS,
                 NOME_FANTASIA, RAZAO_SOCIAL, CNPJ, ENDERECO, TELEFONE, EMAIL,
                 UPDATED_AT, UPDATED_BY
             FROM APP_SETTINGS
@@ -59,6 +61,7 @@ def get_all_settings(use_cache=True):
         row = cur.fetchone()
         if not row:
             # Retorna configurações vazias se não houver nenhuma
+            # ALTERAÇÃO FASE 3: Incluir campos de taxas de pagamento
             settings = {
                 "id": None,
                 "meta_receita_mensal": None,
@@ -71,6 +74,11 @@ def get_all_settings(use_cache=True):
                 "taxa_conversao_ganho_clube": None,
                 "taxa_conversao_resgate_clube": None,
                 "taxa_expiracao_pontos_clube": None,
+                "taxa_cartao_credito": None,
+                "taxa_cartao_debito": None,
+                "taxa_pix": None,
+                "taxa_ifood": None,
+                "taxa_uber_eats": None,
                 "nome_fantasia": None,
                 "razao_social": None,
                 "cnpj": None,
@@ -83,7 +91,8 @@ def get_all_settings(use_cache=True):
             }
         else:
             # Busca o nome do usuário que atualizou
-            cur.execute("SELECT FULL_NAME FROM USERS WHERE ID = ?", (row[18],))
+            # ALTERAÇÃO FASE 3: Ajustar índice do UPDATED_BY (agora é row[23] ao invés de row[18])
+            cur.execute("SELECT FULL_NAME FROM USERS WHERE ID = ?", (row[23],))
             user_row = cur.fetchone()
             updated_by_name = user_row[0] if user_row else None
             
@@ -99,14 +108,20 @@ def get_all_settings(use_cache=True):
                 "taxa_conversao_ganho_clube": float(row[8]) if row[8] else None,
                 "taxa_conversao_resgate_clube": float(row[9]) if row[9] else None,
                 "taxa_expiracao_pontos_clube": row[10],
-                "nome_fantasia": row[11],
-                "razao_social": row[12],
-                "cnpj": row[13],
-                "endereco": row[14],
-                "telefone": row[15],
-                "email": row[16],
-                "updated_at": row[17].isoformat() if row[17] else None,
-                "updated_by": row[18],
+                # ALTERAÇÃO FASE 3: Incluir campos de taxas de pagamento
+                "taxa_cartao_credito": float(row[11]) if row[11] else None,
+                "taxa_cartao_debito": float(row[12]) if row[12] else None,
+                "taxa_pix": float(row[13]) if row[13] else None,
+                "taxa_ifood": float(row[14]) if row[14] else None,
+                "taxa_uber_eats": float(row[15]) if row[15] else None,
+                "nome_fantasia": row[16],
+                "razao_social": row[17],
+                "cnpj": row[18],
+                "endereco": row[19],
+                "telefone": row[20],
+                "email": row[21],
+                "updated_at": row[22].isoformat() if row[22] else None,
+                "updated_by": row[23],
                 "updated_by_name": updated_by_name
             }
         

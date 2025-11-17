@@ -4,7 +4,7 @@ import string
 import logging
 from datetime import datetime, date, timedelta
 
-from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service, table_service, promotion_service
+from . import loyalty_service, notification_service, user_service, email_service, store_service, cart_service, stock_service, settings_service, table_service, promotion_service, financial_movement_service
 from .printing_service import print_kitchen_ticket, format_order_for_kitchen_json
 from .. import socketio
 from ..config import Config
@@ -1033,6 +1033,42 @@ def update_order_status(order_id, new_status):
                 logger.error(f"Erro ao calcular subtotal do pedido {order_id}: {e}", exc_info=True)
                 # Continua mesmo se houver erro no cálculo
 
+        # ALTERAÇÃO: Registrar receita e CMV quando pedido é finalizado
+        # FASE 1: Integrar registro financeiro na mesma transação do status
+        # Isso garante consistência: se o registro financeiro falhar, o status não é atualizado
+        if db_status == 'delivered':
+            # Buscar dados do pedido para registro financeiro
+            # ALTERAÇÃO: Buscar antes do commit para usar na mesma transação
+            cur.execute("""
+                SELECT TOTAL_AMOUNT, PAYMENT_METHOD, CREATED_AT
+                FROM ORDERS
+                WHERE ID = ?
+            """, (order_id,))
+            
+            order_data = cur.fetchone()
+            if order_data:
+                order_total, payment_method, order_created_at = order_data
+                
+                # Registrar receita e CMV na mesma transação
+                # ALTERAÇÃO FASE 3: Retorno agora inclui payment_fee_id
+                success, revenue_id, cmv_id, payment_fee_id, error = financial_movement_service.register_order_revenue_and_cmv(
+                    order_id=order_id,
+                    order_total=float(order_total) if order_total else 0.0,
+                    payment_method=payment_method or 'unknown',
+                    payment_date=order_created_at,  # Usar data de criação do pedido
+                    created_by_user_id=None,  # Sistema registra automaticamente (pode ser melhorado para rastrear usuário)
+                    cur=cur  # ALTERAÇÃO: Passar cursor para mesma transação
+                )
+                
+                if not success:
+                    # ALTERAÇÃO: Se falhar, fazer rollback completo
+                    conn.rollback()
+                    logger.error(f"Erro ao registrar receita/CMV para pedido {order_id}: {error}")
+                    return False
+                
+                logger.info(f"Receita, CMV e taxa registrados para pedido {order_id}: revenue_id={revenue_id}, cmv_id={cmv_id}, payment_fee_id={payment_fee_id}")
+        
+        # Commit único de tudo (status + movimentações financeiras)
         conn.commit()
         
         # OTIMIZAÇÃO DE PERFORMANCE: Envia notificações de forma assíncrona (não bloqueia resposta)

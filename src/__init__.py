@@ -120,7 +120,13 @@ def create_app():
     from .routes.pdf_report_routes import pdf_reports_bp  
     app.register_blueprint(pdf_reports_bp, url_prefix='/api/pdf_reports')  
     from .routes.financial_routes import financial_bp  
-    app.register_blueprint(financial_bp, url_prefix='/api/financials')  
+    app.register_blueprint(financial_bp, url_prefix='/api/financials')
+    from .routes.financial_movement_routes import financial_movement_bp
+    app.register_blueprint(financial_movement_bp, url_prefix='/api/financial-movements')
+    from .routes.purchase_routes import purchase_bp
+    app.register_blueprint(purchase_bp, url_prefix='/api/purchases')
+    from .routes.recurrence_routes import recurrence_bp
+    app.register_blueprint(recurrence_bp, url_prefix='/api/recurrence')
     from .routes.settings_routes import settings_bp  
     app.register_blueprint(settings_bp, url_prefix='/api/settings')  
     from .routes.category_routes import category_bp  
