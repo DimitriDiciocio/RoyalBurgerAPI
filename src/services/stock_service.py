@@ -938,6 +938,219 @@ def _execute_stock_deductions(ingredient_deductions, cur):
     
     return updated_ingredients
 
+def restock_for_order(order_id, cur=None, reason='order_cancellation'):
+    """
+    Devolve o estoque dos ingredientes baseado nos produtos do pedido cancelado.
+    Esta é a função inversa de deduct_stock_for_order.
+    
+    OTIMIZAÇÃO DE PERFORMANCE: Aceita cursor opcional para reutilizar conexão existente,
+    evitando múltiplas conexões ao banco quando chamada dentro de transações.
+    
+    Args:
+        order_id: ID do pedido
+        cur: Cursor opcional para reutilizar conexão (se None, cria nova conexão e faz commit)
+        reason: Motivo da devolução (padrão: 'order_cancellation')
+    
+    Returns:
+        tuple: (success: bool, error_code: str, message: str)
+    """
+    conn = None
+    should_close_conn = False
+    
+    try:
+        # Validação de entrada
+        if not isinstance(order_id, int) or order_id <= 0:
+            return (False, "VALIDATION_ERROR", "order_id deve ser um inteiro positivo")
+        
+        # Se cursor não foi fornecido, cria nova conexão
+        if cur is None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            should_close_conn = True
+        
+        # Busca todos os itens do pedido
+        cur.execute("""
+            SELECT PRODUCT_ID, QUANTITY 
+            FROM ORDER_ITEMS 
+            WHERE ORDER_ID = ?
+        """, (order_id,))
+        order_items = cur.fetchall()
+        
+        if not order_items:
+            return (True, None, "Pedido sem itens")
+        
+        # Calcula deduções necessárias (mesma lógica de deduct_stock_for_order)
+        ingredient_deductions = _calculate_ingredient_deductions(order_id, order_items, cur)
+        
+        # Executa as devoluções de estoque (ADICIONA ao invés de SUBTRAIR)
+        updated_ingredients = _execute_stock_restock(ingredient_deductions, cur, reason)
+        
+        # Só faz commit se criou a conexão nesta função
+        if should_close_conn:
+            conn.commit()
+        
+        # Verifica se algum ingrediente precisa ter produtos reativados
+        _check_and_reactivate_products(updated_ingredients, cur)
+        
+        # Log das alterações
+        _log_stock_changes(order_id, updated_ingredients)
+        
+        return (True, None, f"Estoque devolvido para {len(updated_ingredients)} ingredientes")
+        
+    except fdb.Error as e:
+        if should_close_conn and conn:
+            conn.rollback()
+        logger.error(f"Erro ao devolver estoque para pedido {order_id}: {e}", exc_info=True)
+        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    except ValueError as e:
+        if should_close_conn and conn:
+            conn.rollback()
+        logger.error(f"Erro de validação ao devolver estoque para pedido {order_id}: {e}")
+        return (False, "VALIDATION_ERROR", str(e))
+    finally:
+        # Fecha conexão apenas se foi criada nesta função
+        if should_close_conn and conn:
+            conn.close()
+
+def _execute_stock_restock(ingredient_deductions, cur, reason='order_cancellation'):
+    """
+    Executa as devoluções de estoque (ADICIONA ao invés de SUBTRAIR).
+    Esta é a função inversa de _execute_stock_deductions.
+    """
+    updated_ingredients = []
+    
+    if not ingredient_deductions:
+        return updated_ingredients
+    
+    for ingredient_id, restock_amount in ingredient_deductions.items():
+        # Busca estoque atual
+        try:
+            cur.execute("""
+                SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME, COALESCE(MIN_LOT_SIZE, 0) as MIN_LOT_SIZE
+                FROM INGREDIENTS 
+                WHERE ID = ?
+            """, (ingredient_id,))
+            use_min_lot_size = True
+        except fdb.Error as e:
+            error_msg = str(e).lower()
+            if 'min_lot_size' in error_msg or 'unknown' in error_msg:
+                cur.execute("""
+                    SELECT CURRENT_STOCK, MIN_STOCK_THRESHOLD, STOCK_STATUS, NAME
+                    FROM INGREDIENTS 
+                    WHERE ID = ?
+                """, (ingredient_id,))
+                use_min_lot_size = False
+            else:
+                raise
+        
+        result = cur.fetchone()
+        
+        if not result:
+            logger.warning(f"Ingrediente {ingredient_id} não encontrado ao devolver estoque")
+            continue
+        
+        if use_min_lot_size:
+            current_stock, min_threshold, current_status, ingredient_name, min_lot_size = result
+        else:
+            current_stock, min_threshold, current_status, ingredient_name = result
+            min_lot_size = 0
+        
+        # Garante que restock_amount é Decimal
+        if isinstance(restock_amount, Decimal):
+            restock_decimal = restock_amount
+        elif isinstance(restock_amount, (int, float)):
+            restock_decimal = Decimal(str(restock_amount))
+        else:
+            restock_decimal = Decimal(str(restock_amount))
+        
+        # Garante que restock_decimal é sempre positivo
+        if restock_decimal < 0:
+            logger.error(
+                f"[BUG CRÍTICO] Devolução negativa detectada para ingrediente {ingredient_id} ({ingredient_name}): {restock_decimal}. "
+                f"Corrigindo para valor absoluto."
+            )
+            restock_decimal = abs(restock_decimal)
+        
+        # Se a devolução é zero, não precisa processar
+        if restock_decimal == 0:
+            logger.warning(
+                f"Devolução zero para ingrediente {ingredient_id} ({ingredient_name}). Pulando."
+            )
+            continue
+        
+        # Calcula novo estoque (ADICIONA ao invés de SUBTRAIR)
+        current_stock_decimal = Decimal(str(current_stock))
+        new_stock = current_stock_decimal + restock_decimal
+        
+        # Log para debug
+        logger.debug(
+            f"Devolvendo estoque: {ingredient_name} (ID: {ingredient_id}) | "
+            f"Antes: {current_stock_decimal} | Devolução: {restock_decimal} | Depois: {new_stock}"
+        )
+        
+        # Determina novo status baseado no estoque
+        new_status = _determine_new_status(new_stock, min_threshold, current_status)
+        
+        # Atualiza o estoque
+        cur.execute("""
+            UPDATE INGREDIENTS 
+            SET CURRENT_STOCK = ?, STOCK_STATUS = ?
+            WHERE ID = ?
+        """, (new_stock, new_status, ingredient_id))
+        
+        updated_ingredients.append({
+            'ingredient_id': ingredient_id,
+            'ingredient_name': ingredient_name,
+            'old_stock': current_stock,
+            'new_stock': new_stock,
+            'restocked': restock_decimal,
+            'new_status': new_status
+        })
+    
+    return updated_ingredients
+
+def _check_and_reactivate_products(updated_ingredients, cur):
+    """
+    Verifica se algum produto precisa ser reativado após devolução de estoque.
+    Se um ingrediente voltou a ter estoque suficiente, produtos que dependem dele podem ser reativados.
+    """
+    if not updated_ingredients:
+        return
+    
+    # Busca produtos que dependem dos ingredientes que foram devolvidos
+    ingredient_ids = [ing['ingredient_id'] for ing in updated_ingredients]
+    if not ingredient_ids:
+        return
+    
+    placeholders = ', '.join(['?' for _ in ingredient_ids])
+    cur.execute(f"""
+        SELECT DISTINCT PRODUCT_ID
+        FROM PRODUCT_INGREDIENTS
+        WHERE INGREDIENT_ID IN ({placeholders})
+    """, tuple(ingredient_ids))
+    
+    product_ids = [row[0] for row in cur.fetchall()]
+    
+    # Para cada produto, verifica se todos os ingredientes estão disponíveis
+    for product_id in product_ids:
+        cur.execute("""
+            SELECT COUNT(*) 
+            FROM PRODUCT_INGREDIENTS pi
+            JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+            WHERE pi.PRODUCT_ID = ? AND (i.CURRENT_STOCK <= 0 OR i.IS_AVAILABLE = FALSE)
+        """, (product_id,))
+        
+        unavailable_count = cur.fetchone()[0]
+        
+        # Se todos os ingredientes estão disponíveis, reativa o produto
+        if unavailable_count == 0:
+            cur.execute("""
+                UPDATE PRODUCTS 
+                SET IS_ACTIVE = TRUE
+                WHERE ID = ? AND IS_ACTIVE = FALSE
+            """, (product_id,))
+            logger.info(f"Produto {product_id} reativado após devolução de estoque")
+
 def _determine_new_status(new_stock, min_threshold, current_status):
     """
     Determina novo status baseado no estoque.
@@ -993,12 +1206,23 @@ def _log_stock_changes(order_id, updated_ingredients):
     if not updated_ingredients:
         return
     
-    logger.info(f"Estoque deduzido para pedido {order_id}:")
-    for item in updated_ingredients:
-        logger.debug(
-            f"  {item['ingredient_name']}: {item['old_stock']} -> {item['new_stock']} "
-            f"(deduzido: {item['deducted']}, status: {item['new_status']})"
-        )
+    # Verifica se é dedução ou devolução baseado nas chaves do item
+    is_restock = 'restocked' in (updated_ingredients[0] if updated_ingredients else {})
+    
+    if is_restock:
+        logger.info(f"Estoque devolvido para pedido {order_id}:")
+        for item in updated_ingredients:
+            logger.debug(
+                f"  {item['ingredient_name']}: {item['old_stock']} -> {item['new_stock']} "
+                f"(devolvido: {item.get('restocked', 0)}, status: {item['new_status']})"
+            )
+    else:
+        logger.info(f"Estoque deduzido para pedido {order_id}:")
+        for item in updated_ingredients:
+            logger.debug(
+                f"  {item['ingredient_name']}: {item['old_stock']} -> {item['new_stock']} "
+                f"(deduzido: {item.get('deducted', 0)}, status: {item['new_status']})"
+            )
 
 
 def get_stock_alerts():

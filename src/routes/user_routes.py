@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ..services import user_service, auth_service, email_verification_service, two_factor_service, pending_email_service
+from ..services import user_service, auth_service, email_verification_service, two_factor_service, pending_email_service, push_service
 from ..services.auth_service import require_role
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone
@@ -976,4 +976,37 @@ def cleanup_unverified_accounts_route():
     except Exception as e:
         # ALTERAÇÃO: Logging estruturado ao invés de print
         logger.error(f"Erro na limpeza de contas não verificadas: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@user_bp.route('/device-token', methods=['POST'])
+@jwt_required()
+def save_device_token_route():
+    """
+    Salva ou atualiza o token de push do dispositivo do usuário.
+    Body: { "push_token": "ExponentPushToken[...]", "device_name": "iPhone de João" (opcional) }
+    """
+    try:
+        claims = get_jwt()
+        user_id = int(claims.get('sub'))
+        data = request.get_json()
+        
+        if not data or 'push_token' not in data:
+            return jsonify({"error": "O campo 'push_token' é obrigatório"}), 400
+        
+        push_token = data.get('push_token')
+        device_name = data.get('device_name')
+        
+        if not push_token or not isinstance(push_token, str):
+            return jsonify({"error": "push_token deve ser uma string não vazia"}), 400
+        
+        success = push_service.save_device_token(user_id, push_token, device_name)
+        
+        if success:
+            return jsonify({"msg": "Token de dispositivo salvo com sucesso"}), 200
+        else:
+            return jsonify({"error": "Erro ao salvar token de dispositivo"}), 500
+            
+    except Exception as e:
+        logger.error(f"Erro ao salvar token de dispositivo: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500

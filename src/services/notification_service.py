@@ -50,6 +50,22 @@ def create_notification(user_id, message, link=None, notification_type='order'):
         sql = "INSERT INTO NOTIFICATIONS (USER_ID, MESSAGE, LINK) VALUES (?, ?, ?);"  
         cur.execute(sql, (user_id, message, link))  
         conn.commit()  
+        
+        # NOVA LÓGICA: Enviar Push Notification (Background)
+        try:
+            from .push_service import send_push_to_user
+            
+            # Define título baseado no tipo de notificação
+            push_title = "Atualização do Pedido"
+            if notification_type == 'promotion':
+                push_title = "Promoção Royal Burger"
+            
+            # Envia push notification (não bloqueia se falhar)
+            send_push_to_user(user_id, push_title, message, data={"link": link} if link else {})
+        except Exception as push_error:
+            # Loga erro mas não falha a criação da notificação
+            logger.warning(f"Erro ao enviar push notification para usuário {user_id}: {push_error}")
+        
         return True  
     except fdb.Error as e:  
         logger.error(f"Erro ao criar notificação: {e}")  

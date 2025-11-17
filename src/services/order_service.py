@@ -1370,16 +1370,28 @@ def cancel_order(order_id, user_id, is_manager=False):
                 # Libera a mesa
                 table_service.set_table_available(table_id)
 
-        # TODO: REVISAR - Devolução de estoque ao cancelar pedido
-        # Quando um pedido é cancelado, o estoque já foi deduzido na criação do pedido.
-        # Dependendo da política de negócio, pode ser necessário devolver o estoque ao cancelar.
-        # Isso requer uma função stock_service.restore_stock_for_order(order_id) que ainda não existe.
-        # Por enquanto, o estoque permanece deduzido mesmo após cancelamento.
-        # Nota: Reservas temporárias não são afetadas aqui, pois já foram limpas quando o pedido foi criado.
+        # NOVA LÓGICA: Salvar status anterior e devolver estoque
+        # Salva o status atual em PREVIOUS_STATUS antes de cancelar
+        sql_update = """
+            UPDATE ORDERS 
+            SET STATUS = 'cancelled', 
+                PREVIOUS_STATUS = ?,
+                UPDATED_AT = CURRENT_TIMESTAMP 
+            WHERE ID = ?;
+        """
+        cur.execute(sql_update, (status, order_id))
         
-        # Cancela o pedido
-        sql_update = "UPDATE ORDERS SET STATUS = 'cancelled', UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = ?;"
-        cur.execute(sql_update, (order_id,))
+        # Devolve o estoque dos ingredientes do pedido cancelado
+        try:
+            success, error_code, message = stock_service.restock_for_order(order_id, cur)
+            if not success:
+                logger.warning(f"Erro ao devolver estoque para pedido {order_id}: {message}")
+                # Não bloqueia o cancelamento se falhar a devolução de estoque
+                # Mas loga o erro para investigação
+        except Exception as e:
+            logger.error(f"Erro ao devolver estoque para pedido {order_id}: {e}", exc_info=True)
+            # Não bloqueia o cancelamento
+        
         conn.commit()
 
         # Envia notificações de cancelamento
@@ -1432,6 +1444,124 @@ def cancel_order_by_customer(order_id, user_id):
     Retorna uma tupla: (sucesso, mensagem).
     """
     return cancel_order(order_id, user_id, is_manager=False)
+
+
+def uncancel_order(order_id, user_id):
+    """
+    Reverte o cancelamento de um pedido, restaurando-o ao status anterior.
+    Apenas gerentes/admins podem executar esta ação.
+    
+    Regras:
+    - Apenas Gerente/Admin pode executar
+    - Só funciona se o status atual for 'cancelled'
+    - Precisa ter um PREVIOUS_STATUS salvo (ou assume 'confirmed' como fallback)
+    - Deduz estoque novamente (pois foi devolvido no cancelamento)
+    - Se não houver estoque suficiente, a reversão falha
+    
+    Args:
+        order_id: ID do pedido
+        user_id: ID do usuário que está revertendo (deve ser gerente/admin)
+    
+    Returns:
+        Tupla (sucesso, mensagem).
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Busca informações do pedido
+        sql_find = "SELECT USER_ID, STATUS, PREVIOUS_STATUS, ORDER_TYPE FROM ORDERS WHERE ID = ?;"
+        cur.execute(sql_find, (order_id,))
+        order_record = cur.fetchone()
+
+        if not order_record:
+            return (False, "Pedido não encontrado.")
+
+        owner_id, current_status, previous_status, order_type = order_record
+
+        # Verifica se o pedido está cancelado
+        if current_status != 'cancelled':
+            return (False, f"Não é possível reverter cancelamento de um pedido com status '{current_status}'. Apenas pedidos cancelados podem ser revertidos.")
+
+        # Determina o status a ser restaurado
+        # Se PREVIOUS_STATUS for NULL, assume 'confirmed' como fallback
+        status_to_restore = previous_status if previous_status else 'confirmed'
+        
+        # Valida se o status a restaurar é válido
+        valid_statuses = ['pending', 'confirmed', 'preparing', 'ready', 'on_the_way', 'in_progress']
+        if status_to_restore not in valid_statuses:
+            logger.warning(f"Status anterior inválido '{status_to_restore}' para pedido {order_id}, usando 'confirmed'")
+            status_to_restore = 'confirmed'
+
+        # Deduz estoque novamente (pois foi devolvido no cancelamento)
+        try:
+            success, error_code, message = stock_service.deduct_stock_for_order(order_id, cur)
+            if not success:
+                # Se não houver estoque suficiente, a reversão falha
+                if error_code == "VALIDATION_ERROR":
+                    return (False, f"Não é possível reverter o cancelamento: {message}")
+                else:
+                    return (False, f"Erro ao deduzir estoque: {message}")
+        except Exception as e:
+            logger.error(f"Erro ao deduzir estoque para pedido {order_id} na reversão: {e}", exc_info=True)
+            return (False, "Erro ao deduzir estoque. Não foi possível reverter o cancelamento.")
+
+        # Restaura o status anterior e limpa PREVIOUS_STATUS
+        sql_update = """
+            UPDATE ORDERS 
+            SET STATUS = ?,
+                PREVIOUS_STATUS = NULL,
+                UPDATED_AT = CURRENT_TIMESTAMP 
+            WHERE ID = ?;
+        """
+        cur.execute(sql_update, (status_to_restore, order_id))
+        
+        # Se for pedido on-site, vincula novamente à mesa se necessário
+        if order_type == ORDER_TYPE_ON_SITE:
+            cur.execute("SELECT TABLE_ID FROM ORDERS WHERE ID = ?;", (order_id,))
+            table_result = cur.fetchone()
+            if table_result and table_result[0]:
+                table_id = table_result[0]
+                # Tenta ocupar a mesa novamente (pode falhar se mesa estiver ocupada)
+                try:
+                    table_service.set_table_occupied(table_id, order_id)
+                except Exception as e:
+                    logger.warning(f"Erro ao vincular mesa {table_id} ao pedido {order_id} na reversão: {e}")
+                    # Não bloqueia a reversão se falhar ao vincular mesa
+        
+        conn.commit()
+
+        # Envia notificações de reversão
+        try:
+            message = f"O cancelamento do pedido #{order_id} foi revertido. Status restaurado: {status_to_restore}."
+            link = f"/my-orders/{order_id}"
+            notification_service.create_notification(owner_id, message, link, notification_type='order')
+
+            customer = user_service.get_user_by_id(owner_id)
+            if customer:
+                email_service.send_email(
+                    to=customer['email'],
+                    subject=f"Cancelamento do pedido #{order_id} foi revertido",
+                    template='order_status_update', 
+                    user=customer,
+                    order={"order_id": order_id},
+                    new_status=status_to_restore,
+                    app_url=Config.APP_URL
+                )
+        except Exception as e:
+            logger.warning(f"Falha ao enviar notificação de reversão para o pedido {order_id}: {e}", exc_info=True)
+
+        return (True, f"Cancelamento do pedido #{order_id} revertido com sucesso. Status restaurado: {status_to_restore}.")
+
+    except fdb.Error as e:
+        logger.error(f"Erro ao reverter cancelamento do pedido {order_id}: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return (False, "Ocorreu um erro interno ao tentar reverter o cancelamento do pedido.")
+    finally:
+        if conn:
+            conn.close()
 
 
 def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None, notes="", cpf_on_invoice=None, points_to_redeem=0, order_type=ORDER_TYPE_DELIVERY, promotions=None, table_id=None):

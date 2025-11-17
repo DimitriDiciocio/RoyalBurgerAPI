@@ -304,6 +304,12 @@ def cancel_order_route(order_id):
     # Verifica se é gerente (manager ou admin)
     is_manager = 'manager' in user_roles or 'admin' in user_roles
     
+    # NOVO: Aceita parâmetro opcional 'reason' no body para log/auditoria
+    data = request.get_json() or {}
+    reason = data.get('reason')
+    if reason:
+        logger.info(f"Cancelamento do pedido {order_id} solicitado por usuário {user_id}. Motivo: {reason}")
+    
     success, message = order_service.cancel_order(order_id, user_id, is_manager)  
     if success:  
         return jsonify({"msg": message}), 200  
@@ -313,6 +319,34 @@ def cancel_order_route(order_id):
             return jsonify({"error": message}), 404
         elif "permissão" in message.lower() or "não pode cancelar" in message.lower():
             return jsonify({"error": message}), 403
+        else:
+            return jsonify({"error": message}), 400
+
+
+@order_bp.route('/<int:order_id>/uncancel', methods=['POST'])
+@require_role('admin', 'manager')
+def uncancel_order_route(order_id):
+    """
+    Reverte o cancelamento de um pedido.
+    Apenas gerentes e administradores podem executar esta ação.
+    """
+    claims = get_jwt()
+    user_id_raw = claims.get('sub')
+    if not user_id_raw:
+        return jsonify({"error": "Token inválido: user_id não encontrado"}), 401
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Token inválido: user_id inválido"}), 401
+    
+    success, message = order_service.uncancel_order(order_id, user_id)
+    
+    if success:
+        return jsonify({"msg": message}), 200
+    else:
+        # Retorna 404 se pedido não encontrado, 400 para outros erros
+        if "não encontrado" in message.lower():
+            return jsonify({"error": message}), 404
         else:
             return jsonify({"error": message}), 400  
 
