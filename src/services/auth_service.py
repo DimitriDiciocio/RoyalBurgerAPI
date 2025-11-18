@@ -6,7 +6,8 @@ from flask import jsonify
 from datetime import datetime, timezone, timedelta
 import threading
 from ..database import get_db_connection  
-from flask_jwt_extended import create_access_token, jwt_required, get_jwt
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt, get_jwt_identity
+from flask import g
 from .two_factor_service import create_2fa_verification, verify_2fa_code, is_2fa_enabled
 
 # ALTERAÇÃO: Logger estruturado para substituir prints
@@ -67,11 +68,27 @@ def require_role(*roles):
         @wraps(f)  
         @jwt_required()  
         def decorated_function(*args, **kwargs):  
+            # ALTERAÇÃO: Extrair user_id do JWT e configurar em g.current_user_id
+            try:
+                user_identity = get_jwt_identity()
+                if user_identity:
+                    g.current_user_id = int(user_identity)
+                    logger.debug(f"User ID configurado em g.current_user_id: {g.current_user_id}")
+                else:
+                    logger.warning("JWT identity não encontrado")
+                    return jsonify({"msg": "Token inválido ou expirado."}), 401
+            except Exception as e:
+                logger.error(f"Erro ao extrair user_id do JWT: {e}", exc_info=True)
+                return jsonify({"msg": "Erro ao processar token."}), 401
+            
+            # Verificar roles
             claims = get_jwt()  
             user_roles = claims.get("roles", [])  
             if any(role in user_roles for role in roles):  
+                logger.debug(f"Permissão concedida para user_id {g.current_user_id} com roles {user_roles}")
                 return f(*args, **kwargs)  
             else:  
+                logger.warning(f"Acesso negado para user_id {g.current_user_id} com roles {user_roles}, requerido: {roles}")
                 return jsonify({"msg": "Acesso não autorizado para esta função."}), 403  
         return decorated_function  
     return decorator  

@@ -67,7 +67,8 @@ def generate_users_pdf():
         return response
         
     except Exception as e:
-        print(f"Erro ao gerar relatório de usuários: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao gerar relatório de usuários: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -117,7 +118,8 @@ def generate_ingredients_pdf():
         return response
         
     except Exception as e:
-        print(f"Erro ao gerar relatório de ingredientes: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao gerar relatório de ingredientes: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -180,7 +182,8 @@ def generate_products_pdf():
         return response
         
     except Exception as e:
-        print(f"Erro ao gerar relatório de produtos: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao gerar relatório de produtos: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -234,7 +237,8 @@ def generate_orders_pdf():
         return response
         
     except Exception as e:
-        print(f"Erro ao gerar relatório de pedidos: {e}")
+        # ALTERAÇÃO: Usar logger ao invés de print() em código de produção
+        logger.error(f"Erro ao gerar relatório de pedidos: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 

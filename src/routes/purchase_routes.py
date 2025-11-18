@@ -9,12 +9,22 @@ purchase_bp = Blueprint('purchases', __name__)
 @require_role('admin', 'manager')
 def create_purchase_invoice_route():
     """Cria uma nota fiscal de compra"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # ALTERAÇÃO: Logs para debug
+    logger.info(f"POST /invoices - g.current_user_id: {getattr(g, 'current_user_id', 'NÃO DEFINIDO')}")
+    logger.info(f"Headers Authorization: {request.headers.get('Authorization', 'NÃO ENCONTRADO')[:50]}...")
+    
     data = request.get_json()
     if not data:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
     
     user_id = g.current_user_id if hasattr(g, 'current_user_id') else None
+    logger.info(f"User ID extraído: {user_id}")
+    
     if not user_id:
+        logger.error("User ID não encontrado em g.current_user_id")
         return jsonify({"error": "Usuário não autenticado"}), 401
     
     success, error_code, result = purchase_service.create_purchase_invoice(data, user_id)
@@ -76,3 +86,46 @@ def get_purchase_invoice_by_id_route(invoice_id):
     else:
         return jsonify({"error": "Nota fiscal não encontrada"}), 404
 
+
+@purchase_bp.route('/invoices/<int:invoice_id>', methods=['PUT'])
+@require_role('admin', 'manager')
+def update_purchase_invoice_route(invoice_id):
+    """Atualiza uma nota fiscal de compra"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    user_id = g.current_user_id if hasattr(g, 'current_user_id') else None
+    if not user_id:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+    
+    success, error_code, result = purchase_service.update_purchase_invoice(invoice_id, data, user_id)
+    
+    if success:
+        return jsonify(result), 200
+    else:
+        # ALTERAÇÃO: Retornar 403 para erros de permissão
+        if error_code == "PERMISSION_DENIED":
+            return jsonify({"error": result}), 403
+        status_code = 400 if error_code != "NOT_FOUND" else 404
+        return jsonify({"error": result}), status_code
+
+
+@purchase_bp.route('/invoices/<int:invoice_id>', methods=['DELETE'])
+@require_role('admin')  # ALTERAÇÃO: Apenas admin pode excluir
+def delete_purchase_invoice_route(invoice_id):
+    """Exclui uma nota fiscal de compra (apenas administradores)"""
+    user_id = g.current_user_id if hasattr(g, 'current_user_id') else None
+    if not user_id:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+    
+    success, error_code, result = purchase_service.delete_purchase_invoice(invoice_id, user_id)
+    
+    if success:
+        return jsonify(result), 200
+    else:
+        # ALTERAÇÃO: Retornar 403 para erros de permissão
+        if error_code == "PERMISSION_DENIED":
+            return jsonify({"error": result}), 403
+        status_code = 400 if error_code != "NOT_FOUND" else 404
+        return jsonify({"error": result}), status_code
