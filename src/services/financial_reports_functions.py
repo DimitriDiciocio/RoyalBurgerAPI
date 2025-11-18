@@ -274,10 +274,11 @@ def generate_taxes_report_data(filters=None):
         pending_taxes = float(summary_row[3] or 0)
         
         # 2. IMPOSTOS POR CATEGORIA
+        # CORREÇÃO: "count" é palavra reservada, usar alias diferente
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   SUM(fm."VALUE") as total,
-                   COUNT(*) as count
+                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total,
+                   CAST(COUNT(*) AS INTEGER) as category_count
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
             GROUP BY fm.CATEGORY

@@ -16,6 +16,5 @@ flask_compress
 fpdf2
 pywin32; platform_system == "Windows"
 python-socketio
-matplotlib>=3.8.0
 pandas>=2.1.0
 numpy>=1.26.0

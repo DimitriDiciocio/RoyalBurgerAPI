@@ -714,3 +714,444 @@ def get_available_reports():
         "available_reports": available_reports,
         "total": len(available_reports)
     }), 200
+
+
+@pdf_reports_bp.route('/test', methods=['GET'])
+def test_reports_page():
+    """
+    Página de teste para acessar todos os relatórios sem autenticação
+    ATENÇÃO: Esta rota é apenas para desenvolvimento/teste. Remover em produção!
+    """
+    html_content = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teste de Relatórios PDF - Royal Burger</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            padding: 30px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 0.9em;
+        }
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 30px;
+            color: #856404;
+        }
+        .warning strong {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .report-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .report-card {
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            transition: all 0.3s ease;
+            background: #f9f9f9;
+        }
+        .report-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+            transform: translateY(-2px);
+        }
+        .report-card h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.2em;
+        }
+        .report-card p {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+        .report-card .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            transition: background 0.3s ease;
+            font-weight: bold;
+            margin-right: 10px;
+            margin-bottom: 5px;
+        }
+        .report-card .btn:hover {
+            background: #5568d3;
+        }
+        .report-card .btn-secondary {
+            background: #6c757d;
+        }
+        .report-card .btn-secondary:hover {
+            background: #5a6268;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #667eea;
+        }
+        .loading.active {
+            display: block;
+        }
+        .date-inputs {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e0e0e0;
+        }
+        .date-inputs label {
+            display: block;
+            margin-bottom: 5px;
+            color: #333;
+            font-weight: bold;
+            font-size: 0.85em;
+        }
+        .date-inputs input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 0.9em;
+        }
+        .date-inputs button {
+            width: 100%;
+            padding: 10px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+        .date-inputs button:hover {
+            background: #218838;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Teste de Relatórios PDF</h1>
+        <p class="subtitle">Royal Burger - Sistema de Relatórios</p>
+        
+        <div class="warning">
+            <strong>⚠️ ATENÇÃO: Rota de Teste</strong>
+            Esta página é apenas para desenvolvimento e testes. Em produção, esta rota deve ser removida ou protegida com autenticação.
+        </div>
+        
+        <div class="loading" id="loading">
+            <p>⏳ Gerando relatório... Aguarde...</p>
+        </div>
+        
+        <div class="report-grid" id="reports-grid">
+            <!-- Relatórios serão inseridos aqui via JavaScript -->
+        </div>
+    </div>
+    
+    <script>
+        // Função para obter data formatada
+        function getDate(daysAgo = 0) {
+            const date = new Date();
+            date.setDate(date.getDate() - daysAgo);
+            return date.toISOString().split('T')[0];
+        }
+        
+        // Função para gerar relatório
+        function generateReport(endpoint, method, filters = {}) {
+            const loading = document.getElementById('loading');
+            loading.classList.add('active');
+            
+            const url = `/api/pdf_reports/test${endpoint}`;
+            const body = JSON.stringify(filters);
+            
+            fetch(url, {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: method === 'POST' ? body : null
+            })
+            .then(response => {
+                if (response.ok) {
+                    return response.blob();
+                }
+                throw new Error(`Erro ${response.status}: ${response.statusText}`);
+            })
+            .then(blob => {
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = endpoint.split('/').pop() + '.pdf';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                loading.classList.remove('active');
+                alert('Relatório gerado com sucesso!');
+            })
+            .catch(error => {
+                loading.classList.remove('active');
+                alert('Erro ao gerar relatório: ' + error.message);
+                console.error('Erro:', error);
+            });
+        }
+        
+        // Função para gerar com datas customizadas
+        function generateWithDates(endpoint, method, cardId) {
+            const startDate = document.getElementById(`start-${cardId}`).value;
+            const endDate = document.getElementById(`end-${cardId}`).value;
+            
+            if (!startDate || !endDate) {
+                alert('Por favor, preencha ambas as datas');
+                return;
+            }
+            
+            generateReport(endpoint, method, {
+                start_date: startDate,
+                end_date: endDate
+            });
+        }
+        
+        // Lista de relatórios
+        const reports = [
+            {
+                id: 'sales-detailed',
+                title: 'Relatório de Vendas Detalhado',
+                description: 'Relatório completo de vendas com gráficos de linha, pizza e barras. Inclui análise de tendências, métodos de pagamento e top produtos.',
+                endpoint: '/sales/detailed',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'products-analysis',
+                title: 'Análise de Produtos',
+                description: 'Análise detalhada de produtos com gráficos de barras mostrando top produtos por quantidade e receita.',
+                endpoint: '/products/analysis',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'financial-complete',
+                title: 'Relatório Financeiro Completo',
+                description: 'Relatório financeiro completo com múltiplos gráficos de fluxo de caixa, receitas e despesas por categoria.',
+                endpoint: '/financial/complete',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'orders-performance',
+                title: 'Performance de Pedidos',
+                description: 'Análise de eficiência operacional com tempos médios e performance de funcionários.',
+                endpoint: '/orders/performance',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'executive-dashboard',
+                title: 'Dashboard Executivo',
+                description: 'Dashboard executivo consolidado com KPIs principais e múltiplos gráficos de tendências.',
+                endpoint: '/executive/dashboard',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'cmv',
+                title: 'Relatório de CMV',
+                description: 'Análise detalhada de Custo das Mercadorias Vendidas por categoria e produto.',
+                endpoint: '/financial/cmv',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'taxes',
+                title: 'Relatório de Impostos',
+                description: 'Análise de impostos pagos, pendentes e impacto na receita.',
+                endpoint: '/financial/taxes',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'stock-complete',
+                title: 'Relatório Completo de Estoque',
+                description: 'Análise detalhada de estoque com giro, valor e ingredientes mais utilizados.',
+                endpoint: '/stock/complete',
+                method: 'POST',
+                hasDates: false
+            },
+            {
+                id: 'purchases',
+                title: 'Relatório de Compras',
+                description: 'Análise de compras por fornecedor, item e frequência.',
+                endpoint: '/purchases',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'customers-analysis',
+                title: 'Análise de Clientes',
+                description: 'Análise RFV, top clientes e identificação de clientes inativos.',
+                endpoint: '/customers/analysis',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'loyalty',
+                title: 'Programa de Fidelidade',
+                description: 'Análise de pontos acumulados, resgatados e top participantes.',
+                endpoint: '/loyalty',
+                method: 'POST',
+                hasDates: true
+            },
+            {
+                id: 'tables',
+                title: 'Relatório de Mesas',
+                description: 'Análise de ocupação, rotatividade e receita por mesa.',
+                endpoint: '/tables',
+                method: 'POST',
+                hasDates: true
+            }
+        ];
+        
+        // Renderizar relatórios
+        const grid = document.getElementById('reports-grid');
+        reports.forEach((report, index) => {
+            const card = document.createElement('div');
+            card.className = 'report-card';
+            card.innerHTML = `
+                <h3>${report.title}</h3>
+                <p>${report.description}</p>
+                <a href="#" class="btn" onclick="generateReport('${report.endpoint}', '${report.method}', {}); return false;">
+                    📄 Gerar (Últimos 30 dias)
+                </a>
+                ${report.hasDates ? `
+                <div class="date-inputs">
+                    <label>Data Início:</label>
+                    <input type="date" id="start-${report.id}" value="${getDate(30)}">
+                    <label>Data Fim:</label>
+                    <input type="date" id="end-${report.id}" value="${getDate(0)}">
+                    <button onclick="generateWithDates('${report.endpoint}', '${report.method}', '${report.id}')">
+                        📅 Gerar com Datas
+                    </button>
+                </div>
+                ` : ''}
+            `;
+            grid.appendChild(card);
+        });
+    </script>
+</body>
+</html>
+    """
+    return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+@pdf_reports_bp.route('/test/<path:report_type>', methods=['GET', 'POST'])
+def test_report_direct(report_type):
+    """
+    Rota de teste direta para gerar relatórios sem autenticação
+    ATENÇÃO: Esta rota é apenas para desenvolvimento/teste. Remover em produção!
+    
+    Exemplos:
+    - GET /api/pdf_reports/test/sales/detailed
+    - GET /api/pdf_reports/test/products/analysis?start_date=2024-01-01&end_date=2024-01-31
+    """
+    try:
+        # Mapeamento de tipos de relatório
+        report_map = {
+            'sales/detailed': ('generate_detailed_sales_report', {}),
+            'products/analysis': ('generate_products_analysis_report', {}),
+            'financial/complete': ('generate_complete_financial_report', {}),
+            'orders/performance': ('generate_orders_performance_report', {}),
+            'executive/dashboard': ('generate_executive_dashboard_pdf', {}),
+            'financial/cmv': ('generate_cmv_report_pdf', {}),
+            'financial/taxes': ('generate_taxes_report_pdf', {}),
+            'stock/complete': ('generate_complete_stock_report_pdf', {}),
+            'purchases': ('generate_purchases_report_pdf', {}),
+            'customers/analysis': ('generate_customers_analysis_report_pdf', {}),
+            'loyalty': ('generate_loyalty_report_pdf', {}),
+            'tables': ('generate_tables_report_pdf', {})
+        }
+        
+        # Verificar se o tipo de relatório existe
+        if report_type not in report_map:
+            return jsonify({
+                "error": f"Tipo de relatório '{report_type}' não encontrado",
+                "available_types": list(report_map.keys())
+            }), 404
+        
+        # Obter função e filtros padrão
+        function_name, default_filters = report_map[report_type]
+        
+        # Obter filtros da query string ou body
+        if request.method == 'GET':
+            filters = dict(request.args)
+        else:
+            filters = request.get_json() or {}
+        
+        # Mesclar com filtros padrão
+        filters = {**default_filters, **filters}
+        
+        # Se não houver datas, usar últimos 30 dias
+        if 'start_date' not in filters and 'end_date' not in filters:
+            from datetime import datetime, timedelta
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=30)
+            filters['start_date'] = start_date.strftime('%Y-%m-%d')
+            filters['end_date'] = end_date.strftime('%Y-%m-%d')
+        
+        # Importar e chamar função
+        func = getattr(advanced_reports_service, function_name)
+        pdf_content = func(filters)
+        
+        # Retornar PDF
+        response = Response(
+            pdf_content,
+            mimetype='application/pdf'
+        )
+        response.headers['Content-Disposition'] = f'attachment; filename=relatorio_{report_type.replace("/", "_")}.pdf'
+        return response
+        
+    except AttributeError as e:
+        logger.error(f"Função de relatório não encontrada: {e}", exc_info=True)
+        return jsonify({"error": f"Função de relatório não encontrada: {function_name}"}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Erro ao gerar relatório de teste: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor ao gerar relatório"}), 500

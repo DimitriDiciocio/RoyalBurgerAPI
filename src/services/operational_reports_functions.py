@@ -97,14 +97,15 @@ def generate_complete_stock_report_data(filters=None):
         ok_stock = summary_row[4] or 0
         
         # 2. INGREDIENTES POR STATUS
+        # CORREÇÃO: "count" é palavra reservada, usar alias diferente
         cur.execute(f"""
             SELECT i.STOCK_STATUS,
-                   COUNT(*) as count,
-                   SUM(i.CURRENT_STOCK * i.PRICE) as total_value
+                   CAST(COUNT(*) AS INTEGER) as status_count,
+                   CAST(COALESCE(SUM(i.CURRENT_STOCK * i.PRICE), 0) AS NUMERIC(18,2)) as total_value
             FROM INGREDIENTS i
             WHERE {where_clause}
             GROUP BY i.STOCK_STATUS
-            ORDER BY count DESC
+            ORDER BY status_count DESC
         """, tuple(params))
         
         ingredients_by_status = []

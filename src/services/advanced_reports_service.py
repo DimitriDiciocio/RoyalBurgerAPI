@@ -6,7 +6,6 @@ Gera relatórios detalhados com gráficos, análises e métricas avançadas
 import fdb
 import logging
 from datetime import datetime, date, timedelta
-from decimal import Decimal
 from ..database import get_db_connection
 from ..utils.report_formatters import (
     format_currency, format_percentage, format_date, 
@@ -92,21 +91,22 @@ def generate_detailed_sales_report(filters=None):
         
         where_clause = " AND ".join(summary_conditions)
         
+        # CORREÇÃO: Adicionar CASTs explícitos e COALESCE para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(*) as total_orders,
-                SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as total_revenue,
-                AVG(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE NULL END) as avg_ticket,
-                COUNT(CASE WHEN o.STATUS = 'cancelled' THEN 1 END) as cancelled_orders
+                CAST(COUNT(*) AS INTEGER) as total_orders,
+                CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
+                CAST(COALESCE(AVG(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE NULL END), 0) AS NUMERIC(18,2)) as avg_ticket,
+                CAST(COUNT(CASE WHEN o.STATUS = 'cancelled' THEN 1 END) AS INTEGER) as cancelled_orders
             FROM ORDERS o
             WHERE {where_clause}
         """, tuple(summary_params))
         
         summary_row = cur.fetchone()
-        total_orders = summary_row[0] or 0
-        total_revenue = float(summary_row[1] or 0)
-        avg_ticket = float(summary_row[2] or 0)
-        cancelled_orders = summary_row[3] or 0
+        total_orders = int(summary_row[0]) if summary_row[0] is not None else 0
+        total_revenue = float(summary_row[1]) if summary_row[1] is not None else 0.0
+        avg_ticket = float(summary_row[2]) if summary_row[2] is not None else 0.0
+        cancelled_orders = int(summary_row[3]) if summary_row[3] is not None else 0
         
         # Calcula período anterior para comparação
         period_days = (end_dt - start_dt).days
@@ -118,17 +118,18 @@ def generate_detailed_sales_report(filters=None):
         prev_end_datetime = datetime.combine(prev_end_dt.date() + timedelta(days=1), datetime.min.time()) if isinstance(prev_end_dt, date) else prev_end_dt
         
         prev_summary_params = [prev_start_datetime, prev_end_datetime] + summary_params[2:]
+        # CORREÇÃO: Adicionar CASTs explícitos e COALESCE para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(*) as total_orders,
-                SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as total_revenue
+                CAST(COUNT(*) AS INTEGER) as total_orders,
+                CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue
             FROM ORDERS o
             WHERE {where_clause}
         """, tuple(prev_summary_params))
         
         prev_row = cur.fetchone()
-        prev_total_orders = prev_row[0] or 0
-        prev_total_revenue = float(prev_row[1] or 0)
+        prev_total_orders = int(prev_row[0]) if prev_row[0] is not None else 0
+        prev_total_revenue = float(prev_row[1]) if prev_row[1] is not None else 0.0
         
         # Calcula crescimento
         revenue_growth = calculate_growth_percentage(total_revenue, prev_total_revenue)
@@ -136,14 +137,16 @@ def generate_detailed_sales_report(filters=None):
         cancellation_rate = safe_divide(cancelled_orders, total_orders, 0) * 100
         
         # 2. VENDAS POR DATA
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # CORREÇÃO: "date" é palavra reservada no Firebird, usar alias diferente
         cur.execute(f"""
-            SELECT CAST(o.CREATED_AT AS DATE) as date,
-                   COUNT(*) as orders,
-                   SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as revenue
+            SELECT CAST(o.CREATED_AT AS DATE) as sale_date,
+                   CAST(COUNT(*) AS INTEGER) as total_orders,
+                   CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue
             FROM ORDERS o
             WHERE {where_clause}
             GROUP BY CAST(o.CREATED_AT AS DATE)
-            ORDER BY date
+            ORDER BY sale_date
         """, tuple(summary_params))
         
         sales_by_date = []
@@ -155,10 +158,11 @@ def generate_detailed_sales_report(filters=None):
             })
         
         # 3. VENDAS POR TIPO DE PEDIDO
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT o.ORDER_TYPE,
-                   COUNT(*) as orders,
-                   SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as revenue
+                   CAST(COUNT(*) AS INTEGER) as total_orders,
+                   CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue
             FROM ORDERS o
             WHERE {where_clause}
             GROUP BY o.ORDER_TYPE
@@ -169,15 +173,16 @@ def generate_detailed_sales_report(filters=None):
         for row in cur.fetchall():
             sales_by_type.append({
                 'type': row[0] or 'N/A',
-                'orders': row[1],
-                'revenue': float(row[2] or 0)
+                'orders': int(row[1]) if row[1] is not None else 0,
+                'revenue': float(row[2]) if row[2] is not None else 0.0
             })
         
         # 4. VENDAS POR MÉTODO DE PAGAMENTO
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT o.PAYMENT_METHOD,
-                   COUNT(*) as orders,
-                   SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as revenue
+                   CAST(COUNT(*) AS INTEGER) as total_orders,
+                   CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue
             FROM ORDERS o
             WHERE {where_clause} AND o.PAYMENT_METHOD IS NOT NULL
             GROUP BY o.PAYMENT_METHOD
@@ -188,8 +193,8 @@ def generate_detailed_sales_report(filters=None):
         for row in cur.fetchall():
             sales_by_payment.append({
                 'method': row[0] or 'N/A',
-                'orders': row[1],
-                'revenue': float(row[2] or 0)
+                'orders': int(row[1]) if row[1] is not None else 0,
+                'revenue': float(row[2]) if row[2] is not None else 0.0
             })
         
         # 5. TOP 10 PRODUTOS MAIS VENDIDOS
@@ -199,10 +204,11 @@ def generate_detailed_sales_report(filters=None):
             product_filter = " AND oi.PRODUCT_ID = ?"
             product_params.append(validated_filters['product_id'])
         
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT p.NAME,
-                   SUM(oi.QUANTITY) as total_quantity,
-                   SUM(oi.QUANTITY * oi.UNIT_PRICE) as total_revenue
+                   CAST(COALESCE(SUM(oi.QUANTITY), 0) AS INTEGER) as total_quantity,
+                   CAST(COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) AS NUMERIC(18,2)) as total_revenue
             FROM ORDER_ITEMS oi
             JOIN ORDERS o ON oi.ORDER_ID = o.ID
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
@@ -216,16 +222,17 @@ def generate_detailed_sales_report(filters=None):
         for row in cur.fetchall():
             top_products.append({
                 'name': row[0],
-                'quantity': int(row[1] or 0),
-                'revenue': float(row[2] or 0)
+                'quantity': int(row[1]) if row[1] is not None else 0,
+                'revenue': float(row[2]) if row[2] is not None else 0.0
             })
         
         # 6. TOP 10 CLIENTES
         if not validated_filters.get('customer_id'):
+            # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
             cur.execute(f"""
                 SELECT u.FULL_NAME,
-                       COUNT(o.ID) as total_orders,
-                       SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as total_spent
+                       CAST(COUNT(o.ID) AS INTEGER) as orders_count,
+                       CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as total_spent
                 FROM ORDERS o
                 JOIN USERS u ON o.USER_ID = u.ID
                 WHERE {where_clause}
@@ -238,27 +245,29 @@ def generate_detailed_sales_report(filters=None):
             for row in cur.fetchall():
                 top_customers.append({
                     'name': row[0] or 'N/A',
-                    'orders': row[1],
-                    'spent': float(row[2] or 0)
+                    'orders': int(row[1]) if row[1] is not None else 0,
+                    'spent': float(row[2]) if row[2] is not None else 0.0
                 })
         else:
             top_customers = []
         
         # 7. ANÁLISE DE HORÁRIOS DE PICO
+        # CORREÇÃO: Adicionar CAST explícito para evitar erro SQLDA -804
+        # CORREÇÃO: "hour" e "orders" são palavras reservadas, usar aliases diferentes
         cur.execute(f"""
-            SELECT EXTRACT(HOUR FROM o.CREATED_AT) as hour,
-                   COUNT(*) as orders
+            SELECT EXTRACT(HOUR FROM o.CREATED_AT) as hour_of_day,
+                   CAST(COUNT(*) AS INTEGER) as total_orders
             FROM ORDERS o
             WHERE {where_clause}
             GROUP BY EXTRACT(HOUR FROM o.CREATED_AT)
-            ORDER BY hour
+            ORDER BY hour_of_day
         """, tuple(summary_params))
         
         peak_hours = []
         for row in cur.fetchall():
             peak_hours.append({
-                'hour': int(row[0]),
-                'orders': row[1]
+                'hour': int(row[0]) if row[0] is not None else 0,
+                'orders': int(row[1]) if row[1] is not None else 0
             })
         
         # Prepara dados para gráficos
@@ -442,16 +451,17 @@ def generate_orders_performance_report(filters=None):
         cancellation_rate = safe_divide(cancelled_orders, total_orders, 0) * 100
         
         # 3. PERFORMANCE POR ATENDENTE
+        # CORREÇÃO: "orders" é palavra reservada, usar alias diferente
         cur.execute(f"""
             SELECT u.FULL_NAME,
-                   COUNT(o.ID) as orders,
-                   SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END) as revenue,
-                   AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60) as avg_time
+                   CAST(COUNT(o.ID) AS INTEGER) as orders_count,
+                   CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
+                   CAST(COALESCE(AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60), 0) AS NUMERIC(18,2)) as avg_time
             FROM ORDERS o
             JOIN USERS u ON o.ATTENDANT_ID = u.ID
             WHERE {where_clause} AND o.ATTENDANT_ID IS NOT NULL
             GROUP BY u.ID, u.FULL_NAME
-            ORDER BY orders DESC
+            ORDER BY orders_count DESC
         """, tuple(params))
         
         attendants_performance = []
@@ -845,14 +855,15 @@ def generate_complete_financial_report(filters=None):
         revenue_growth = calculate_growth_percentage(total_revenue, prev_revenue)
         
         # 2. FLUXO DE CAIXA DIÁRIO
+        # CORREÇÃO: "date" é palavra reservada no Firebird, usar alias diferente
         cur.execute(f"""
-            SELECT CAST(fm.MOVEMENT_DATE AS DATE) as date,
-                   SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END) as revenue,
-                   SUM(CASE WHEN fm.TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm."VALUE" ELSE 0 END) as expenses
+            SELECT CAST(fm.MOVEMENT_DATE AS DATE) as movement_date,
+                   CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
+                   CAST(COALESCE(SUM(CASE WHEN fm.TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as expenses
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
             GROUP BY CAST(fm.MOVEMENT_DATE AS DATE)
-            ORDER BY date
+            ORDER BY movement_date
         """, tuple(params))
         
         cashflow_by_date = []
