@@ -50,6 +50,14 @@ def get_financial_movements_route():
         except ValueError:
             return jsonify({"error": "related_entity_id deve ser um número"}), 400
     
+    # ALTERAÇÃO: Adicionar filtro reconciled (compatível com frontend)
+    if request.args.get('reconciled') is not None:
+        reconciled_value = request.args.get('reconciled').lower()
+        if reconciled_value in ['true', '1', 'yes']:
+            filters['reconciled'] = True
+        elif reconciled_value in ['false', '0', 'no']:
+            filters['reconciled'] = False
+    
     movements = financial_movement_service.get_financial_movements(filters)
     return jsonify(movements), 200
 
@@ -71,6 +79,44 @@ def create_financial_movement_route():
     if success:
         return jsonify(result), 201
     elif error_code in ["INVALID_TYPE", "INVALID_VALUE", "INVALID_CATEGORY", "INVALID_DESCRIPTION"]:
+        return jsonify({"error": result}), 400
+    else:
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@financial_movement_bp.route('/movements/<int:movement_id>', methods=['GET'])
+@require_role('admin', 'manager')
+def get_financial_movement_by_id_route(movement_id):
+    """Busca uma movimentação financeira por ID"""
+    # ALTERAÇÃO: Novo endpoint adicionado para integração com frontend
+    movement = financial_movement_service.get_financial_movement_by_id(movement_id)
+    
+    if movement:
+        return jsonify(movement), 200
+    else:
+        return jsonify({"error": "Movimentação não encontrada"}), 404
+
+
+@financial_movement_bp.route('/movements/<int:movement_id>', methods=['PATCH'])
+@require_role('admin', 'manager')
+def update_financial_movement_route(movement_id):
+    """Atualiza uma movimentação financeira (campos gerais)"""
+    # ALTERAÇÃO: Novo endpoint adicionado para integração com frontend
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+    
+    user_id = g.current_user_id if hasattr(g, 'current_user_id') else None
+    
+    success, error_code, result = financial_movement_service.update_financial_movement(
+        movement_id, data, user_id
+    )
+    
+    if success:
+        return jsonify(result), 200
+    elif error_code == "NOT_FOUND":
+        return jsonify({"error": "Movimentação não encontrada"}), 404
+    elif error_code in ["INVALID_TYPE", "INVALID_VALUE", "INVALID_STATUS", "INVALID_DATE", "NO_UPDATES"]:
         return jsonify({"error": result}), 400
     else:
         return jsonify({"error": "Erro interno do servidor"}), 500

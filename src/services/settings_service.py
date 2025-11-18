@@ -167,6 +167,12 @@ def update_settings(settings_data, user_id):
             'taxa_conversao_ganho_clube': 'TAXA_CONVERSAO_GANHO_CLUBE',
             'taxa_conversao_resgate_clube': 'TAXA_CONVERSAO_RESGATE_CLUBE',
             'taxa_expiracao_pontos_clube': 'TAXA_EXPIRACAO_PONTOS_CLUBE',
+            # ALTERAÇÃO: Taxas financeiras adicionadas
+            'taxa_cartao_credito': 'TAXA_CARTAO_CREDITO',
+            'taxa_cartao_debito': 'TAXA_CARTAO_DEBITO',
+            'taxa_pix': 'TAXA_PIX',
+            'taxa_ifood': 'TAXA_IFOOD',
+            'taxa_uber_eats': 'TAXA_UBER_EATS',
             'nome_fantasia': 'NOME_FANTASIA',
             'razao_social': 'RAZAO_SOCIAL',
             'cnpj': 'CNPJ',

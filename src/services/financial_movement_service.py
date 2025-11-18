@@ -577,6 +577,209 @@ def get_financial_movements(filters=None):
             conn.close()
 
 
+def get_financial_movement_by_id(movement_id):
+    """
+    Busca uma movimentação financeira por ID
+    
+    Args:
+        movement_id: int - ID da movimentação
+    
+    Returns:
+        dict com os dados da movimentação ou None se não encontrada
+    """
+    # ALTERAÇÃO: Nova função adicionada para integração com frontend
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        sql = """
+            SELECT 
+                fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
+                fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
+                fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
+                fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
+                fm.NOTES, fm.CREATED_AT, fm.UPDATED_AT,
+                fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID, fm.BANK_ACCOUNT,
+                fm.RECONCILED, fm.RECONCILED_AT,
+                u.FULL_NAME as created_by_name
+            FROM FINANCIAL_MOVEMENTS fm
+            LEFT JOIN USERS u ON fm.CREATED_BY = u.ID
+            WHERE fm.ID = ?
+        """
+        
+        cur.execute(sql, (movement_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            return None
+        
+        # ALTERAÇÃO: Formatar resultado no mesmo padrão da lista
+        movement = {
+            'id': row[0],
+            'type': row[1],
+            'value': float(row[2]) if row[2] else 0.0,
+            'category': row[3],
+            'subcategory': row[4],
+            'description': row[5],
+            'movement_date': row[6].isoformat() if row[6] else None,
+            'payment_status': row[7],
+            'payment_method': row[8],
+            'sender_receiver': row[9],
+            'related_entity_type': row[10],
+            'related_entity_id': row[11],
+            'notes': row[12],
+            'created_at': row[13].isoformat() if row[13] else None,
+            'updated_at': row[14].isoformat() if row[14] else None,
+            'payment_gateway_id': row[15],
+            'transaction_id': row[16],
+            'bank_account': row[17],
+            'reconciled': bool(row[18]) if row[18] is not None else False,
+            'reconciled_at': row[19].isoformat() if row[19] else None,
+            'created_by_name': row[20]
+        }
+        
+        return movement
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao buscar movimentação financeira {movement_id}: {e}", exc_info=True)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_financial_movement(movement_id, movement_data, updated_by_user_id=None):
+    """
+    Atualiza uma movimentação financeira (campos gerais)
+    
+    Args:
+        movement_id: int - ID da movimentação
+        movement_data: dict com campos a atualizar:
+            - type: 'REVENUE', 'EXPENSE', 'CMV', 'TAX' (opcional)
+            - value: float (opcional)
+            - category: str (opcional)
+            - subcategory: str (opcional)
+            - description: str (opcional)
+            - movement_date: datetime/str (opcional)
+            - payment_status: 'Pending' ou 'Paid' (opcional)
+            - payment_method: str (opcional)
+            - sender_receiver: str (opcional)
+            - notes: str (opcional)
+        updated_by_user_id: ID do usuário que está atualizando
+    
+    Returns:
+        (success: bool, error_code: str, result: dict/str)
+    """
+    # ALTERAÇÃO: Nova função adicionada para integração com frontend
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verificar se movimentação existe
+        cur.execute("SELECT ID FROM FINANCIAL_MOVEMENTS WHERE ID = ?", (movement_id,))
+        if not cur.fetchone():
+            return (False, "NOT_FOUND", "Movimentação não encontrada")
+        
+        # Construir campos a atualizar
+        update_fields = []
+        params = []
+        
+        if 'type' in movement_data:
+            valid_types = [TYPE_REVENUE, TYPE_EXPENSE, TYPE_CMV, TYPE_TAX]
+            if movement_data['type'] not in valid_types:
+                return (False, "INVALID_TYPE", f"Tipo deve ser um de: {', '.join(valid_types)}")
+            update_fields.append("TYPE = ?")
+            params.append(movement_data['type'])
+        
+        if 'value' in movement_data:
+            try:
+                value = float(movement_data['value'])
+                if value <= 0:
+                    return (False, "INVALID_VALUE", "Valor deve ser maior que zero")
+                update_fields.append('"VALUE" = ?')
+                params.append(value)
+            except (ValueError, TypeError):
+                return (False, "INVALID_VALUE", "Valor deve ser um número válido")
+        
+        if 'category' in movement_data:
+            update_fields.append("CATEGORY = ?")
+            params.append(movement_data['category'])
+        
+        if 'subcategory' in movement_data:
+            update_fields.append("SUBCATEGORY = ?")
+            params.append(movement_data['subcategory'])
+        
+        if 'description' in movement_data:
+            update_fields.append("DESCRIPTION = ?")
+            params.append(movement_data['description'])
+        
+        if 'movement_date' in movement_data:
+            movement_date = movement_data['movement_date']
+            if isinstance(movement_date, str):
+                try:
+                    movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
+                except:
+                    return (False, "INVALID_DATE", "Data inválida")
+            update_fields.append("MOVEMENT_DATE = ?")
+            params.append(movement_date)
+        
+        if 'payment_status' in movement_data:
+            if movement_data['payment_status'] not in [STATUS_PENDING, STATUS_PAID]:
+                return (False, "INVALID_STATUS", "Status deve ser 'Pending' ou 'Paid'")
+            update_fields.append("PAYMENT_STATUS = ?")
+            params.append(movement_data['payment_status'])
+        
+        if 'payment_method' in movement_data:
+            update_fields.append("PAYMENT_METHOD = ?")
+            params.append(movement_data['payment_method'])
+        
+        if 'sender_receiver' in movement_data:
+            update_fields.append("SENDER_RECEIVER = ?")
+            params.append(movement_data['sender_receiver'])
+        
+        if 'notes' in movement_data:
+            update_fields.append("NOTES = ?")
+            params.append(movement_data['notes'])
+        
+        # Se não há campos para atualizar
+        if not update_fields:
+            return (False, "NO_UPDATES", "Nenhum campo para atualizar")
+        
+        # Adicionar UPDATED_AT
+        update_fields.append("UPDATED_AT = CURRENT_TIMESTAMP")
+        
+        if updated_by_user_id:
+            update_fields.append("UPDATED_BY = ?")
+            params.append(updated_by_user_id)
+        
+        # Executar atualização
+        sql = f"""
+            UPDATE FINANCIAL_MOVEMENTS
+            SET {', '.join(update_fields)}
+            WHERE ID = ?
+        """
+        params.append(movement_id)
+        
+        cur.execute(sql, params)
+        conn.commit()
+        
+        # Buscar movimentação atualizada
+        updated_movement = get_financial_movement_by_id(movement_id)
+        
+        return (True, None, updated_movement)
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao atualizar movimentação financeira {movement_id}: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return (False, "DATABASE_ERROR", str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 def get_cash_flow_summary(period='this_month', include_pending=False):
     """
     Calcula resumo do fluxo de caixa
@@ -1011,25 +1214,26 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
         
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         
-        # Buscar estatísticas
+        # ALTERAÇÃO: Buscar estatísticas com CAST para garantir compatibilidade de tipos
         stats_sql = """
             SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN RECONCILED = TRUE THEN 1 ELSE 0 END) as reconciled_count,
-                SUM(CASE WHEN RECONCILED = FALSE OR RECONCILED IS NULL THEN 1 ELSE 0 END) as unreconciled_count,
-                SUM(CASE WHEN RECONCILED = TRUE THEN "VALUE" ELSE 0 END) as reconciled_amount,
-                SUM(CASE WHEN RECONCILED = FALSE OR RECONCILED IS NULL THEN "VALUE" ELSE 0 END) as unreconciled_amount
+                CAST(COUNT(*) AS INTEGER) as total,
+                CAST(SUM(CASE WHEN fm.RECONCILED = 1 THEN 1 ELSE 0 END) AS INTEGER) as reconciled_count,
+                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = 0 THEN 1 ELSE 0 END) AS INTEGER) as unreconciled_count,
+                CAST(SUM(CASE WHEN fm.RECONCILED = 1 THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as reconciled_amount,
+                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = 0 THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as unreconciled_amount
             FROM FINANCIAL_MOVEMENTS fm
         """ + where_clause
         
         cur.execute(stats_sql, params)
         stats_row = cur.fetchone()
         
-        total_movements = stats_row[0] or 0
-        reconciled_count = stats_row[1] or 0
-        unreconciled_count = stats_row[2] or 0
-        reconciled_amount = float(stats_row[3] or 0)
-        unreconciled_amount = float(stats_row[4] or 0)
+        # ALTERAÇÃO: Garantir que valores nunca sejam None
+        total_movements = int(stats_row[0]) if stats_row[0] is not None else 0
+        reconciled_count = int(stats_row[1]) if stats_row[1] is not None else 0
+        unreconciled_count = int(stats_row[2]) if stats_row[2] is not None else 0
+        reconciled_amount = float(stats_row[3]) if stats_row[3] is not None else 0.0
+        unreconciled_amount = float(stats_row[4]) if stats_row[4] is not None else 0.0
         
         # Buscar movimentações
         movements_sql = """
