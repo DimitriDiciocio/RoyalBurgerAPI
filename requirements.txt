@@ -16,6 +16,7 @@ flask_compress
 fpdf2
 pywin32; platform_system == "Windows"
 python-socketio
-matplotlib>=3.8.0
-pandas>=2.1.0
-numpy>=1.26.0
+# ALTERAÇÃO: Versões específicas com wheels pré-compilados para Windows Python 3.12
+matplotlib>=3.8.0,<3.11.0
+pandas>=2.1.0,<2.3.0
+numpy>=1.26.0,<2.1.0
