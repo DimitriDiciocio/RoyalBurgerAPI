@@ -5,6 +5,21 @@ from .pdf_report_service import generate_pdf_report
 logger = logging.getLogger(__name__)
 
 
+def translate_role(role):
+    """
+    Traduz o role do inglês para português
+    """
+    role_translations = {
+        'admin': 'Administrador',
+        'manager': 'Gerente',
+        'attendant': 'Atendente',
+        'delivery': 'Entregador',
+        'customer': 'Cliente',
+        'N/A': 'Não informado'
+    }
+    return role_translations.get(role, role.capitalize() if role else 'Não informado')
+
+
 def generate_users_pdf_report(filters=None):
     """
     Gera relatório de usuários em PDF
@@ -23,10 +38,11 @@ def generate_users_pdf_report(filters=None):
         "Por Cargo": {}
     }
     
-    # Conta por cargo
+    # Conta por cargo e traduz para português
     for user in users:
         role = user.get('role', 'N/A')
-        summary["Por Cargo"][role] = summary["Por Cargo"].get(role, 0) + 1
+        role_pt = translate_role(role)
+        summary["Por Cargo"][role_pt] = summary["Por Cargo"].get(role_pt, 0) + 1
     
     # Gera PDF
     return generate_pdf_report('users', users, filters, summary)

@@ -204,14 +204,26 @@ def generate_detailed_sales_report(filters=None):
             product_filter = " AND oi.PRODUCT_ID = ?"
             product_params.append(validated_filters['product_id'])
         
-        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # CORREÇÃO: Incluir extras na receita para cálculo correto
         cur.execute(f"""
             SELECT p.NAME,
                    CAST(COALESCE(SUM(oi.QUANTITY), 0) AS INTEGER) as total_quantity,
-                   CAST(COALESCE(SUM(oi.QUANTITY * oi.UNIT_PRICE), 0) AS NUMERIC(18,2)) as total_revenue
+                   -- Receita: Produto + Extras
+                   CAST(COALESCE(
+                       SUM(oi.QUANTITY * oi.UNIT_PRICE) + 
+                       SUM(
+                           CASE 
+                               WHEN oie.TYPE = 'extra' THEN oie.QUANTITY * oie.UNIT_PRICE
+                               WHEN oie.TYPE = 'base' AND oie.DELTA > 0 THEN oie.DELTA * oie.UNIT_PRICE
+                               ELSE 0
+                           END
+                       ), 
+                       0
+                   ) AS NUMERIC(18,2)) as total_revenue
             FROM ORDER_ITEMS oi
             JOIN ORDERS o ON oi.ORDER_ID = o.ID
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
+            LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
             WHERE {where_clause}{product_filter}
             GROUP BY p.ID, p.NAME
             ORDER BY total_quantity DESC
@@ -425,8 +437,9 @@ def generate_orders_performance_report(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. TEMPO MÉDIO DE PREPARO
+        # CORREÇÃO: Firebird não suporta EPOCH, usar DATEDIFF(SECOND, ...) e dividir por 60
         cur.execute(f"""
-            SELECT AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60) as avg_prep_time
+            SELECT CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_prep_time
             FROM ORDERS o
             WHERE {where_clause} 
             AND o.STATUS IN ('ready', 'on_the_way', 'delivered', 'completed')
@@ -456,7 +469,7 @@ def generate_orders_performance_report(filters=None):
             SELECT u.FULL_NAME,
                    CAST(COUNT(o.ID) AS INTEGER) as orders_count,
                    CAST(COALESCE(SUM(CASE WHEN o.STATUS NOT IN ('cancelled') THEN o.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
-                   CAST(COALESCE(AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60), 0) AS NUMERIC(18,2)) as avg_time
+                   CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_time
             FROM ORDERS o
             JOIN USERS u ON o.ATTENDANT_ID = u.ID
             WHERE {where_clause} AND o.ATTENDANT_ID IS NOT NULL
@@ -474,10 +487,11 @@ def generate_orders_performance_report(filters=None):
             })
         
         # 4. PERFORMANCE POR ENTREGADOR
+        # CORREÇÃO: Firebird não suporta EPOCH, usar DATEDIFF(SECOND, ...) e dividir por 60
         cur.execute(f"""
             SELECT u.FULL_NAME,
-                   COUNT(o.ID) as deliveries,
-                   AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60) as avg_delivery_time
+                   CAST(COUNT(o.ID) AS INTEGER) as deliveries,
+                   CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_delivery_time
             FROM ORDERS o
             JOIN USERS u ON o.DELIVERER_ID = u.ID
             WHERE {where_clause} 
@@ -587,11 +601,12 @@ def generate_products_analysis_report(filters=None):
         end_datetime = datetime.combine(end_dt.date() + timedelta(days=1), datetime.min.time()) if isinstance(end_dt, date) else end_dt
         
         # Condições para produtos
-        product_conditions = ["p.IS_ACTIVE = 1"]
+        # CORREÇÃO: Usar TRUE ao invés de 1 para evitar erro de conversão no Firebird
+        product_conditions = ["p.IS_ACTIVE = TRUE"]
         product_params = []
         
         if validated_filters.get('category_id'):
-            product_conditions.append("p.SECTION_ID = ?")
+            product_conditions.append("p.CATEGORY_ID = ?")
             product_params.append(validated_filters['category_id'])
         
         if validated_filters.get('product_id'):
@@ -607,19 +622,45 @@ def generate_products_analysis_report(filters=None):
             product_params.append(validated_filters['price_max'])
         
         if validated_filters.get('status'):
-            product_conditions.append("p.IS_ACTIVE = ?")
-            product_params.append(1 if validated_filters['status'] == 'active' else 0)
+            # Se status for 'active', já está coberto por p.IS_ACTIVE = TRUE
+            # Se for 'inactive', precisa sobrescrever
+            if validated_filters['status'] == 'inactive':
+                product_conditions = [c for c in product_conditions if 'IS_ACTIVE' not in c]
+                product_conditions.append("p.IS_ACTIVE = FALSE")
         
         product_where = " AND ".join(product_conditions)
         
         # 1. TOP 20 PRODUTOS MAIS VENDIDOS (QUANTIDADE)
+        # CORREÇÃO: Incluir extras na receita e custo para cálculo correto de margem e lucro
         cur.execute(f"""
-            SELECT p.ID, p.NAME, p.PRICE, p.COST_PRICE,
-                   SUM(oi.QUANTITY) as total_quantity,
-                   SUM(oi.QUANTITY * oi.UNIT_PRICE) as total_revenue
+            SELECT CAST(p.ID AS INTEGER) as id,
+                   CAST(p.NAME AS VARCHAR(255)) as name,
+                   CAST(COALESCE(p.PRICE, 0) AS NUMERIC(18,2)) as price,
+                   CAST(COALESCE(p.COST_PRICE, 0) AS NUMERIC(18,2)) as cost_price,
+                   CAST(COALESCE(SUM(oi.QUANTITY), 0) AS INTEGER) as total_quantity,
+                   -- Receita: Produto + Extras
+                   CAST(COALESCE(
+                       SUM(oi.QUANTITY * oi.UNIT_PRICE) + 
+                       SUM(
+                           CASE 
+                               WHEN oie.TYPE = 'extra' THEN oie.QUANTITY * oie.UNIT_PRICE
+                               WHEN oie.TYPE = 'base' AND oie.DELTA > 0 THEN oie.DELTA * oie.UNIT_PRICE
+                               ELSE 0
+                           END
+                       ), 
+                       0
+                   ) AS NUMERIC(18,2)) as total_revenue,
+                   -- Custo: Apenas do produto (p.COST_PRICE já inclui custo dos ingredientes base)
+                   -- NOTA: Extras não são incluídos no custo pois INGREDIENTS não tem COST_PRICE
+                   -- e usar i.PRICE (preço de venda) como custo inflaria incorretamente o custo
+                   CAST(COALESCE(
+                       SUM(oi.QUANTITY * COALESCE(p.COST_PRICE, 0)), 
+                       0
+                   ) AS NUMERIC(18,2)) as total_cost
             FROM PRODUCTS p
             JOIN ORDER_ITEMS oi ON p.ID = oi.PRODUCT_ID
             JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
             WHERE {product_where}
             AND o.CREATED_AT >= ? AND o.CREATED_AT < ?
             AND o.STATUS NOT IN ('cancelled')
@@ -630,31 +671,57 @@ def generate_products_analysis_report(filters=None):
         
         top_products_qty = []
         for row in cur.fetchall():
-            cost_price = float(row[3] or 0)
-            revenue = float(row[5] or 0)
+            revenue = float(row[5] or 0)  # total_revenue (com extras)
+            total_cost = float(row[6] or 0)  # total_cost (apenas produto, sem extras)
             quantity = int(row[4] or 0)
-            profit = revenue - (cost_price * quantity)
+            # Lucro = Receita (com extras) - Custo (apenas produto)
+            # NOTA: Custo dos extras não é incluído pois INGREDIENTS não tem COST_PRICE
+            profit = revenue - total_cost
             margin = safe_divide(profit, revenue, 0) * 100 if revenue > 0 else 0
             
             top_products_qty.append({
                 'id': row[0],
                 'name': row[1],
                 'price': float(row[2] or 0),
-                'cost_price': cost_price,
+                'cost_price': float(row[3] or 0),  # Custo unitário do produto
                 'quantity': quantity,
-                'revenue': revenue,
-                'profit': profit,
-                'margin': margin
+                'revenue': revenue,      # ✅ Inclui extras na receita
+                'cost': total_cost,      # ✅ Apenas custo do produto (p.COST_PRICE)
+                'profit': profit,        # ✅ Receita - Custo
+                'margin': margin         # ✅ (Lucro / Receita) × 100
             })
         
         # 2. TOP 20 PRODUTOS POR RECEITA
+        # CORREÇÃO: Incluir extras na receita e custo para cálculo correto de margem e lucro
         cur.execute(f"""
-            SELECT p.ID, p.NAME, p.PRICE, p.COST_PRICE,
-                   SUM(oi.QUANTITY) as total_quantity,
-                   SUM(oi.QUANTITY * oi.UNIT_PRICE) as total_revenue
+            SELECT CAST(p.ID AS INTEGER) as id,
+                   CAST(p.NAME AS VARCHAR(255)) as name,
+                   CAST(COALESCE(p.PRICE, 0) AS NUMERIC(18,2)) as price,
+                   CAST(COALESCE(p.COST_PRICE, 0) AS NUMERIC(18,2)) as cost_price,
+                   CAST(COALESCE(SUM(oi.QUANTITY), 0) AS INTEGER) as total_quantity,
+                   -- Receita: Produto + Extras
+                   CAST(COALESCE(
+                       SUM(oi.QUANTITY * oi.UNIT_PRICE) + 
+                       SUM(
+                           CASE 
+                               WHEN oie.TYPE = 'extra' THEN oie.QUANTITY * oie.UNIT_PRICE
+                               WHEN oie.TYPE = 'base' AND oie.DELTA > 0 THEN oie.DELTA * oie.UNIT_PRICE
+                               ELSE 0
+                           END
+                       ), 
+                       0
+                   ) AS NUMERIC(18,2)) as total_revenue,
+                   -- Custo: Apenas do produto (p.COST_PRICE já inclui custo dos ingredientes base)
+                   -- NOTA: Extras não são incluídos no custo pois INGREDIENTS não tem COST_PRICE
+                   -- e usar i.PRICE (preço de venda) como custo inflaria incorretamente o custo
+                   CAST(COALESCE(
+                       SUM(oi.QUANTITY * COALESCE(p.COST_PRICE, 0)), 
+                       0
+                   ) AS NUMERIC(18,2)) as total_cost
             FROM PRODUCTS p
             JOIN ORDER_ITEMS oi ON p.ID = oi.PRODUCT_ID
             JOIN ORDERS o ON oi.ORDER_ID = o.ID
+            LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
             WHERE {product_where}
             AND o.CREATED_AT >= ? AND o.CREATED_AT < ?
             AND o.STATUS NOT IN ('cancelled')
@@ -665,21 +732,24 @@ def generate_products_analysis_report(filters=None):
         
         top_products_revenue = []
         for row in cur.fetchall():
-            cost_price = float(row[3] or 0)
-            revenue = float(row[5] or 0)
+            revenue = float(row[5] or 0)  # total_revenue (com extras)
+            total_cost = float(row[6] or 0)  # total_cost (apenas produto, sem extras)
             quantity = int(row[4] or 0)
-            profit = revenue - (cost_price * quantity)
+            # Lucro = Receita (com extras) - Custo (apenas produto)
+            # NOTA: Custo dos extras não é incluído pois INGREDIENTS não tem COST_PRICE
+            profit = revenue - total_cost
             margin = safe_divide(profit, revenue, 0) * 100 if revenue > 0 else 0
             
             top_products_revenue.append({
                 'id': row[0],
                 'name': row[1],
                 'price': float(row[2] or 0),
-                'cost_price': cost_price,
+                'cost_price': float(row[3] or 0),  # Custo unitário do produto
                 'quantity': quantity,
-                'revenue': revenue,
-                'profit': profit,
-                'margin': margin
+                'revenue': revenue,      # ✅ Inclui extras na receita
+                'cost': total_cost,      # ✅ Apenas custo do produto (p.COST_PRICE)
+                'profit': profit,        # ✅ Receita - Custo
+                'margin': margin         # ✅ (Lucro / Receita) × 100
             })
         
         # Prepara dados para gráficos
@@ -809,21 +879,22 @@ def generate_complete_financial_report(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. RESUMO EXECUTIVO
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END) as total_revenue,
-                SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END) as total_expense,
-                SUM(CASE WHEN fm.TYPE = 'CMV' THEN fm."VALUE" ELSE 0 END) as total_cmv,
-                SUM(CASE WHEN fm.TYPE = 'TAX' THEN fm."VALUE" ELSE 0 END) as total_taxes
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_expense,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'CMV' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_cmv,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'TAX' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_taxes
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
         
         summary_row = cur.fetchone()
-        total_revenue = float(summary_row[0] or 0)
-        total_expense = float(summary_row[1] or 0)
-        total_cmv = float(summary_row[2] or 0)
-        total_taxes = float(summary_row[3] or 0)
+        total_revenue = float(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0.0
+        total_expense = float(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0.0
+        total_cmv = float(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0.0
+        total_taxes = float(summary_row[3] or 0) if summary_row and summary_row[3] is not None else 0.0
         
         gross_profit = total_revenue - total_cmv
         net_profit = total_revenue - total_expense - total_cmv - total_taxes
@@ -840,17 +911,18 @@ def generate_complete_financial_report(filters=None):
         prev_end_datetime = datetime.combine(prev_end_dt.date() + timedelta(days=1), datetime.min.time()) if isinstance(prev_end_dt, date) else prev_end_dt
         
         prev_params = [prev_start_datetime, prev_end_datetime] + params[2:]
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END) as total_revenue,
-                SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END) as total_expense
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_expense
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(prev_params))
         
         prev_row = cur.fetchone()
-        prev_revenue = float(prev_row[0] or 0)
-        prev_expense = float(prev_row[1] or 0)
+        prev_revenue = float(prev_row[0] or 0) if prev_row and prev_row[0] is not None else 0.0
+        prev_expense = float(prev_row[1] or 0) if prev_row and prev_row[1] is not None else 0.0
         
         revenue_growth = calculate_growth_percentage(total_revenue, prev_revenue)
         
@@ -878,9 +950,10 @@ def generate_complete_financial_report(filters=None):
             })
         
         # 3. RECEITAS POR CATEGORIA
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   SUM(fm."VALUE") as total
+                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause} AND fm.TYPE = 'REVENUE'
             GROUP BY fm.CATEGORY
@@ -891,13 +964,14 @@ def generate_complete_financial_report(filters=None):
         for row in cur.fetchall():
             revenue_by_category.append({
                 'category': row[0] or 'N/A',
-                'total': float(row[1] or 0)
+                'total': float(row[1] or 0) if row[1] is not None else 0.0
             })
         
         # 4. DESPESAS POR CATEGORIA
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   SUM(fm."VALUE") as total
+                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause} AND fm.TYPE = 'EXPENSE'
             GROUP BY fm.CATEGORY
@@ -908,7 +982,7 @@ def generate_complete_financial_report(filters=None):
         for row in cur.fetchall():
             expenses_by_category.append({
                 'category': row[0] or 'N/A',
-                'total': float(row[1] or 0)
+                'total': float(row[1] or 0) if row[1] is not None else 0.0
             })
         
         # 5. CONTAS A PAGAR (Pendentes)
@@ -929,17 +1003,18 @@ def generate_complete_financial_report(filters=None):
         
         pending_where = " AND ".join(pending_conditions)
         
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END) as pending_expenses,
-                SUM(CASE WHEN fm.TYPE = 'TAX' THEN fm."VALUE" ELSE 0 END) as pending_taxes
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_expenses,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'TAX' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_taxes
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {pending_where}
         """, tuple(pending_params))
         
         pending_row = cur.fetchone()
-        pending_expenses = float(pending_row[0] or 0)
-        pending_taxes = float(pending_row[1] or 0)
+        pending_expenses = float(pending_row[0] or 0) if pending_row and pending_row[0] is not None else 0.0
+        pending_taxes = float(pending_row[1] or 0) if pending_row and pending_row[1] is not None else 0.0
         
         # Prepara dados para gráficos
         chart_data = {}

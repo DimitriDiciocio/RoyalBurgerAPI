@@ -155,6 +155,12 @@ def validate_enum(value: Any, field_name: str, allowed_values: list,
             return (False, f"{field_name} é obrigatório", None)
         return (True, None, None)
     
+    # CORREÇÃO: Aceitar booleanos quando os valores permitidos são ['true', 'false']
+    if isinstance(value, bool) and set(allowed_values) == {'true', 'false'}:
+        # Converter booleano para string correspondente
+        value_str = 'true' if value else 'false'
+        return (True, None, value_str)
+    
     if value not in allowed_values:
         return (False, f"{field_name} deve ser um dos seguintes valores: {', '.join(map(str, allowed_values))}", None)
     

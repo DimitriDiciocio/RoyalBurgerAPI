@@ -13,6 +13,57 @@ pdf_reports_bp = Blueprint('pdf_reports', __name__)
 logger = logging.getLogger(__name__)
 
 
+def process_date_filter(date_value, field_name):
+    """
+    Processa e valida uma data no formato brasileiro (DD-MM-YYYY)
+    Converte para ISO (YYYY-MM-DD) para uso interno
+    
+    Args:
+        date_value: String com data no formato DD-MM-YYYY ou YYYY-MM-DD
+        field_name: Nome do campo para mensagens de erro
+    
+    Returns:
+        tuple: (date_iso, error_message) - (None, error_msg) se inválido
+    """
+    if not date_value:
+        return None, None
+    
+    is_valid_format, format_msg = is_valid_date_format(date_value)
+    if not is_valid_format:
+        return None, f"{field_name} inválida: {format_msg}. Use o formato DD-MM-YYYY"
+    
+    date_iso = convert_br_date_to_iso(date_value)
+    if not date_iso:
+        return None, f"{field_name} inválida: não foi possível converter a data"
+    
+    return date_iso, None
+
+
+def process_filters_with_dates(filters):
+    """
+    Processa filtros de um JSON body, convertendo datas para ISO
+    Aceita datas em formato brasileiro (DD-MM-YYYY) ou ISO (YYYY-MM-DD)
+    
+    Args:
+        filters: dict com filtros que podem conter datas
+    
+    Returns:
+        tuple: (processed_filters, error_message)
+    """
+    processed = filters.copy() if filters else {}
+    date_fields = ['start_date', 'end_date', 'created_after', 'created_before']
+    
+    for field in date_fields:
+        if field in processed and processed[field]:
+            date_iso, error = process_date_filter(processed[field], field.replace('_', ' ').title())
+            if error:
+                return None, error
+            if date_iso:
+                processed[field] = date_iso
+    
+    return processed, None
+
+
 @pdf_reports_bp.route('/users', methods=['GET'])
 @require_role('admin')
 def generate_users_pdf():
@@ -22,8 +73,8 @@ def generate_users_pdf():
     Parâmetros de Query (Filtros):
     - role: cargo do usuário (admin, manager, attendant, delivery, customer)
     - status: status do usuário (active, inactive)
-    - created_after: data de criação (YYYY-MM-DD)
-    - created_before: data de criação (YYYY-MM-DD)
+    - created_after: data de criação (DD-MM-YYYY)
+    - created_before: data de criação (DD-MM-YYYY)
     - search: busca geral por nome, email ou telefone
     """
     try:
@@ -39,18 +90,16 @@ def generate_users_pdf():
                 filters['status'] = status == 'active'
                 
         if request.args.get('created_after'):
-            start_date = request.args.get('created_after')
-            is_valid_format, format_msg = is_valid_date_format(start_date)
-            if not is_valid_format:
-                return jsonify({"error": f"Data de início inválida: {format_msg}"}), 400
-            filters['created_after'] = convert_br_date_to_iso(start_date)
+            date_iso, error = process_date_filter(request.args.get('created_after'), 'Data de início')
+            if error:
+                return jsonify({"error": error}), 400
+            filters['created_after'] = date_iso
             
         if request.args.get('created_before'):
-            end_date = request.args.get('created_before')
-            is_valid_format, format_msg = is_valid_date_format(end_date)
-            if not is_valid_format:
-                return jsonify({"error": f"Data de fim inválida: {format_msg}"}), 400
-            filters['created_before'] = convert_br_date_to_iso(end_date)
+            date_iso, error = process_date_filter(request.args.get('created_before'), 'Data de fim')
+            if error:
+                return jsonify({"error": error}), 400
+            filters['created_before'] = date_iso
             
         if request.args.get('search'):
             filters['search'] = request.args.get('search')
@@ -194,8 +243,8 @@ def generate_orders_pdf():
     Gera relatório de pedidos e vendas em PDF
     
     Parâmetros de Query (Filtros):
-    - start_date: data de início (YYYY-MM-DD)
-    - end_date: data de fim (YYYY-MM-DD)
+    - start_date: data de início (DD-MM-YYYY)
+    - end_date: data de fim (DD-MM-YYYY)
     - status: status do pedido (pending, preparing, on_the_way, completed, cancelled)
     - sort_by: ordenação (date_desc, date_asc)
     """
@@ -204,18 +253,16 @@ def generate_orders_pdf():
         filters = {}
         
         if request.args.get('start_date'):
-            start_date = request.args.get('start_date')
-            is_valid_format, format_msg = is_valid_date_format(start_date)
-            if not is_valid_format:
-                return jsonify({"error": f"Data de início inválida: {format_msg}"}), 400
-            filters['start_date'] = convert_br_date_to_iso(start_date)
+            date_iso, error = process_date_filter(request.args.get('start_date'), 'Data de início')
+            if error:
+                return jsonify({"error": error}), 400
+            filters['start_date'] = date_iso
             
         if request.args.get('end_date'):
-            end_date = request.args.get('end_date')
-            is_valid_format, format_msg = is_valid_date_format(end_date)
-            if not is_valid_format:
-                return jsonify({"error": f"Data de fim inválida: {format_msg}"}), 400
-            filters['end_date'] = convert_br_date_to_iso(end_date)
+            date_iso, error = process_date_filter(request.args.get('end_date'), 'Data de fim')
+            if error:
+                return jsonify({"error": error}), 400
+            filters['end_date'] = date_iso
             
         if request.args.get('status'):
             filters['status'] = request.args.get('status')
@@ -249,8 +296,8 @@ def generate_detailed_sales_pdf():
     Gera relatório de vendas detalhado com gráficos e análises
     
     Body (JSON):
-    - start_date: data de início (YYYY-MM-DD) - opcional
-    - end_date: data de fim (YYYY-MM-DD) - opcional
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
     - order_type: tipo de pedido (delivery, pickup, on_site) - opcional
     - payment_method: método de pagamento - opcional
     - status: status do pedido - opcional
@@ -260,8 +307,13 @@ def generate_detailed_sales_pdf():
     try:
         filters = request.get_json() or {}
         
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
         # Gera o PDF
-        pdf_content = advanced_reports_service.generate_detailed_sales_report(filters)
+        pdf_content = advanced_reports_service.generate_detailed_sales_report(processed_filters)
         
         # Retorna o PDF como resposta
         response = Response(
@@ -285,8 +337,8 @@ def generate_orders_performance_pdf():
     Gera relatório de performance de pedidos
     
     Body (JSON):
-    - start_date: data de início (YYYY-MM-DD) - opcional
-    - end_date: data de fim (YYYY-MM-DD) - opcional
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
     - attendant_id: ID do atendente - opcional
     - deliverer_id: ID do entregador - opcional
     - status: status do pedido - opcional
@@ -295,8 +347,13 @@ def generate_orders_performance_pdf():
     try:
         filters = request.get_json() or {}
         
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
         # Gera o PDF
-        pdf_content = advanced_reports_service.generate_orders_performance_report(filters)
+        pdf_content = advanced_reports_service.generate_orders_performance_report(processed_filters)
         
         # Retorna o PDF como resposta
         response = Response(
@@ -320,8 +377,8 @@ def generate_products_analysis_pdf():
     Gera relatório de análise de produtos
     
     Body (JSON):
-    - start_date: data de início (YYYY-MM-DD) - opcional
-    - end_date: data de fim (YYYY-MM-DD) - opcional
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
     - category_id: ID da categoria - opcional
     - product_id: ID do produto - opcional
     - price_min: preço mínimo - opcional
@@ -331,8 +388,13 @@ def generate_products_analysis_pdf():
     try:
         filters = request.get_json() or {}
         
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
         # Gera o PDF
-        pdf_content = advanced_reports_service.generate_products_analysis_report(filters)
+        pdf_content = advanced_reports_service.generate_products_analysis_report(processed_filters)
         
         # Retorna o PDF como resposta
         response = Response(
@@ -356,8 +418,8 @@ def generate_complete_financial_pdf():
     Gera relatório financeiro completo com gráficos e análises
     
     Body (JSON):
-    - start_date: data de início (YYYY-MM-DD) - opcional
-    - end_date: data de fim (YYYY-MM-DD) - opcional
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
     - type: tipo de movimentação (REVENUE, EXPENSE, CMV, TAX) - opcional
     - category: categoria - opcional
     - payment_status: status de pagamento (Pending, Paid) - opcional
@@ -366,8 +428,13 @@ def generate_complete_financial_pdf():
     try:
         filters = request.get_json() or {}
         
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
         # Gera o PDF
-        pdf_content = advanced_reports_service.generate_complete_financial_report(filters)
+        pdf_content = advanced_reports_service.generate_complete_financial_report(processed_filters)
         
         # Retorna o PDF como resposta
         response = Response(
@@ -391,16 +458,21 @@ def generate_cmv_pdf():
     Gera relatório de CMV (Custo das Mercadorias Vendidas)
     
     Body (JSON):
-    - start_date: data de início (YYYY-MM-DD) - opcional
-    - end_date: data de fim (YYYY-MM-DD) - opcional
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
     - category_id: ID da categoria - opcional
     - product_id: ID do produto - opcional
     """
     try:
         filters = request.get_json() or {}
         
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
         # Gera o PDF
-        pdf_content = advanced_reports_service.generate_cmv_report_pdf(filters)
+        pdf_content = advanced_reports_service.generate_cmv_report_pdf(processed_filters)
         
         # Retorna o PDF como resposta
         response = Response(
@@ -424,16 +496,21 @@ def generate_taxes_pdf():
     Gera relatório de impostos e taxas
     
     Body (JSON):
-    - start_date: data de início (YYYY-MM-DD) - opcional
-    - end_date: data de fim (YYYY-MM-DD) - opcional
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
     - category: categoria de imposto - opcional
     - status: status (Pending, Paid) - opcional
     """
     try:
         filters = request.get_json() or {}
         
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
         # Gera o PDF
-        pdf_content = advanced_reports_service.generate_taxes_report_pdf(filters)
+        pdf_content = advanced_reports_service.generate_taxes_report_pdf(processed_filters)
         
         # Retorna o PDF como resposta
         response = Response(
@@ -470,10 +547,23 @@ def generate_complete_stock_pdf():
 @pdf_reports_bp.route('/purchases', methods=['POST'])
 @require_role('admin', 'manager')
 def generate_purchases_pdf():
-    """Gera relatório de compras e fornecedores"""
+    """Gera relatório de compras e fornecedores
+    
+    Body (JSON):
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
+    - supplier: fornecedor - opcional
+    - payment_status: status de pagamento - opcional
+    """
     try:
         filters = request.get_json() or {}
-        pdf_content = advanced_reports_service.generate_purchases_report_pdf(filters)
+        
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
+        pdf_content = advanced_reports_service.generate_purchases_report_pdf(processed_filters)
         response = Response(pdf_content, mimetype='application/pdf')
         response.headers['Content-Disposition'] = 'attachment; filename=relatorio_compras.pdf'
         return response
@@ -487,10 +577,24 @@ def generate_purchases_pdf():
 @pdf_reports_bp.route('/customers/analysis', methods=['POST'])
 @require_role('admin', 'manager')
 def generate_customers_analysis_pdf():
-    """Gera relatório de análise de clientes"""
+    """Gera relatório de análise de clientes
+    
+    Body (JSON):
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
+    - region: região - opcional
+    - min_orders: pedidos mínimos - opcional
+    - min_spent: valor mínimo gasto - opcional
+    """
     try:
         filters = request.get_json() or {}
-        pdf_content = advanced_reports_service.generate_customers_analysis_report_pdf(filters)
+        
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
+        pdf_content = advanced_reports_service.generate_customers_analysis_report_pdf(processed_filters)
         response = Response(pdf_content, mimetype='application/pdf')
         response.headers['Content-Disposition'] = 'attachment; filename=relatorio_analise_clientes.pdf'
         return response
@@ -504,10 +608,22 @@ def generate_customers_analysis_pdf():
 @pdf_reports_bp.route('/loyalty', methods=['POST'])
 @require_role('admin', 'manager')
 def generate_loyalty_pdf():
-    """Gera relatório de programa de fidelidade"""
+    """Gera relatório de programa de fidelidade
+    
+    Body (JSON):
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
+    - user_id: ID do usuário - opcional
+    """
     try:
         filters = request.get_json() or {}
-        pdf_content = advanced_reports_service.generate_loyalty_report_pdf(filters)
+        
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
+        pdf_content = advanced_reports_service.generate_loyalty_report_pdf(processed_filters)
         response = Response(pdf_content, mimetype='application/pdf')
         response.headers['Content-Disposition'] = 'attachment; filename=relatorio_fidelidade.pdf'
         return response
@@ -521,10 +637,23 @@ def generate_loyalty_pdf():
 @pdf_reports_bp.route('/tables', methods=['POST'])
 @require_role('admin', 'manager')
 def generate_tables_pdf():
-    """Gera relatório de mesas e salão"""
+    """Gera relatório de mesas e salão
+    
+    Body (JSON):
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
+    - table_id: ID da mesa - opcional
+    - attendant_id: ID do atendente - opcional
+    """
     try:
         filters = request.get_json() or {}
-        pdf_content = advanced_reports_service.generate_tables_report_pdf(filters)
+        
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
+        pdf_content = advanced_reports_service.generate_tables_report_pdf(processed_filters)
         response = Response(pdf_content, mimetype='application/pdf')
         response.headers['Content-Disposition'] = 'attachment; filename=relatorio_mesas.pdf'
         return response
@@ -538,10 +667,21 @@ def generate_tables_pdf():
 @pdf_reports_bp.route('/executive/dashboard', methods=['POST'])
 @require_role('admin', 'manager')
 def generate_executive_dashboard_pdf():
-    """Gera dashboard executivo"""
+    """Gera dashboard executivo
+    
+    Body (JSON):
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
+    """
     try:
         filters = request.get_json() or {}
-        pdf_content = advanced_reports_service.generate_executive_dashboard_pdf(filters)
+        
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
+        pdf_content = advanced_reports_service.generate_executive_dashboard_pdf(processed_filters)
         response = Response(pdf_content, mimetype='application/pdf')
         response.headers['Content-Disposition'] = 'attachment; filename=dashboard_executivo.pdf'
         return response
@@ -555,10 +695,24 @@ def generate_executive_dashboard_pdf():
 @pdf_reports_bp.route('/financial/reconciliation', methods=['POST'])
 @require_role('admin', 'manager')
 def generate_reconciliation_pdf():
-    """Gera relatório de conciliação bancária"""
+    """Gera relatório de conciliação bancária
+    
+    Body (JSON):
+    - start_date: data de início (DD-MM-YYYY) - opcional
+    - end_date: data de fim (DD-MM-YYYY) - opcional
+    - payment_gateway: gateway de pagamento - opcional
+    - bank_account: conta bancária - opcional
+    - reconciled: conciliação realizada (true/false) - opcional
+    """
     try:
         filters = request.get_json() or {}
-        pdf_content = advanced_reports_service.generate_reconciliation_report_pdf(filters)
+        
+        # Processa datas do body JSON
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        
+        pdf_content = advanced_reports_service.generate_reconciliation_report_pdf(processed_filters)
         response = Response(pdf_content, mimetype='application/pdf')
         response.headers['Content-Disposition'] = 'attachment; filename=relatorio_conciliacao.pdf'
         return response
@@ -1136,8 +1290,15 @@ def test_report_direct(report_type):
             from datetime import datetime, timedelta
             end_date = datetime.now()
             start_date = end_date - timedelta(days=30)
-            filters['start_date'] = start_date.strftime('%Y-%m-%d')
-            filters['end_date'] = end_date.strftime('%Y-%m-%d')
+            # Converte para formato brasileiro (DD-MM-YYYY)
+            filters['start_date'] = start_date.strftime('%d-%m-%Y')
+            filters['end_date'] = end_date.strftime('%d-%m-%Y')
+        
+        # Processa datas do body JSON ou query string
+        processed_filters, error = process_filters_with_dates(filters)
+        if error:
+            return jsonify({"error": error}), 400
+        filters = processed_filters
         
         # Importar e chamar função
         func = getattr(advanced_reports_service, function_name)

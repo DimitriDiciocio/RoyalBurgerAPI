@@ -358,6 +358,8 @@ class BaseReportPDF(FPDF):
             'order_type': 'Tipo de pedido',
             'payment_method': 'Método de pagamento',
             'status': 'Status',
+            'role': 'Cargo',
+            'stock_status': 'Status do Estoque',
             'customer_id': 'Cliente',
             'product_id': 'Produto',
             'category_id': 'Categoria',
@@ -366,6 +368,24 @@ class BaseReportPDF(FPDF):
             'type': 'Tipo',
             'category': 'Categoria',
             'payment_status': 'Status de pagamento',
+            'sort_by': 'Ordenação',
+            'attendant_id': 'Atendente',
+            'deliverer_id': 'Entregador',
+            'table_id': 'Mesa',
+            'supplier': 'Fornecedor',
+            'reconciled': 'Conciliação',
+            'include_inactive': 'Incluir inativos',
+            'created_after': 'Criado após',
+            'created_before': 'Criado antes',
+            'search': 'Busca',
+            'name': 'Nome',
+            'section_id': 'Seção',
+            'region': 'Região',
+            'min_orders': 'Pedidos mínimos',
+            'min_spent': 'Valor mínimo gasto',
+            'user_id': 'Usuário',
+            'payment_gateway': 'Gateway de pagamento',
+            'bank_account': 'Conta bancária',
         }
         return labels.get(key, key.replace('_', ' ').title())
     
@@ -399,8 +419,23 @@ class BaseReportPDF(FPDF):
             }
             return type_map.get(str(value).lower(), str(value).title())
         
+        # Formata cargo (role)
+        if key == 'role':
+            role_map = {
+                'admin': 'Administrador',
+                'manager': 'Gerente',
+                'attendant': 'Atendente',
+                'delivery': 'Entregador',
+                'customer': 'Cliente'
+            }
+            return role_map.get(str(value).lower(), str(value).title())
+        
         # Formata status
         if key == 'status':
+            # Trata boolean (True/False) para status de usuário
+            if isinstance(value, bool):
+                return 'Ativo' if value else 'Inativo'
+            
             status_map = {
                 'pending': 'Pendente',
                 'confirmed': 'Confirmado',
@@ -430,6 +465,50 @@ class BaseReportPDF(FPDF):
         if key == 'payment_status':
             return 'Pago' if str(value).lower() == 'paid' else 'Pendente'
         
+        # Formata status de estoque
+        if key == 'stock_status':
+            stock_status_map = {
+                'ok': 'OK',
+                'low': 'Estoque Baixo',
+                'out_of_stock': 'Sem Estoque',
+                'unavailable': 'Indisponível',
+                'available': 'Disponível',
+                'overstock': 'Estoque Alto'
+            }
+            return stock_status_map.get(str(value).lower(), str(value).title())
+        
+        # Formata tipo de movimentação financeira
+        if key == 'type':
+            type_map = {
+                'revenue': 'Receita',
+                'expense': 'Despesa',
+                'cmv': 'CMV',
+                'tax': 'Imposto'
+            }
+            # Aceita tanto minúsculas quanto maiúsculas
+            value_upper = str(value).upper()
+            if value_upper in ['REVENUE', 'EXPENSE', 'CMV', 'TAX']:
+                type_map_upper = {
+                    'REVENUE': 'Receita',
+                    'EXPENSE': 'Despesa',
+                    'CMV': 'CMV',
+                    'TAX': 'Imposto'
+                }
+                return type_map_upper.get(value_upper, str(value))
+            return type_map.get(str(value).lower(), str(value).title())
+        
+        # Formata ordenação
+        if key == 'sort_by':
+            sort_map = {
+                'date_desc': 'Data (Mais Recente)',
+                'date_asc': 'Data (Mais Antiga)',
+                'price_desc': 'Preço (Maior)',
+                'price_asc': 'Preço (Menor)',
+                'name_asc': 'Nome (A-Z)',
+                'name_desc': 'Nome (Z-A)'
+            }
+            return sort_map.get(str(value).lower(), str(value).replace('_', ' ').title())
+        
         # Formata valores monetários
         if 'price' in key.lower() or 'min' in key.lower() or 'max' in key.lower():
             try:
@@ -437,6 +516,10 @@ class BaseReportPDF(FPDF):
                 return f'R$ {value_float:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
             except:
                 return str(value)
+        
+        # Formata boolean genérico (reconciled, include_inactive, etc) - apenas se não foi tratado antes
+        if isinstance(value, bool):
+            return 'Sim' if value else 'Não'
         
         return str(value)
             
@@ -921,6 +1004,18 @@ class UsersReportPDF(BaseReportPDF):
     
     def __init__(self):
         super().__init__("Relatório de Usuários do Sistema")
+    
+    def _translate_role(self, role):
+        """Traduz o role do inglês para português"""
+        role_translations = {
+            'admin': 'Administrador',
+            'manager': 'Gerente',
+            'attendant': 'Atendente',
+            'delivery': 'Entregador',
+            'customer': 'Cliente',
+            'N/A': 'Não informado'
+        }
+        return role_translations.get(role, role.capitalize() if role else 'Não informado')
         
     def generate_report(self, users_data, filters=None, summary=None):
         """Gera o relatório completo de usuários"""
@@ -936,18 +1031,29 @@ class UsersReportPDF(BaseReportPDF):
             
         # Cabeçalhos da tabela
         headers = ['ID', 'Nome Completo', 'Email', 'CPF', 'Cargo', 'Status', 'Data Criação']
-        col_widths = [15, 50, 50, 25, 20, 15, 25]
+        col_widths = [15, 50, 50, 25, 30, 15, 25]  # Aumentado Cargo de 20 para 30 para caber "Administrador"
         
         # Prepara dados para a tabela
         table_data = []
         for user in users_data:
+            # CPF: se for nulo/vazio, deixa em branco
+            cpf = user.get('cpf', '') or ''
+            cpf_display = '' if not cpf or cpf == 'N/A' else cpf
+            
+            # Traduz role para português
+            role = user.get('role', '')
+            role_display = self._translate_role(role)
+            
+            # Status já está em português (Ativo/Inativo)
+            status = 'Ativo' if user.get('is_active', True) else 'Inativo'
+            
             table_data.append([
                 user.get('id', ''),
                 user.get('full_name', ''),
                 user.get('email', ''),
-                user.get('cpf', '') or 'N/A',
-                user.get('role', ''),
-                'Ativo' if user.get('is_active', True) else 'Inativo',
+                cpf_display,
+                role_display,
+                status,
                 user.get('created_at', '')[:10] if user.get('created_at') else 'N/A'
             ])
             
@@ -1679,7 +1785,7 @@ class TaxesReportPDF(BaseReportPDF):
             self.cell(0, 8, 'Impostos Recorrentes', 0, 1, 'L')
             self.ln(2)
             
-            headers = ['Nome', 'Valor', 'Frequência', 'Status']
+            headers = ['Nome', 'Valor', 'Dia Pagamento', 'Status']
             col_widths = [80, 40, 40, 30]
             self.set_font('Arial', 'B', 10)
             for i, header in enumerate(headers):
@@ -1688,9 +1794,11 @@ class TaxesReportPDF(BaseReportPDF):
             
             self.set_font('Arial', '', 9)
             for item in recurring_taxes:
+                payment_day = item.get('payment_day', 0)
+                payment_day_str = f'Dia {payment_day}' if payment_day > 0 else 'N/A'
                 self.cell(col_widths[0], 6, str(item.get('name', 'N/A'))[:35], 1, 0, 'L')
                 self.cell(col_widths[1], 6, format_currency(item.get('amount', 0)), 1, 0, 'R')
-                self.cell(col_widths[2], 6, str(item.get('frequency', 'N/A'))[:15], 1, 0, 'C')
+                self.cell(col_widths[2], 6, payment_day_str[:15], 1, 0, 'C')
                 self.cell(col_widths[3], 6, 'Ativo' if item.get('is_active') else 'Inativo', 1, 0, 'C')
                 self.ln()
             self.ln(5)
@@ -1945,17 +2053,21 @@ class CustomersAnalysisReportPDF(BaseReportPDF):
             self.set_font('Arial', '', 9)
             for item in top_customers[:50]:
                 name = str(item.get('name', 'N/A'))[:30]
+                days_since = item.get('days_since_last_order')
+                days_str = 'Nunca' if days_since is None else str(days_since)
                 self.cell(col_widths[0], 6, name, 1, 0, 'L')
                 self.cell(col_widths[1], 6, str(item.get('total_orders', 0)), 1, 0, 'C')
                 self.cell(col_widths[2], 6, format_currency(item.get('total_spent', 0)), 1, 0, 'R')
                 self.cell(col_widths[3], 6, format_currency(item.get('avg_ticket', 0)), 1, 0, 'R')
-                self.cell(col_widths[4], 6, str(item.get('days_since_last_order', 0)), 1, 0, 'C')
+                self.cell(col_widths[4], 6, days_str, 1, 0, 'C')
                 self.ln()
             self.ln(5)
         
         # Clientes inativos
+        # CORREÇÃO: Garantir que inactive_customers é uma lista, não um int do summary
         inactive = report_data.get('inactive_customers', [])
-        if inactive:
+        # Verificar se é uma lista (não o int do summary)
+        if isinstance(inactive, list) and len(inactive) > 0:
             self.set_font('Arial', 'B', 12)
             self.cell(0, 8, 'Clientes Inativos (Último pedido há mais de 30 dias)', 0, 1, 'L')
             self.ln(2)
@@ -2154,7 +2266,8 @@ class ExecutiveDashboardPDF(BaseReportPDF):
         if summary and summary.get('low_stock_alerts', 0) > 0:
             self.set_font('Arial', 'B', 12)
             self.set_text_color(255, 0, 0)
-            self.cell(0, 8, f'⚠ ALERTA: {summary.get("low_stock_alerts", 0)} ingredientes com estoque baixo', 0, 1, 'L')
+            # CORREÇÃO: Remover emoji "⚠" que não é suportado pela fonte Helvetica
+            self.cell(0, 8, f'[ALERTA] {summary.get("low_stock_alerts", 0)} ingredientes com estoque baixo', 0, 1, 'L')
             self.set_text_color(0, 0, 0)
             self.ln(2)
         

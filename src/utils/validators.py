@@ -53,17 +53,23 @@ def is_valid_phone(phone: str) -> (bool, str):
 
 def is_valid_date_format(date_string: str) -> (bool, str):
     """
-    Valida se a string de data está em formato válido (DD-MM-AAAA)
+    Valida se a string de data está em formato válido
+    Aceita: DD-MM-YYYY (brasileiro) ou YYYY-MM-DD (ISO)
     """
     if not date_string or not isinstance(date_string, str):
         return (False, "Data não pode estar em branco.")
     
     try:
-        # Tenta fazer o parse da data no formato brasileiro
+        # Tenta fazer o parse da data no formato brasileiro (DD-MM-YYYY)
         parsed_date = datetime.strptime(date_string, '%d-%m-%Y').date()
         return (True, "Formato de data válido.")
     except ValueError:
-        return (False, "Formato de data inválido. Use DD-MM-AAAA.")
+        try:
+            # Tenta fazer o parse da data no formato ISO (YYYY-MM-DD)
+            parsed_date = datetime.strptime(date_string, '%Y-%m-%d').date()
+            return (True, "Formato de data válido.")
+        except ValueError:
+            return (False, "Formato de data inválido. Use DD-MM-YYYY ou YYYY-MM-DD.")
 
 
 def is_valid_date(date_string: str) -> (bool, str):
@@ -153,26 +159,37 @@ def is_age_valid(date_string: str, min_age: int = 18, max_age: int = None) -> (b
 def is_date_in_range(date_string: str, min_date: str = None, max_date: str = None) -> (bool, str):
     """
     Valida se a data está dentro de um intervalo específico
+    Aceita datas em formato brasileiro (DD-MM-YYYY) ou ISO (YYYY-MM-DD)
     """
     if not date_string or not isinstance(date_string, str):
         return (False, "Data não pode estar em branco.")
     
+    def parse_date(date_str):
+        """Tenta parsear data em ambos os formatos"""
+        try:
+            return datetime.strptime(date_str, '%d-%m-%Y').date()
+        except ValueError:
+            try:
+                return datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                raise ValueError(f"Formato de data inválido: {date_str}")
+    
     try:
-        parsed_date = datetime.strptime(date_string, '%d-%m-%Y').date()
+        parsed_date = parse_date(date_string)
         
         if min_date:
-            min_parsed = datetime.strptime(min_date, '%d-%m-%Y').date()
+            min_parsed = parse_date(min_date)
             if parsed_date < min_parsed:
                 return (False, f"Data deve ser posterior ou igual a {min_date}.")
         
         if max_date:
-            max_parsed = datetime.strptime(max_date, '%d-%m-%Y').date()
+            max_parsed = parse_date(max_date)
             if parsed_date > max_parsed:
                 return (False, f"Data deve ser anterior ou igual a {max_date}.")
         
         return (True, "Data dentro do intervalo válido.")
-    except ValueError:
-        return (False, "Data inválida.")
+    except ValueError as e:
+        return (False, f"Data inválida: {str(e)}")
 
 
 def validate_birth_date(date_string: str) -> (bool, str):
@@ -211,16 +228,23 @@ def validate_birth_date(date_string: str) -> (bool, str):
 
 def convert_br_date_to_iso(date_string: str) -> str:
     """
-    Converte data do formato brasileiro (DD-MM-AAAA) para ISO (AAAA-MM-DD)
+    Converte data para formato ISO (YYYY-MM-DD)
+    Aceita entrada em formato brasileiro (DD-MM-YYYY) ou ISO (YYYY-MM-DD)
     """
     if not date_string:
         return None
     
     try:
+        # Tenta formato brasileiro primeiro (DD-MM-YYYY)
         parsed_date = datetime.strptime(date_string, '%d-%m-%Y').date()
         return parsed_date.strftime('%Y-%m-%d')
     except ValueError:
-        return None
+        try:
+            # Se falhar, tenta formato ISO (já está no formato correto)
+            parsed_date = datetime.strptime(date_string, '%Y-%m-%d').date()
+            return parsed_date.strftime('%Y-%m-%d')
+        except ValueError:
+            return None
 
 
 def convert_iso_date_to_br(date_string: str) -> str:

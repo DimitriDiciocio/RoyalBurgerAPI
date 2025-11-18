@@ -60,22 +60,24 @@ def generate_cmv_report(filters=None):
                      "fm.MOVEMENT_DATE >= ?", "fm.MOVEMENT_DATE < ?"]
         params = [start_datetime, end_datetime]
         
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                SUM(fm."VALUE") as total_cmv,
-                COUNT(*) as total_movements
+                CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_cmv,
+                CAST(COUNT(*) AS INTEGER) as total_movements
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {' AND '.join(conditions)}
         """, tuple(params))
         
         cmv_row = cur.fetchone()
-        total_cmv = float(cmv_row[0] or 0)
-        total_movements = cmv_row[1] or 0
+        total_cmv = float(cmv_row[0] or 0) if cmv_row and cmv_row[0] is not None else 0.0
+        total_movements = int(cmv_row[1] or 0) if cmv_row and cmv_row[1] is not None else 0
         
         # 2. CMV POR CATEGORIA DE INGREDIENTE
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   SUM(fm."VALUE") as total_cmv
+                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_cmv
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {' AND '.join(conditions)}
             GROUP BY fm.CATEGORY
@@ -86,7 +88,7 @@ def generate_cmv_report(filters=None):
         for row in cur.fetchall():
             cmv_by_category.append({
                 'category': row[0] or 'N/A',
-                'total': float(row[1] or 0)
+                'total': float(row[1] or 0) if row[1] is not None else 0.0
             })
         
         # 3. CMV POR PRODUTO (via ORDER_ITEMS)
@@ -98,13 +100,14 @@ def generate_cmv_report(filters=None):
             product_params.append(validated_filters['product_id'])
         
         if validated_filters.get('category_id'):
-            product_conditions.append("p.SECTION_ID = ?")
+            product_conditions.append("p.CATEGORY_ID = ?")
             product_params.append(validated_filters['category_id'])
         
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT p.NAME,
-                   SUM(oi.QUANTITY) as total_quantity,
-                   SUM(oi.QUANTITY * p.COST_PRICE) as total_cmv
+                   CAST(COALESCE(SUM(oi.QUANTITY), 0) AS INTEGER) as total_quantity,
+                   CAST(COALESCE(SUM(oi.QUANTITY * COALESCE(p.COST_PRICE, 0)), 0) AS NUMERIC(18,2)) as total_cmv
             FROM ORDER_ITEMS oi
             JOIN ORDERS o ON oi.ORDER_ID = o.ID
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
@@ -117,24 +120,25 @@ def generate_cmv_report(filters=None):
         cmv_by_product = []
         for row in cur.fetchall():
             cmv_by_product.append({
-                'product': row[0],
-                'quantity': int(row[1] or 0),
-                'cmv': float(row[2] or 0)
+                'product': row[0] or 'N/A',
+                'quantity': int(row[1] or 0) if row[1] is not None else 0,
+                'cmv': float(row[2] or 0) if row[2] is not None else 0.0
             })
         
         # 4. COMPARAÇÃO CMV vs RECEITA
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
             SELECT 
-                SUM(CASE WHEN fm.TYPE = 'CMV' THEN fm."VALUE" ELSE 0 END) as total_cmv,
-                SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END) as total_revenue
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'CMV' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_cmv,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (start_datetime, end_datetime))
         
         comparison_row = cur.fetchone()
-        cmv_total = float(comparison_row[0] or 0)
-        revenue_total = float(comparison_row[1] or 0)
+        cmv_total = float(comparison_row[0] or 0) if comparison_row and comparison_row[0] is not None else 0.0
+        revenue_total = float(comparison_row[1] or 0) if comparison_row and comparison_row[1] is not None else 0.0
         cmv_percentage = safe_divide(cmv_total, revenue_total, 0) * 100 if revenue_total > 0 else 0
         
         # Prepara dados para gráficos
@@ -257,21 +261,22 @@ def generate_taxes_report_data(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. TOTAL DE IMPOSTOS
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                SUM(fm."VALUE") as total_taxes,
-                COUNT(*) as total_movements,
-                SUM(CASE WHEN fm.PAYMENT_STATUS = 'Paid' THEN fm."VALUE" ELSE 0 END) as paid_taxes,
-                SUM(CASE WHEN fm.PAYMENT_STATUS = 'Pending' THEN fm."VALUE" ELSE 0 END) as pending_taxes
+                CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_taxes,
+                CAST(COUNT(*) AS INTEGER) as total_movements,
+                CAST(COALESCE(SUM(CASE WHEN fm.PAYMENT_STATUS = 'Paid' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as paid_taxes,
+                CAST(COALESCE(SUM(CASE WHEN fm.PAYMENT_STATUS = 'Pending' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_taxes
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
         
         summary_row = cur.fetchone()
-        total_taxes = float(summary_row[0] or 0)
-        total_movements = summary_row[1] or 0
-        paid_taxes = float(summary_row[2] or 0)
-        pending_taxes = float(summary_row[3] or 0)
+        total_taxes = float(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0.0
+        total_movements = int(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0
+        paid_taxes = float(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0.0
+        pending_taxes = float(summary_row[3] or 0) if summary_row and summary_row[3] is not None else 0.0
         
         # 2. IMPOSTOS POR CATEGORIA
         # CORREÇÃO: "count" é palavra reservada, usar alias diferente
@@ -294,8 +299,9 @@ def generate_taxes_report_data(filters=None):
             })
         
         # 3. IMPOSTOS RECORRENTES (RECURRING_TAXES)
+        # CORREÇÃO: A coluna é "VALUE", não AMOUNT. Também não há coluna FREQUENCY, mas há PAYMENT_DAY
         cur.execute("""
-            SELECT rt.NAME, rt.AMOUNT, rt.FREQUENCY, rt.IS_ACTIVE
+            SELECT rt.NAME, rt."VALUE", rt.PAYMENT_DAY, rt.IS_ACTIVE
             FROM RECURRING_TAXES rt
             ORDER BY rt.IS_ACTIVE DESC, rt.NAME
         """)
@@ -304,14 +310,15 @@ def generate_taxes_report_data(filters=None):
         for row in cur.fetchall():
             recurring_taxes.append({
                 'name': row[0] or 'N/A',
-                'amount': float(row[1] or 0),
-                'frequency': row[2] or 'N/A',
-                'is_active': bool(row[3])
+                'amount': float(row[1] or 0) if row[1] is not None else 0.0,
+                'payment_day': int(row[2] or 0) if row[2] is not None else 0,
+                'is_active': bool(row[3]) if row[3] is not None else False
             })
         
         # 4. IMPACTO NA RECEITA
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT SUM(fm."VALUE") as total_revenue
+            SELECT CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.TYPE = 'REVENUE'
             AND fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
@@ -319,7 +326,7 @@ def generate_taxes_report_data(filters=None):
         """, (start_datetime, end_datetime))
         
         revenue_row = cur.fetchone()
-        total_revenue = float(revenue_row[0] or 0)
+        total_revenue = float(revenue_row[0] or 0) if revenue_row and revenue_row[0] is not None else 0.0
         tax_impact = safe_divide(total_taxes, total_revenue, 0) * 100 if total_revenue > 0 else 0
         
         # Prepara dados para gráficos

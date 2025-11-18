@@ -78,23 +78,24 @@ def generate_complete_stock_report_data(filters=None):
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         
         # 1. RESUMO DE ESTOQUE
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(*) as total_ingredients,
-                SUM(i.CURRENT_STOCK * i.PRICE) as total_value,
-                COUNT(CASE WHEN i.STOCK_STATUS = 'out_of_stock' THEN 1 END) as out_of_stock,
-                COUNT(CASE WHEN i.STOCK_STATUS = 'low' THEN 1 END) as low_stock,
-                COUNT(CASE WHEN i.STOCK_STATUS = 'ok' THEN 1 END) as ok_stock
+                CAST(COUNT(*) AS INTEGER) as total_ingredients,
+                CAST(COALESCE(SUM(i.CURRENT_STOCK * i.PRICE), 0) AS NUMERIC(18,2)) as total_value,
+                CAST(COUNT(CASE WHEN i.STOCK_STATUS = 'out_of_stock' THEN 1 END) AS INTEGER) as out_of_stock,
+                CAST(COUNT(CASE WHEN i.STOCK_STATUS = 'low' THEN 1 END) AS INTEGER) as low_stock,
+                CAST(COUNT(CASE WHEN i.STOCK_STATUS = 'ok' THEN 1 END) AS INTEGER) as ok_stock
             FROM INGREDIENTS i
             WHERE {where_clause}
         """, tuple(params))
         
         summary_row = cur.fetchone()
-        total_ingredients = summary_row[0] or 0
-        total_value = float(summary_row[1] or 0)
-        out_of_stock = summary_row[2] or 0
-        low_stock = summary_row[3] or 0
-        ok_stock = summary_row[4] or 0
+        total_ingredients = int(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0
+        total_value = float(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0.0
+        out_of_stock = int(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0
+        low_stock = int(summary_row[3] or 0) if summary_row and summary_row[3] is not None else 0
+        ok_stock = int(summary_row[4] or 0) if summary_row and summary_row[4] is not None else 0
         
         # 2. INGREDIENTES POR STATUS
         # CORREÇÃO: "count" é palavra reservada, usar alias diferente
@@ -118,10 +119,11 @@ def generate_complete_stock_report_data(filters=None):
         
         # 3. INGREDIENTES MAIS UTILIZADOS (via ORDER_ITEMS e ORDER_ITEM_EXTRAS)
         # Busca últimos 30 dias
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         start_date = datetime.now() - timedelta(days=30)
         cur.execute("""
             SELECT i.NAME,
-                   SUM(COALESCE(oi.QUANTITY, 0) + COALESCE(oie.QUANTITY, 0)) as total_usage
+                   CAST(COALESCE(SUM(COALESCE(oi.QUANTITY, 0) + COALESCE(oie.QUANTITY, 0)), 0) AS NUMERIC(18,2)) as total_usage
             FROM INGREDIENTS i
             LEFT JOIN PRODUCT_INGREDIENTS pi ON i.ID = pi.INGREDIENT_ID
             LEFT JOIN ORDER_ITEMS oi ON pi.PRODUCT_ID = oi.PRODUCT_ID
@@ -136,8 +138,8 @@ def generate_complete_stock_report_data(filters=None):
         most_used = []
         for row in cur.fetchall():
             most_used.append({
-                'name': row[0],
-                'usage': float(row[1] or 0)
+                'name': row[0] or 'N/A',
+                'usage': float(row[1] or 0) if row[1] is not None else 0.0
             })
         
         # 4. INGREDIENTES PARADOS (sem movimentação)
@@ -268,30 +270,32 @@ def generate_purchases_report_data(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. RESUMO DE COMPRAS
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(*) as total_invoices,
-                SUM(pi.TOTAL_AMOUNT) as total_amount,
-                AVG(pi.TOTAL_AMOUNT) as avg_amount,
-                SUM(CASE WHEN pi.PAYMENT_STATUS = 'Paid' THEN pi.TOTAL_AMOUNT ELSE 0 END) as paid_amount,
-                SUM(CASE WHEN pi.PAYMENT_STATUS = 'Pending' THEN pi.TOTAL_AMOUNT ELSE 0 END) as pending_amount
+                CAST(COUNT(*) AS INTEGER) as total_invoices,
+                CAST(COALESCE(SUM(pi.TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as total_amount,
+                CAST(COALESCE(AVG(pi.TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as avg_amount,
+                CAST(COALESCE(SUM(CASE WHEN pi.PAYMENT_STATUS = 'Paid' THEN pi.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as paid_amount,
+                CAST(COALESCE(SUM(CASE WHEN pi.PAYMENT_STATUS = 'Pending' THEN pi.TOTAL_AMOUNT ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_amount
             FROM PURCHASE_INVOICES pi
             WHERE {where_clause}
         """, tuple(params))
         
         summary_row = cur.fetchone()
-        total_invoices = summary_row[0] or 0
-        total_amount = float(summary_row[1] or 0)
-        avg_amount = float(summary_row[2] or 0)
-        paid_amount = float(summary_row[3] or 0)
-        pending_amount = float(summary_row[4] or 0)
+        total_invoices = int(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0
+        total_amount = float(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0.0
+        avg_amount = float(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0.0
+        paid_amount = float(summary_row[3] or 0) if summary_row and summary_row[3] is not None else 0.0
+        pending_amount = float(summary_row[4] or 0) if summary_row and summary_row[4] is not None else 0.0
         
         # 2. COMPRAS POR FORNECEDOR
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT pi.SUPPLIER_NAME,
-                   COUNT(*) as invoice_count,
-                   SUM(pi.TOTAL_AMOUNT) as total_amount,
-                   AVG(pi.TOTAL_AMOUNT) as avg_amount
+                   CAST(COUNT(*) AS INTEGER) as invoice_count,
+                   CAST(COALESCE(SUM(pi.TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as total_amount,
+                   CAST(COALESCE(AVG(pi.TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as avg_amount
             FROM PURCHASE_INVOICES pi
             WHERE {where_clause}
             GROUP BY pi.SUPPLIER_NAME
@@ -302,17 +306,18 @@ def generate_purchases_report_data(filters=None):
         for row in cur.fetchall():
             purchases_by_supplier.append({
                 'supplier': row[0] or 'N/A',
-                'invoice_count': row[1],
-                'total_amount': float(row[2] or 0),
-                'avg_amount': float(row[3] or 0)
+                'invoice_count': int(row[1] or 0) if row[1] is not None else 0,
+                'total_amount': float(row[2] or 0) if row[2] is not None else 0.0,
+                'avg_amount': float(row[3] or 0) if row[3] is not None else 0.0
             })
         
         # 3. ITENS MAIS COMPRADOS
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT i.NAME,
-                   SUM(pii.QUANTITY) as total_quantity,
-                   SUM(pii.TOTAL_PRICE) as total_spent,
-                   AVG(pii.UNIT_PRICE) as avg_price
+                   CAST(COALESCE(SUM(pii.QUANTITY), 0) AS NUMERIC(18,3)) as total_quantity,
+                   CAST(COALESCE(SUM(pii.TOTAL_PRICE), 0) AS NUMERIC(18,2)) as total_spent,
+                   CAST(COALESCE(AVG(pii.UNIT_PRICE), 0) AS NUMERIC(18,2)) as avg_price
             FROM PURCHASE_INVOICE_ITEMS pii
             JOIN PURCHASE_INVOICES pi ON pii.PURCHASE_INVOICE_ID = pi.ID
             JOIN INGREDIENTS i ON pii.INGREDIENT_ID = i.ID
@@ -325,10 +330,10 @@ def generate_purchases_report_data(filters=None):
         most_purchased = []
         for row in cur.fetchall():
             most_purchased.append({
-                'ingredient': row[0],
-                'quantity': float(row[1] or 0),
-                'total_spent': float(row[2] or 0),
-                'avg_price': float(row[3] or 0)
+                'ingredient': row[0] or 'N/A',
+                'quantity': float(row[1] or 0) if row[1] is not None else 0.0,
+                'total_spent': float(row[2] or 0) if row[2] is not None else 0.0,
+                'avg_price': float(row[3] or 0) if row[3] is not None else 0.0
             })
         
         # Prepara dados para gráficos
@@ -432,11 +437,13 @@ def generate_customers_analysis_report_data(filters=None):
         conditions = ["u.ROLE = 'customer'"]
         params = []
         
+        # CORREÇÃO: Filtro de região deve ser aplicado via subquery para evitar duplicação
+        region_filter = ""
         if validated_filters.get('region'):
-            conditions.append("a.CITY = ? OR a.STATE = ?")
+            region_filter = " AND EXISTS (SELECT 1 FROM ADDRESSES a WHERE a.USER_ID = u.ID AND (a.CITY = ? OR a.STATE = ?))"
             params.extend([validated_filters['region'], validated_filters['region']])
         
-        where_clause = " AND ".join(conditions)
+        where_clause = " AND ".join(conditions) + region_filter
         
         # 1. TOP 50 CLIENTES POR VALOR GASTO
         order_conditions = ["o.CREATED_AT >= ?", "o.CREATED_AT < ?", "o.STATUS NOT IN ('cancelled')"]
@@ -452,31 +459,61 @@ def generate_customers_analysis_report_data(filters=None):
         
         having_clause = []
         if validated_filters.get('min_orders'):
-            having_clause.append("COUNT(o.ID) >= ?")
+            having_clause.append("COUNT(DISTINCT o.ID) >= ?")
             order_params.append(validated_filters['min_orders'])
         
         if validated_filters.get('min_spent'):
-            having_clause.append("SUM(o.TOTAL_AMOUNT) >= ?")
-            order_params.append(validated_filters['min_spent'])
+            # CORREÇÃO: Usar subquery no HAVING para filtrar por valor gasto
+            having_clause.append("""
+                (SELECT SUM(o2.TOTAL_AMOUNT) 
+                 FROM ORDERS o2 
+                 WHERE o2.USER_ID = u.ID 
+                 AND o2.CREATED_AT >= ? 
+                 AND o2.CREATED_AT < ? 
+                 AND o2.STATUS NOT IN ('cancelled')) >= ?
+            """)
+            order_params.extend([start_datetime, end_datetime, validated_filters['min_spent']])
         
         having_sql = " HAVING " + " AND ".join(having_clause) if having_clause else ""
         
+        # CORREÇÃO: Remover JOIN com ADDRESSES para evitar duplicação de pedidos
+        # Usar COUNT(DISTINCT o.ID) para contar pedidos únicos
+        # Usar subquery para SUM para evitar duplicação quando há múltiplos endereços
         cur.execute(f"""
-            SELECT u.ID, u.FULL_NAME, u.EMAIL,
-                   COUNT(o.ID) as total_orders,
-                   SUM(o.TOTAL_AMOUNT) as total_spent,
-                   AVG(o.TOTAL_AMOUNT) as avg_ticket,
+            SELECT CAST(u.ID AS INTEGER) as user_id,
+                   CAST(u.FULL_NAME AS VARCHAR(255)) as full_name,
+                   CAST(u.EMAIL AS VARCHAR(255)) as email,
+                   CAST(COUNT(DISTINCT o.ID) AS INTEGER) as total_orders,
+                   CAST(COALESCE(
+                       (SELECT SUM(o2.TOTAL_AMOUNT) 
+                        FROM ORDERS o2 
+                        WHERE o2.USER_ID = u.ID 
+                        AND o2.CREATED_AT >= ? 
+                        AND o2.CREATED_AT < ? 
+                        AND o2.STATUS NOT IN ('cancelled')), 
+                       0
+                   ) AS NUMERIC(18,2)) as total_spent,
+                   CAST(COALESCE(
+                       (SELECT AVG(o2.TOTAL_AMOUNT) 
+                        FROM ORDERS o2 
+                        WHERE o2.USER_ID = u.ID 
+                        AND o2.CREATED_AT >= ? 
+                        AND o2.CREATED_AT < ? 
+                        AND o2.STATUS NOT IN ('cancelled')), 
+                       0
+                   ) AS NUMERIC(18,2)) as avg_ticket,
                    MAX(o.CREATED_AT) as last_order_date
             FROM USERS u
-            LEFT JOIN ORDERS o ON u.ID = o.USER_ID
-            LEFT JOIN ADDRESSES a ON u.ID = a.USER_ID
+            LEFT JOIN ORDERS o ON u.ID = o.USER_ID 
+                AND o.CREATED_AT >= ? 
+                AND o.CREATED_AT < ? 
+                AND o.STATUS NOT IN ('cancelled')
             WHERE {where_clause}
-            AND ({' AND '.join(order_conditions)} OR o.ID IS NULL)
             GROUP BY u.ID, u.FULL_NAME, u.EMAIL
             {having_sql}
             ORDER BY total_spent DESC
             ROWS 50
-        """, tuple(params + order_params))
+        """, tuple(params + order_params + order_params + order_params))
         
         top_customers = []
         for row in cur.fetchall():
@@ -484,23 +521,27 @@ def generate_customers_analysis_report_data(filters=None):
             if last_order:
                 days_since_last = (datetime.now() - last_order).days if isinstance(last_order, datetime) else 0
             else:
-                days_since_last = 999
+                # CORREÇÃO: Para clientes sem pedidos, usar None ou -1 em vez de 999
+                days_since_last = None  # Será tratado no PDF como "Nunca"
             
             top_customers.append({
-                'id': row[0],
-                'name': row[1] or 'N/A',
-                'email': row[2] or 'N/A',
-                'total_orders': row[3] or 0,
-                'total_spent': float(row[4] or 0),
-                'avg_ticket': float(row[5] or 0),
+                'id': int(row[0] or 0) if row[0] is not None else 0,
+                'name': row[1] or 'N/A' if row[1] is not None else 'N/A',
+                'email': row[2] or 'N/A' if row[2] is not None else 'N/A',
+                'total_orders': int(row[3] or 0) if row[3] is not None else 0,
+                'total_spent': float(row[4] or 0) if row[4] is not None else 0.0,
+                'avg_ticket': float(row[5] or 0) if row[5] is not None else 0.0,
                 'days_since_last_order': days_since_last
             })
         
         # 2. CLIENTES INATIVOS (último pedido há mais de 30 dias)
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT u.ID, u.FULL_NAME, u.EMAIL,
+            SELECT CAST(u.ID AS INTEGER) as user_id,
+                   CAST(u.FULL_NAME AS VARCHAR(255)) as full_name,
+                   CAST(u.EMAIL AS VARCHAR(255)) as email,
                    MAX(o.CREATED_AT) as last_order_date,
-                   COUNT(o.ID) as total_orders
+                   CAST(COUNT(o.ID) AS INTEGER) as total_orders
             FROM USERS u
             LEFT JOIN ORDERS o ON u.ID = o.USER_ID
             WHERE u.ROLE = 'customer'
@@ -513,28 +554,29 @@ def generate_customers_analysis_report_data(filters=None):
         inactive_customers = []
         for row in cur.fetchall():
             inactive_customers.append({
-                'id': row[0],
-                'name': row[1] or 'N/A',
-                'email': row[2] or 'N/A',
+                'id': int(row[0] or 0) if row[0] is not None else 0,
+                'name': row[1] or 'N/A' if row[1] is not None else 'N/A',
+                'email': row[2] or 'N/A' if row[2] is not None else 'N/A',
                 'last_order_date': row[3].isoformat() if row[3] and hasattr(row[3], 'isoformat') else str(row[3]) if row[3] else None,
-                'total_orders': row[4] or 0
+                'total_orders': int(row[4] or 0) if row[4] is not None else 0
             })
         
         # 3. RESUMO GERAL
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
             SELECT 
-                COUNT(DISTINCT u.ID) as total_customers,
-                COUNT(DISTINCT CASE WHEN o.CREATED_AT >= ? THEN u.ID END) as active_customers,
-                COUNT(DISTINCT CASE WHEN o.CREATED_AT < ? OR o.CREATED_AT IS NULL THEN u.ID END) as inactive_customers
+                CAST(COUNT(DISTINCT u.ID) AS INTEGER) as total_customers,
+                CAST(COUNT(DISTINCT CASE WHEN o.CREATED_AT >= ? THEN u.ID END) AS INTEGER) as active_customers,
+                CAST(COUNT(DISTINCT CASE WHEN o.CREATED_AT < ? OR o.CREATED_AT IS NULL THEN u.ID END) AS INTEGER) as inactive_customers
             FROM USERS u
             LEFT JOIN ORDERS o ON u.ID = o.USER_ID
             WHERE u.ROLE = 'customer'
         """, (datetime.now() - timedelta(days=30), datetime.now() - timedelta(days=30)))
         
         summary_row = cur.fetchone()
-        total_customers = summary_row[0] or 0
-        active_customers = summary_row[1] or 0
-        inactive_customers = summary_row[2] or 0
+        total_customers = int(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0
+        active_customers = int(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0
+        inactive_customers = int(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0
         
         # Prepara dados para gráficos
         chart_data = {}
@@ -630,30 +672,32 @@ def generate_loyalty_report_data(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. RESUMO DO PROGRAMA
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(DISTINCT lph.USER_ID) as total_participants,
-                SUM(CASE WHEN lph.POINTS > 0 THEN lph.POINTS ELSE 0 END) as total_earned,
-                SUM(CASE WHEN lph.POINTS < 0 THEN ABS(lph.POINTS) ELSE 0 END) as total_redeemed,
-                COUNT(CASE WHEN lph.POINTS > 0 THEN 1 END) as earn_transactions,
-                COUNT(CASE WHEN lph.POINTS < 0 THEN 1 END) as redeem_transactions
+                CAST(COUNT(DISTINCT lph.USER_ID) AS INTEGER) as total_participants,
+                CAST(COALESCE(SUM(CASE WHEN lph.POINTS > 0 THEN lph.POINTS ELSE 0 END), 0) AS NUMERIC(18,2)) as total_earned,
+                CAST(COALESCE(SUM(CASE WHEN lph.POINTS < 0 THEN ABS(lph.POINTS) ELSE 0 END), 0) AS NUMERIC(18,2)) as total_redeemed,
+                CAST(COUNT(CASE WHEN lph.POINTS > 0 THEN 1 END) AS INTEGER) as earn_transactions,
+                CAST(COUNT(CASE WHEN lph.POINTS < 0 THEN 1 END) AS INTEGER) as redeem_transactions
             FROM LOYALTY_POINTS_HISTORY lph
             WHERE {where_clause}
         """, tuple(params))
         
         summary_row = cur.fetchone()
-        total_participants = summary_row[0] or 0
-        total_earned = summary_row[1] or 0
-        total_redeemed = summary_row[2] or 0
-        earn_transactions = summary_row[3] or 0
-        redeem_transactions = summary_row[4] or 0
+        total_participants = int(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0
+        total_earned = float(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0.0
+        total_redeemed = float(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0.0
+        earn_transactions = int(summary_row[3] or 0) if summary_row and summary_row[3] is not None else 0
+        redeem_transactions = int(summary_row[4] or 0) if summary_row and summary_row[4] is not None else 0
         
         # 2. TOP PARTICIPANTES
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
-            SELECT u.FULL_NAME,
-                   SUM(CASE WHEN lph.POINTS > 0 THEN lph.POINTS ELSE 0 END) as total_earned,
-                   SUM(CASE WHEN lph.POINTS < 0 THEN ABS(lph.POINTS) ELSE 0 END) as total_redeemed,
-                   (SELECT ACCUMULATED_POINTS - SPENT_POINTS FROM LOYALTY_POINTS WHERE USER_ID = u.ID) as current_balance
+            SELECT CAST(u.FULL_NAME AS VARCHAR(255)) as full_name,
+                   CAST(COALESCE(SUM(CASE WHEN lph.POINTS > 0 THEN lph.POINTS ELSE 0 END), 0) AS NUMERIC(18,2)) as total_earned,
+                   CAST(COALESCE(SUM(CASE WHEN lph.POINTS < 0 THEN ABS(lph.POINTS) ELSE 0 END), 0) AS NUMERIC(18,2)) as total_redeemed,
+                   CAST(COALESCE((SELECT ACCUMULATED_POINTS - SPENT_POINTS FROM LOYALTY_POINTS WHERE USER_ID = u.ID), 0) AS NUMERIC(18,2)) as current_balance
             FROM LOYALTY_POINTS_HISTORY lph
             JOIN USERS u ON lph.USER_ID = u.ID
             WHERE {where_clause}
@@ -665,26 +709,27 @@ def generate_loyalty_report_data(filters=None):
         top_participants = []
         for row in cur.fetchall():
             top_participants.append({
-                'name': row[0] or 'N/A',
-                'total_earned': row[1] or 0,
-                'total_redeemed': row[2] or 0,
-                'current_balance': row[3] or 0
+                'name': row[0] or 'N/A' if row[0] is not None else 'N/A',
+                'total_earned': float(row[1] or 0) if row[1] is not None else 0.0,
+                'total_redeemed': float(row[2] or 0) if row[2] is not None else 0.0,
+                'current_balance': float(row[3] or 0) if row[3] is not None else 0.0
             })
         
         # 3. ANÁLISE DE RESGATES
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(*) as total_redemptions,
-                SUM(ABS(lph.POINTS)) as total_points_redeemed,
-                AVG(ABS(lph.POINTS)) as avg_redemption
+                CAST(COUNT(*) AS INTEGER) as total_redemptions,
+                CAST(COALESCE(SUM(ABS(lph.POINTS)), 0) AS NUMERIC(18,2)) as total_points_redeemed,
+                CAST(COALESCE(AVG(ABS(lph.POINTS)), 0) AS NUMERIC(18,2)) as avg_redemption
             FROM LOYALTY_POINTS_HISTORY lph
             WHERE {where_clause} AND lph.POINTS < 0
         """, tuple(params))
         
         redemption_row = cur.fetchone()
-        total_redemptions = redemption_row[0] or 0
-        total_points_redeemed = redemption_row[1] or 0
-        avg_redemption = float(redemption_row[2] or 0)
+        total_redemptions = int(redemption_row[0] or 0) if redemption_row and redemption_row[0] is not None else 0
+        total_points_redeemed = float(redemption_row[1] or 0) if redemption_row and redemption_row[1] is not None else 0.0
+        avg_redemption = float(redemption_row[2] or 0) if redemption_row and redemption_row[2] is not None else 0.0
         
         # Prepara dados para gráficos
         chart_data = {}
@@ -795,7 +840,7 @@ def generate_tables_report_data(filters=None):
                 COUNT(DISTINCT o.TABLE_ID) as used_tables,
                 COUNT(o.ID) as total_orders,
                 SUM(o.TOTAL_AMOUNT) as total_revenue,
-                AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60) as avg_duration
+                CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_duration
             FROM RESTAURANT_TABLES rt
             LEFT JOIN ORDERS o ON rt.ID = o.TABLE_ID
             WHERE o.CREATED_AT >= ? AND o.CREATED_AT < ? OR o.ID IS NULL
@@ -815,7 +860,7 @@ def generate_tables_report_data(filters=None):
             SELECT rt.NAME,
                    COUNT(o.ID) as order_count,
                    SUM(o.TOTAL_AMOUNT) as revenue,
-                   AVG(EXTRACT(EPOCH FROM (o.UPDATED_AT - o.CREATED_AT))/60) as avg_duration
+                   CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_duration
             FROM RESTAURANT_TABLES rt
             LEFT JOIN ORDERS o ON rt.ID = o.TABLE_ID
             WHERE {where_clause} OR o.ID IS NULL
@@ -918,44 +963,50 @@ def generate_executive_dashboard_data(filters=None):
         
         # 1. KPIs PRINCIPAIS
         # Receita
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT SUM(fm."VALUE") as total_revenue
+            SELECT CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.TYPE = 'REVENUE'
             AND fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (start_datetime, end_datetime))
         revenue_row = cur.fetchone()
-        total_revenue = float(revenue_row[0] or 0)
+        total_revenue = float(revenue_row[0] or 0) if revenue_row and revenue_row[0] is not None else 0.0
         
         # Pedidos
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT COUNT(*) as total_orders,
-                   AVG(TOTAL_AMOUNT) as avg_ticket
+            SELECT CAST(COUNT(*) AS INTEGER) as total_orders,
+                   CAST(COALESCE(AVG(TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as avg_ticket
             FROM ORDERS
             WHERE CREATED_AT >= ? AND CREATED_AT < ?
             AND STATUS NOT IN ('cancelled')
         """, (start_datetime, end_datetime))
         orders_row = cur.fetchone()
-        total_orders = orders_row[0] or 0
-        avg_ticket = float(orders_row[1] or 0)
+        total_orders = int(orders_row[0] or 0) if orders_row and orders_row[0] is not None else 0
+        avg_ticket = float(orders_row[1] or 0) if orders_row and orders_row[1] is not None else 0.0
         
         # Lucro
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
             SELECT 
-                SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END) as revenue,
-                SUM(CASE WHEN fm.TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm."VALUE" ELSE 0 END) as expenses
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
+                CAST(COALESCE(SUM(CASE WHEN fm.TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as expenses
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (start_datetime, end_datetime))
         profit_row = cur.fetchone()
-        net_profit = float(profit_row[0] or 0) - float(profit_row[1] or 0)
+        revenue = float(profit_row[0] or 0) if profit_row and profit_row[0] is not None else 0.0
+        expenses = float(profit_row[1] or 0) if profit_row and profit_row[1] is not None else 0.0
+        net_profit = revenue - expenses
         
         # 2. TOP 5 PRODUTOS
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT p.NAME,
-                   SUM(oi.QUANTITY) as total_quantity
+            SELECT CAST(p.NAME AS VARCHAR(255)) as name,
+                   CAST(COALESCE(SUM(oi.QUANTITY), 0) AS INTEGER) as total_quantity
             FROM ORDER_ITEMS oi
             JOIN ORDERS o ON oi.ORDER_ID = o.ID
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
@@ -969,14 +1020,15 @@ def generate_executive_dashboard_data(filters=None):
         top_products = []
         for row in cur.fetchall():
             top_products.append({
-                'name': row[0],
-                'quantity': int(row[1] or 0)
+                'name': row[0] or 'N/A' if row[0] is not None else 'N/A',
+                'quantity': int(row[1] or 0) if row[1] is not None else 0
             })
         
         # 3. TOP 5 CLIENTES
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT u.FULL_NAME,
-                   SUM(o.TOTAL_AMOUNT) as total_spent
+            SELECT CAST(u.FULL_NAME AS VARCHAR(255)) as full_name,
+                   CAST(COALESCE(SUM(o.TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as total_spent
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             WHERE o.CREATED_AT >= ? AND o.CREATED_AT < ?
@@ -989,18 +1041,19 @@ def generate_executive_dashboard_data(filters=None):
         top_customers = []
         for row in cur.fetchall():
             top_customers.append({
-                'name': row[0] or 'N/A',
-                'spent': float(row[1] or 0)
+                'name': row[0] or 'N/A' if row[0] is not None else 'N/A',
+                'spent': float(row[1] or 0) if row[1] is not None else 0.0
             })
         
         # 4. ALERTAS (estoque baixo)
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT COUNT(*) as low_stock_count
+            SELECT CAST(COUNT(*) AS INTEGER) as low_stock_count
             FROM INGREDIENTS
             WHERE STOCK_STATUS IN ('low', 'out_of_stock')
         """)
         alert_row = cur.fetchone()
-        low_stock_count = alert_row[0] or 0
+        low_stock_count = int(alert_row[0] or 0) if alert_row and alert_row[0] is not None else 0
         
         # 5. COMPARAÇÃO COM PERÍODO ANTERIOR
         period_days = (end_dt - start_dt).days
@@ -1010,15 +1063,16 @@ def generate_executive_dashboard_data(filters=None):
         prev_start_datetime = datetime.combine(prev_start_dt.date(), datetime.min.time()) if isinstance(prev_start_dt, date) else prev_start_dt
         prev_end_datetime = datetime.combine(prev_end_dt.date() + timedelta(days=1), datetime.min.time()) if isinstance(prev_end_dt, date) else prev_end_dt
         
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT SUM(fm."VALUE") as total_revenue
+            SELECT CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.TYPE = 'REVENUE'
             AND fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (prev_start_datetime, prev_end_datetime))
         prev_revenue_row = cur.fetchone()
-        prev_revenue = float(prev_revenue_row[0] or 0)
+        prev_revenue = float(prev_revenue_row[0] or 0) if prev_revenue_row and prev_revenue_row[0] is not None else 0.0
         
         revenue_growth = calculate_growth_percentage(total_revenue, prev_revenue)
         
@@ -1116,23 +1170,24 @@ def generate_reconciliation_report_data(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. RESUMO DE CONCILIAÇÃO
+        # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                COUNT(*) as total_movements,
-                COUNT(CASE WHEN fm.RECONCILED = 1 THEN 1 END) as reconciled_count,
-                COUNT(CASE WHEN fm.RECONCILED = 0 THEN 1 END) as pending_count,
-                SUM(CASE WHEN fm.RECONCILED = 1 THEN fm."VALUE" ELSE 0 END) as reconciled_amount,
-                SUM(CASE WHEN fm.RECONCILED = 0 THEN fm."VALUE" ELSE 0 END) as pending_amount
+                CAST(COUNT(*) AS INTEGER) as total_movements,
+                CAST(COUNT(CASE WHEN fm.RECONCILED = 1 THEN 1 END) AS INTEGER) as reconciled_count,
+                CAST(COUNT(CASE WHEN fm.RECONCILED = 0 THEN 1 END) AS INTEGER) as pending_count,
+                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = 1 THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as reconciled_amount,
+                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = 0 THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_amount
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
         
         summary_row = cur.fetchone()
-        total_movements = summary_row[0] or 0
-        reconciled_count = summary_row[1] or 0
-        pending_count = summary_row[2] or 0
-        reconciled_amount = float(summary_row[3] or 0)
-        pending_amount = float(summary_row[4] or 0)
+        total_movements = int(summary_row[0] or 0) if summary_row and summary_row[0] is not None else 0
+        reconciled_count = int(summary_row[1] or 0) if summary_row and summary_row[1] is not None else 0
+        pending_count = int(summary_row[2] or 0) if summary_row and summary_row[2] is not None else 0
+        reconciled_amount = float(summary_row[3] or 0) if summary_row and summary_row[3] is not None else 0.0
+        pending_amount = float(summary_row[4] or 0) if summary_row and summary_row[4] is not None else 0.0
         
         # 2. MOVIMENTAÇÕES PENDENTES DE CONCILIAÇÃO
         cur.execute(f"""

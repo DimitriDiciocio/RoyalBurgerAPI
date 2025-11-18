@@ -1912,25 +1912,26 @@ def get_menu_summary():
     try:  
         conn = get_db_connection()  
         cur = conn.cursor()  
-        cur.execute("SELECT COUNT(*) FROM PRODUCTS WHERE IS_ACTIVE = TRUE")  
-        total_items = cur.fetchone()[0]  
-        cur.execute("SELECT AVG(PRICE) FROM PRODUCTS WHERE IS_ACTIVE = TRUE AND PRICE > 0")  
+        # CORREÇÃO: Adicionar CASTs explícitos e COALESCE para evitar erro SQLDA -804
+        cur.execute("SELECT CAST(COUNT(*) AS INTEGER) FROM PRODUCTS WHERE IS_ACTIVE = TRUE")  
+        total_items = cur.fetchone()[0] or 0
+        cur.execute("SELECT CAST(COALESCE(AVG(PRICE), 0) AS NUMERIC(18,2)) FROM PRODUCTS WHERE IS_ACTIVE = TRUE AND PRICE > 0")  
         price_result = cur.fetchone()  
-        avg_price = float(price_result[0]) if price_result and price_result[0] else 0.0  
+        avg_price = float(price_result[0]) if price_result and price_result[0] is not None else 0.0  
         cur.execute("""
-            SELECT AVG(PRICE - COST_PRICE) 
+            SELECT CAST(COALESCE(AVG(PRICE - COST_PRICE), 0) AS NUMERIC(18,2))
             FROM PRODUCTS 
             WHERE IS_ACTIVE = TRUE AND PRICE > 0 AND COST_PRICE > 0
         """)  
         margin_result = cur.fetchone()  
-        avg_margin = float(margin_result[0]) if margin_result and margin_result[0] else 0.0  
+        avg_margin = float(margin_result[0]) if margin_result and margin_result[0] is not None else 0.0  
         cur.execute("""
-            SELECT AVG(PREPARATION_TIME_MINUTES) 
+            SELECT CAST(COALESCE(AVG(PREPARATION_TIME_MINUTES), 0) AS NUMERIC(18,2))
             FROM PRODUCTS 
             WHERE IS_ACTIVE = TRUE AND PREPARATION_TIME_MINUTES > 0
         """)  
         prep_result = cur.fetchone()  
-        avg_prep_time = float(prep_result[0]) if prep_result and prep_result[0] else 0.0  
+        avg_prep_time = float(prep_result[0]) if prep_result and prep_result[0] is not None else 0.0  
         return {  
             "total_items": total_items,
             "average_price": round(avg_price, 2),

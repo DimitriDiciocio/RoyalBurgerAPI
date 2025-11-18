@@ -780,8 +780,9 @@ def get_user_metrics(user_id):
         total_orders = order_stats[0] if order_stats and order_stats[0] else 0
         total_revenue = float(order_stats[1]) if order_stats and order_stats[1] else 0.0
         
+        # CORREÇÃO: Firebird não suporta EPOCH, usar DATEDIFF(SECOND, ...) e dividir por 60
         cur.execute("""
-            SELECT AVG(EXTRACT(EPOCH FROM (UPDATED_AT - CREATED_AT))/60) as avg_service_time
+            SELECT CAST(COALESCE(AVG(DATEDIFF(SECOND, CREATED_AT, UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_service_time
             FROM ORDERS 
             WHERE ATTENDANT_ID = ? AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
         """, (user_id,))

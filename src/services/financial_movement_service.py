@@ -209,47 +209,60 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
             should_close_conn = True
         
         # Buscar dados do pedido para calcular CMV
+        # CORREÇÃO: Incluir extras no cálculo do CMV - Query otimizada
         cur.execute("""
-            SELECT oi.PRODUCT_ID, oi.QUANTITY, oi.UNIT_PRICE
+            SELECT 
+                oi.PRODUCT_ID,
+                oi.QUANTITY,
+                -- Custo do produto (usa COST_PRICE se disponível, senão calcula pelos ingredientes)
+                COALESCE(
+                    p.COST_PRICE,
+                    (SELECT SUM(pi.PORTIONS * ing.PRICE)
+                     FROM PRODUCT_INGREDIENTS pi
+                     JOIN INGREDIENTS ing ON pi.INGREDIENT_ID = ing.ID
+                     WHERE pi.PRODUCT_ID = oi.PRODUCT_ID)
+                ) as product_cost,
+                -- Custo dos extras
+                -- NOTA: INGREDIENTS não tem COST_PRICE, usa PRICE como custo
+                COALESCE(SUM(
+                    CASE 
+                        WHEN oie.TYPE = 'extra' THEN oie.QUANTITY * COALESCE(i.PRICE, 0)
+                        WHEN oie.TYPE = 'base' AND oie.DELTA > 0 THEN oie.DELTA * COALESCE(i.PRICE, 0)
+                        ELSE 0
+                    END
+                ), 0) as extras_cost
             FROM ORDER_ITEMS oi
+            JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
+            LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
+            LEFT JOIN INGREDIENTS i ON oie.INGREDIENT_ID = i.ID
             WHERE oi.ORDER_ID = ?
+            GROUP BY oi.PRODUCT_ID, oi.QUANTITY, p.COST_PRICE
         """, (order_id,))
         
         order_items = cur.fetchall()
         if not order_items:
             return (False, None, None, "Pedido não encontrado ou sem itens")
         
-        # Calcular CMV (Custo de Mercadoria Vendida)
+        # Calcular CMV (Custo de Mercadoria Vendida) incluindo extras
         total_cmv = 0.0
         for item in order_items:
-            product_id, quantity, unit_price = item
+            product_id, quantity, product_cost, extras_cost = item
             
-            # Buscar custo dos ingredientes do produto
-            # ALTERAÇÃO: Usar COST_PRICE do produto se disponível, senão calcular pelos ingredientes
-            cur.execute("""
-                SELECT COST_PRICE
-                FROM PRODUCTS
-                WHERE ID = ?
-            """, (product_id,))
-            
-            product_cost_result = cur.fetchone()
-            if product_cost_result and product_cost_result[0] and float(product_cost_result[0]) > 0:
-                # Usar custo do produto se disponível
-                product_cost = float(product_cost_result[0])
-            else:
-                # Calcular custo baseado nos ingredientes
+            # Custo do produto
+            product_cost_float = float(product_cost or 0)
+            if product_cost_float <= 0:
+                # Se não tem COST_PRICE, calcular pelos ingredientes
                 cur.execute("""
-                    SELECT 
-                        SUM(pi.PORTIONS * i.PRICE)
+                    SELECT SUM(pi.PORTIONS * ing.PRICE)
                     FROM PRODUCT_INGREDIENTS pi
-                    JOIN INGREDIENTS i ON pi.INGREDIENT_ID = i.ID
+                    JOIN INGREDIENTS ing ON pi.INGREDIENT_ID = ing.ID
                     WHERE pi.PRODUCT_ID = ?
                 """, (product_id,))
-                
                 cost_result = cur.fetchone()
-                product_cost = float(cost_result[0] or 0) if cost_result else 0.0
+                product_cost_float = float(cost_result[0] or 0) if cost_result else 0.0
             
-            total_cmv += product_cost * quantity
+            # Custo total do item = (custo produto × quantidade) + custo extras
+            total_cmv += (product_cost_float * quantity) + float(extras_cost or 0)
         
         # Mapear método de pagamento para subcategoria
         payment_subcategory_map = {

@@ -2125,7 +2125,7 @@ def get_orders_with_filters(filters=None):
         paginated_query = f"""
             SELECT FIRST {page_size} SKIP {offset}
                 o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.TOTAL_AMOUNT,
-                u.FULL_NAME as customer_name, a.STREET, a."NUMBER"
+                o.ORDER_TYPE, u.FULL_NAME as customer_name, a.STREET, a."NUMBER"
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
@@ -2140,10 +2140,21 @@ def get_orders_with_filters(filters=None):
         
         for row in cur.fetchall():
             # Monta endereço ou exibe tipo de retirada
+            # row[0] = o.ID
+            # row[1] = o.STATUS
+            # row[2] = o.CONFIRMATION_CODE
+            # row[3] = o.CREATED_AT
+            # row[4] = o.TOTAL_AMOUNT
+            # row[5] = o.ORDER_TYPE
+            # row[6] = u.FULL_NAME (customer_name)
+            # row[7] = a.STREET
+            # row[8] = a."NUMBER"
             order_type = row[5] if row[5] else ORDER_TYPE_DELIVERY
             address_str = None
             if order_type == ORDER_TYPE_PICKUP:
                 address_str = "Retirada no balcão"
+            elif order_type == ORDER_TYPE_ON_SITE:
+                address_str = "Pedido no local"
             elif row[7] and row[8]:  # STREET e NUMBER não nulos
                 address_str = f"{row[7]}, {row[8]}"
             else:
