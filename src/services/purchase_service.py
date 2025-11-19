@@ -7,7 +7,7 @@ import fdb
 import logging
 import json
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from ..database import get_db_connection
 from . import financial_movement_service
 
@@ -128,7 +128,7 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
         elif payment_date and isinstance(payment_date, str):
             try:
                 payment_date = datetime.fromisoformat(payment_date.replace('Z', '+00:00'))
-            except:
+            except (ValueError, TypeError):
                 payment_date = datetime.now()
         elif payment_date and isinstance(payment_date, datetime):
             pass  # Já é datetime
@@ -139,7 +139,7 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
         if isinstance(purchase_date, str):
             try:
                 purchase_date = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
-            except:
+            except (ValueError, TypeError):
                 purchase_date = datetime.now()
         elif not isinstance(purchase_date, datetime):
             purchase_date = datetime.now()
@@ -150,8 +150,23 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
                 return (False, "INVALID_ITEM", "Cada item deve ter ingredient_id")
             if not item.get('quantity') or float(item.get('quantity', 0)) <= 0:
                 return (False, "INVALID_ITEM", "Cada item deve ter quantity > 0")
-            if not item.get('unit_price') or float(item.get('unit_price', 0)) <= 0:
-                return (False, "INVALID_ITEM", "Cada item deve ter unit_price > 0")
+            
+            # ALTERAÇÃO: Validar unit_price com mais rigor e mensagem de erro clara
+            unit_price_value = item.get('unit_price')
+            if not unit_price_value:
+                return (False, "INVALID_ITEM", "Cada item deve ter unit_price")
+            
+            try:
+                unit_price_float = float(unit_price_value)
+                if unit_price_float <= 0:
+                    # ALTERAÇÃO: Mensagem de erro dividida para evitar linha muito longa
+                    error_msg = (
+                        f"unit_price deve ser maior que zero (recebido: {unit_price_value}). "
+                        f"Verifique o cálculo: total_price / quantity deve resultar em valor > 0"
+                    )
+                    return (False, "INVALID_ITEM", error_msg)
+            except (ValueError, TypeError):
+                return (False, "INVALID_ITEM", f"unit_price inválido: {unit_price_value}")
         
         # 1. Inserir nota fiscal
         # ALTERAÇÃO: Firebird pode ter problemas com campos None em BLOB, construir SQL dinamicamente
@@ -277,19 +292,128 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
         created_at = invoice_row[1]
         
         # 2. Inserir itens e dar entrada no estoque
+        # ALTERAÇÃO: Otimização de performance - validar todos os ingredientes em uma única query
+        # para evitar N+1 queries quando houver muitos itens
+        ingredient_ids = [int(item['ingredient_id']) for item in invoice_data['items']]
+        if ingredient_ids:
+            # ALTERAÇÃO: Construir query de forma segura (sem SQL injection)
+            # placeholders são gerados programaticamente, não vêm de entrada do usuário
+            placeholders = ','.join(['?'] * len(ingredient_ids))
+            # ALTERAÇÃO: Usar query parametrizada para evitar SQL injection
+            query = f"SELECT ID FROM INGREDIENTS WHERE ID IN ({placeholders})"
+            cur.execute(query, ingredient_ids)
+            valid_ingredient_ids = {row[0] for row in cur.fetchall()}
+            
+            # Verificar se todos os ingredientes existem
+            invalid_ingredients = set(ingredient_ids) - valid_ingredient_ids
+            if invalid_ingredients:
+                if should_close_conn:
+                    conn.rollback()
+                return (
+                    False, 
+                    "INGREDIENT_NOT_FOUND", 
+                    f"Ingredientes não encontrados: {', '.join(map(str, invalid_ingredients))}"
+                )
+        
         for item in invoice_data['items']:
             ingredient_id = int(item['ingredient_id'])
             # ALTERAÇÃO: Converter para Decimal (Firebird DECIMAL precisa de Decimal)
-            quantity = Decimal(str(item['quantity']))
-            unit_price = Decimal(str(item['unit_price']))
-            total_price = quantity * unit_price
+            quantity = Decimal(str(item['quantity']))  # Quantidade em unidade base (2000g)
+            unit_price_raw = item['unit_price']  # unit_price na unidade de exibição (39.90 por kg)
             
-            # Verificar se ingrediente existe
-            cur.execute("SELECT ID FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
-            if not cur.fetchone():
+            # ALTERAÇÃO: Usar total_price recebido do frontend (preserva valor exato)
+            # Se não vier, calcular a partir de display_quantity e unit_price
+            total_price_raw = item.get('total_price')
+            display_quantity = item.get('display_quantity')
+            
+            # ALTERAÇÃO: Validar e converter unit_price com tratamento de erro
+            try:
+                unit_price = Decimal(str(unit_price_raw))
+            except (ValueError, TypeError) as e:
+                logger.error(f"Erro ao converter unit_price: {unit_price_raw}, erro: {e}")
                 if should_close_conn:
                     conn.rollback()
-                return (False, "INGREDIENT_NOT_FOUND", f"Ingrediente ID {ingredient_id} não encontrado")
+                return (False, "INVALID_UNIT_PRICE", f"Erro ao processar preço unitário: {unit_price_raw}")
+            
+            # ALTERAÇÃO: Arredondar apenas se tiver mais de 2 casas decimais significativas
+            # Preservar valores com 1 ou 2 casas decimais (ex: 39.9, 39.99)
+            # Primeiro, arredondar para 10 casas para eliminar imprecisão de ponto flutuante
+            unit_price_rounded_10 = unit_price.quantize(Decimal('0.0000000001'), rounding=ROUND_HALF_UP)
+            # Normalizar para remover zeros à direita e contar casas significativas
+            unit_price_normalized = unit_price_rounded_10.normalize()
+            unit_price_str = str(unit_price_normalized)
+            
+            # ALTERAÇÃO: Verificar se precisa arredondar baseado nas casas decimais significativas
+            needs_rounding = False
+            if '.' in unit_price_str:
+                # Remover zeros à direita para contar apenas casas decimais significativas
+                decimal_part = unit_price_str.split('.')[1].rstrip('0')
+                decimal_places = len(decimal_part)
+                if decimal_places > 2:
+                    # Arredondar apenas se tiver mais de 2 casas decimais significativas
+                    needs_rounding = True
+            
+            if needs_rounding:
+                # Arredondar para 2 casas decimais
+                unit_price = unit_price_rounded_10.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            else:
+                # Preservar o valor com até 2 casas decimais (39.9, 39.99, etc)
+                # Se o valor tiver exatamente 1 ou 2 casas decimais significativas, preservar
+                # Se tiver mais de 2 mas for muito próximo de um valor com 1-2 casas, também preservar
+                unit_price = unit_price_rounded_10
+            
+            # ALTERAÇÃO: Validar que unit_price > 0 após arredondamento (evitar violação de constraint)
+            if unit_price <= 0:
+                # ALTERAÇÃO: Mensagem de erro dividida para evitar linha muito longa
+                logger.error(
+                    f"unit_price inválido (<= 0) após arredondamento: {unit_price} "
+                    f"(original: {unit_price_raw}) para ingrediente {ingredient_id}"
+                )
+                if should_close_conn:
+                    conn.rollback()
+                error_msg = (
+                    f"Preço unitário deve ser maior que zero após arredondamento "
+                    f"(recebido: {unit_price_raw}, arredondado: {unit_price}). "
+                    f"O valor unitário mínimo é R$ 0,01. Verifique quantidade e valor total do item."
+                )
+                return (False, "INVALID_UNIT_PRICE", error_msg)
+            
+            # ALTERAÇÃO: Usar total_price recebido do frontend (preserva valor exato)
+            # Se não vier, calcular usando display_quantity (se disponível) ou quantity
+            if total_price_raw is not None:
+                try:
+                    total_price = Decimal(str(total_price_raw))
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Erro ao converter total_price: {total_price_raw}, erro: {e}")
+                    if should_close_conn:
+                        conn.rollback()
+                    return (False, "INVALID_TOTAL_PRICE", f"Erro ao processar valor total: {total_price_raw}")
+            elif display_quantity is not None:
+                # Calcular usando display_quantity (unidade de exibição)
+                try:
+                    display_qty = Decimal(str(display_quantity))
+                    total_price = unit_price * display_qty
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Erro ao converter display_quantity: {display_quantity}, erro: {e}")
+                    # Fallback: usar quantity (unidade base) - menos preciso
+                    total_price = quantity * unit_price
+            else:
+                # Fallback: calcular usando quantity (unidade base) - menos preciso
+                # Isso pode causar imprecisão se unit_price estiver na unidade de exibição
+                total_price = quantity * unit_price
+                logger.warning(
+                    f"Calculando total_price usando quantity (base) para ingrediente {ingredient_id}. "
+                    f"Considere enviar display_quantity ou total_price do frontend."
+                )
+            
+            # ALTERAÇÃO: Arredondar total_price para 2 casas decimais (formatação final)
+            total_price = total_price.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+            # ALTERAÇÃO: Log detalhado antes de inserir para debug
+            logger.info(
+                f"Inserindo item - ingrediente_id: {ingredient_id}, "
+                f"quantity: {quantity}, unit_price: {unit_price}, total_price: {total_price}"
+            )
             
             # Inserir item da nota fiscal
             item_sql = """
@@ -299,7 +423,23 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
                 )
                 VALUES (?, ?, ?, ?, ?)
             """
-            cur.execute(item_sql, (invoice_id, ingredient_id, quantity, unit_price, total_price))
+            try:
+                cur.execute(item_sql, (invoice_id, ingredient_id, quantity, unit_price, total_price))
+                logger.info(f"Item inserido com sucesso - ingrediente_id: {ingredient_id}")
+            except fdb.Error as db_error:
+                logger.error(f"Erro ao inserir item no banco: {db_error}")
+                # ALTERAÇÃO: Mensagem de log dividida para evitar linha muito longa
+                logger.error(
+                    f"Valores tentados: invoice_id={invoice_id}, ingredient_id={ingredient_id}, "
+                    f"quantity={quantity}, unit_price={unit_price}, total_price={total_price}"
+                )
+                logger.error(
+                    f"Tipos: quantity={type(quantity)}, unit_price={type(unit_price)}, "
+                    f"total_price={type(total_price)}"
+                )
+                if should_close_conn:
+                    conn.rollback()
+                raise
             
             # Dar entrada no estoque
             # ALTERAÇÃO: Corrigido nome do campo (CURRENT_STOCK ao invés de STOCK_QUANTITY)
@@ -412,7 +552,7 @@ def get_purchase_invoices(filters=None):
                 if isinstance(start_date, str):
                     try:
                         start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                    except:
+                    except (ValueError, TypeError):
                         pass
                 conditions.append("pi.PURCHASE_DATE >= ?")
                 params.append(start_date)
@@ -422,7 +562,7 @@ def get_purchase_invoices(filters=None):
                 if isinstance(end_date, str):
                     try:
                         end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                    except:
+                    except (ValueError, TypeError):
                         pass
                 from datetime import timedelta
                 end_date = end_date + timedelta(days=1)
@@ -579,7 +719,9 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
         user_role = user_row[0]
         
         # Verificar permissão de edição
-        allowed, error_code, message = _check_purchase_permission(invoice_id, updated_by_user_id, user_role, action='edit', cur=cur)
+        allowed, error_code, message = _check_purchase_permission(
+            invoice_id, updated_by_user_id, user_role, action='edit', cur=cur
+        )
         if not allowed:
             return (False, error_code, message)
         
@@ -632,7 +774,9 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
         # Verificar se há atualização de itens
         if 'items' in invoice_data and invoice_data['items']:
             # ALTERAÇÃO: Implementar atualização completa de itens com recálculo de estoque
-            success, error_code, result = _update_invoice_items_with_stock_recalc(invoice_id, invoice_data['items'], cur)
+            success, error_code, result = _update_invoice_items_with_stock_recalc(
+                invoice_id, invoice_data['items'], cur
+            )
             if not success:
                 if conn:
                     conn.rollback()
@@ -680,7 +824,7 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
                     if isinstance(payment_date, str):
                         try:
                             payment_date = datetime.fromisoformat(payment_date.replace('Z', '+00:00'))
-                        except:
+                        except (ValueError, TypeError):
                             payment_date = datetime.now()
                     update_fields.append("PAYMENT_DATE = ?")
                     update_values.append(payment_date)
@@ -852,7 +996,6 @@ def _update_invoice_items_with_stock_recalc(invoice_id, new_items, cur):
         
         # 2. Reverter estoque dos itens antigos
         for old_item in old_items:
-            old_item_id = old_item[0]
             old_ingredient_id = old_item[1]
             old_quantity = float(old_item[2])
             
@@ -864,7 +1007,8 @@ def _update_invoice_items_with_stock_recalc(invoice_id, new_items, cur):
             """, (old_quantity, old_ingredient_id))
             
             if cur.rowcount == 0:
-                return (False, "STOCK_REVERSAL_ERROR", f"Erro ao reverter estoque do ingrediente ID {old_ingredient_id}")
+                error_msg = f"Erro ao reverter estoque do ingrediente ID {old_ingredient_id}"
+                return (False, "STOCK_REVERSAL_ERROR", error_msg)
         
         # 3. Excluir itens antigos
         cur.execute("DELETE FROM PURCHASE_INVOICE_ITEMS WHERE PURCHASE_INVOICE_ID = ?", (invoice_id,))
@@ -875,20 +1019,125 @@ def _update_invoice_items_with_stock_recalc(invoice_id, new_items, cur):
                 return (False, "INVALID_ITEM", "Cada item deve ter ingredient_id")
             if not item.get('quantity') or float(item.get('quantity', 0)) <= 0:
                 return (False, "INVALID_ITEM", "Cada item deve ter quantity > 0")
-            if not item.get('unit_price') or float(item.get('unit_price', 0)) <= 0:
-                return (False, "INVALID_ITEM", "Cada item deve ter unit_price > 0")
+            
+            # ALTERAÇÃO: Validar unit_price com mais rigor
+            unit_price_value = item.get('unit_price')
+            if not unit_price_value:
+                return (False, "INVALID_ITEM", "Cada item deve ter unit_price")
+            try:
+                unit_price_float = float(unit_price_value)
+                if unit_price_float <= 0:
+                    return (False, "INVALID_ITEM", 
+                           f"unit_price deve ser maior que zero (recebido: {unit_price_value})")
+            except (ValueError, TypeError):
+                return (False, "INVALID_ITEM", f"unit_price inválido: {unit_price_value}")
         
         # 5. Inserir novos itens e aplicar estoque
+        # ALTERAÇÃO: Otimização de performance - validar todos os ingredientes em uma única query
+        ingredient_ids = [int(item['ingredient_id']) for item in new_items]
+        if ingredient_ids:
+            # ALTERAÇÃO: Construir query de forma segura (sem SQL injection)
+            # placeholders são gerados programaticamente, não vêm de entrada do usuário
+            placeholders = ','.join(['?'] * len(ingredient_ids))
+            # ALTERAÇÃO: Usar query parametrizada para evitar SQL injection
+            query = f"SELECT ID FROM INGREDIENTS WHERE ID IN ({placeholders})"
+            cur.execute(query, ingredient_ids)
+            valid_ingredient_ids = {row[0] for row in cur.fetchall()}
+            
+            # Verificar se todos os ingredientes existem
+            invalid_ingredients = set(ingredient_ids) - valid_ingredient_ids
+            if invalid_ingredients:
+                return (
+                    False,
+                    "INGREDIENT_NOT_FOUND",
+                    f"Ingredientes não encontrados: {', '.join(map(str, invalid_ingredients))}"
+                )
+        
         for item in new_items:
             ingredient_id = int(item['ingredient_id'])
-            quantity = float(item['quantity'])
-            unit_price = float(item['unit_price'])
-            total_price = quantity * unit_price
+            # ALTERAÇÃO: Usar Decimal ao invés de float (compatível com Firebird)
+            quantity = Decimal(str(item['quantity']))  # Quantidade em unidade base (2000g)
+            unit_price_raw = item['unit_price']  # unit_price na unidade de exibição (39.90 por kg)
             
-            # Verificar se ingrediente existe
-            cur.execute("SELECT ID FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
-            if not cur.fetchone():
-                return (False, "INGREDIENT_NOT_FOUND", f"Ingrediente ID {ingredient_id} não encontrado")
+            # ALTERAÇÃO: Usar total_price recebido do frontend (preserva valor exato)
+            # Se não vier, calcular a partir de display_quantity e unit_price
+            total_price_raw = item.get('total_price')
+            display_quantity = item.get('display_quantity')
+            
+            # ALTERAÇÃO: Converter e arredondar unit_price
+            try:
+                unit_price = Decimal(str(unit_price_raw))
+            except (ValueError, TypeError) as e:
+                logger.error(f"Erro ao converter unit_price na atualização: {unit_price_raw}, erro: {e}")
+                return (False, "INVALID_UNIT_PRICE", f"Erro ao processar preço unitário: {unit_price_raw}")
+            
+            # ALTERAÇÃO: Arredondar apenas se tiver mais de 2 casas decimais significativas
+            # Preservar valores com 1 ou 2 casas decimais (ex: 39.9, 39.99)
+            # Primeiro, arredondar para 10 casas para eliminar imprecisão de ponto flutuante
+            unit_price_rounded_10 = unit_price.quantize(Decimal('0.0000000001'), rounding=ROUND_HALF_UP)
+            # Normalizar para remover zeros à direita e contar casas significativas
+            unit_price_normalized = unit_price_rounded_10.normalize()
+            unit_price_str = str(unit_price_normalized)
+            
+            # ALTERAÇÃO: Verificar se precisa arredondar baseado nas casas decimais significativas
+            needs_rounding = False
+            if '.' in unit_price_str:
+                # Remover zeros à direita para contar apenas casas decimais significativas
+                decimal_part = unit_price_str.split('.')[1].rstrip('0')
+                decimal_places = len(decimal_part)
+                if decimal_places > 2:
+                    # Arredondar apenas se tiver mais de 2 casas decimais significativas
+                    needs_rounding = True
+            
+            if needs_rounding:
+                # Arredondar para 2 casas decimais
+                unit_price = unit_price_rounded_10.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            else:
+                # Preservar o valor com até 2 casas decimais (39.9, 39.99, etc)
+                # Se o valor tiver exatamente 1 ou 2 casas decimais significativas, preservar
+                # Se tiver mais de 2 mas for muito próximo de um valor com 1-2 casas, também preservar
+                unit_price = unit_price_rounded_10
+            
+            # ALTERAÇÃO: Validar que unit_price > 0 após arredondamento
+            if unit_price <= 0:
+                logger.error(
+                    f"unit_price inválido (<= 0) após arredondamento na atualização: "
+                    f"{unit_price} (original: {unit_price_raw})"
+                )
+                error_msg = (
+                    f"Preço unitário deve ser maior que zero após arredondamento "
+                    f"(recebido: {unit_price_raw}, arredondado: {unit_price})"
+                )
+                return (False, "INVALID_UNIT_PRICE", error_msg)
+            
+            # ALTERAÇÃO: Usar total_price recebido do frontend (preserva valor exato)
+            # Se não vier, calcular usando display_quantity (se disponível) ou quantity
+            if total_price_raw is not None:
+                try:
+                    total_price = Decimal(str(total_price_raw))
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Erro ao converter total_price na atualização: {total_price_raw}, erro: {e}")
+                    return (False, "INVALID_TOTAL_PRICE", f"Erro ao processar valor total: {total_price_raw}")
+            elif display_quantity is not None:
+                # Calcular usando display_quantity (unidade de exibição)
+                try:
+                    display_qty = Decimal(str(display_quantity))
+                    total_price = unit_price * display_qty
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Erro ao converter display_quantity na atualização: {display_quantity}, erro: {e}")
+                    # Fallback: usar quantity (unidade base) - menos preciso
+                    total_price = quantity * unit_price
+            else:
+                # Fallback: calcular usando quantity (unidade base) - menos preciso
+                # Isso pode causar imprecisão se unit_price estiver na unidade de exibição
+                total_price = quantity * unit_price
+                logger.warning(
+                    f"Calculando total_price usando quantity (base) na atualização para ingrediente {ingredient_id}. "
+                    f"Considere enviar display_quantity ou total_price do frontend."
+                )
+            
+            # ALTERAÇÃO: Arredondar total_price para 2 casas decimais (formatação final)
+            total_price = total_price.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             
             # Inserir novo item
             item_sql = """
@@ -898,7 +1147,16 @@ def _update_invoice_items_with_stock_recalc(invoice_id, new_items, cur):
                 )
                 VALUES (?, ?, ?, ?, ?)
             """
-            cur.execute(item_sql, (invoice_id, ingredient_id, quantity, unit_price, total_price))
+            try:
+                cur.execute(item_sql, (invoice_id, ingredient_id, quantity, unit_price, total_price))
+            except fdb.Error as db_error:
+                logger.error(f"Erro ao inserir item na atualização: {db_error}")
+                # ALTERAÇÃO: Mensagem de log dividida para evitar linha muito longa
+                logger.error(
+                    f"Valores tentados: invoice_id={invoice_id}, ingredient_id={ingredient_id}, "
+                    f"quantity={quantity}, unit_price={unit_price}, total_price={total_price}"
+                )
+                raise
             
             # Aplicar entrada no estoque
             cur.execute("""
@@ -945,7 +1203,9 @@ def delete_purchase_invoice(invoice_id, deleted_by_user_id):
         user_role = user_row[0]
         
         # Verificar permissão de exclusão
-        allowed, error_code, message = _check_purchase_permission(invoice_id, deleted_by_user_id, user_role, action='delete', cur=cur)
+        allowed, error_code, message = _check_purchase_permission(
+            invoice_id, deleted_by_user_id, user_role, action='delete', cur=cur
+        )
         if not allowed:
             return (False, error_code, message)
         
@@ -981,35 +1241,57 @@ def delete_purchase_invoice(invoice_id, deleted_by_user_id):
         items = cur.fetchall()
         
         # ALTERAÇÃO: Validar estoque antes de reverter
+        # ALTERAÇÃO: Otimização de performance - buscar todos os ingredientes em uma única query
+        # com IN clause para evitar N+1 queries quando houver muitos itens
         stock_validation_errors = []
-        for item in items:
-            ingredient_id = item[0]
-            quantity = float(item[1])
+        
+        if items:
+            # Extrair IDs únicos de ingredientes
+            ingredient_ids = [item[0] for item in items]
+            unique_ingredient_ids = list(set(ingredient_ids))
             
-            # Verificar estoque atual e nome do ingrediente
-            cur.execute("SELECT CURRENT_STOCK, NAME FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
-            stock_row = cur.fetchone()
-            if stock_row:
-                current_stock = float(stock_row[0])
-                ingredient_name = stock_row[1] if stock_row[1] else f"Ingrediente ID {ingredient_id}"
-                # Se estoque atual é menor que quantidade a reverter, pode causar estoque negativo
-                if current_stock < quantity:
-                    stock_validation_errors.append({
-                        'ingredient_id': ingredient_id,
-                        'ingredient_name': ingredient_name,
-                        'current_stock': current_stock,
-                        'required_reversal': quantity,
-                        'shortage': quantity - current_stock
-                    })
+            # ALTERAÇÃO: Construir query de forma segura (sem SQL injection)
+            # placeholders são gerados programaticamente, não vêm de entrada do usuário
+            placeholders = ','.join(['?'] * len(unique_ingredient_ids))
+            # ALTERAÇÃO: Usar query parametrizada para evitar SQL injection
+            query = f"SELECT ID, CURRENT_STOCK, NAME FROM INGREDIENTS WHERE ID IN ({placeholders})"
+            cur.execute(query, unique_ingredient_ids)
+            
+            # Criar dicionário para acesso rápido: {ingredient_id: (stock, name)}
+            ingredient_data_map = {
+                row[0]: (float(row[1]), row[2] if row[2] else f"Ingrediente ID {row[0]}")
+                for row in cur.fetchall()
+            }
+            
+            # Validar estoque para cada item
+            for item in items:
+                ingredient_id = item[0]
+                quantity = float(item[1])
+                
+                if ingredient_id in ingredient_data_map:
+                    current_stock, ingredient_name = ingredient_data_map[ingredient_id]
+                    # Se estoque atual é menor que quantidade a reverter, pode causar estoque negativo
+                    if current_stock < quantity:
+                        stock_validation_errors.append({
+                            'ingredient_id': ingredient_id,
+                            'ingredient_name': ingredient_name,
+                            'current_stock': current_stock,
+                            'required_reversal': quantity,
+                            'shortage': quantity - current_stock
+                        })
         
         # Se houver erros de validação, retornar com detalhes
         if stock_validation_errors:
+            # ALTERAÇÃO: Mensagem dividida para evitar linha muito longa
             error_details = "; ".join([
-                f"{err['ingredient_name']}: estoque atual ({err['current_stock']}) < quantidade a reverter ({err['required_reversal']})"
+                f"{err['ingredient_name']}: estoque atual ({err['current_stock']}) "
+                f"< quantidade a reverter ({err['required_reversal']})"
                 for err in stock_validation_errors
             ])
-            return (False, "INSUFFICIENT_STOCK", 
-                   f"Não é possível excluir: estoque insuficiente para reverter. {error_details}")
+            error_msg = (
+                f"Não é possível excluir: estoque insuficiente para reverter. {error_details}"
+            )
+            return (False, "INSUFFICIENT_STOCK", error_msg)
         
         # 2. Reverter entrada de estoque para cada item
         for item in items:
