@@ -179,7 +179,12 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
         
         try:
             cur.execute("SELECT MAX(ID) FROM PURCHASE_INVOICES")
-            max_id_before = cur.fetchone()[0] or 0
+            max_id_row = cur.fetchone()
+            # ALTERAÇÃO: Tratamento seguro para evitar erro ao acessar índice
+            if max_id_row is not None and len(max_id_row) > 0:
+                max_id_before = max_id_row[0] or 0
+            else:
+                max_id_before = 0
             logger.info(f"MAX(ID) antes do INSERT: {max_id_before}")
         except Exception as e:
             logger.error(f"Erro ao buscar MAX(ID): {e}", exc_info=True)
@@ -410,9 +415,12 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
             total_price = total_price.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             
             # ALTERAÇÃO: Log detalhado antes de inserir para debug
+            # ALTERAÇÃO: Incluir display_quantity e stock_unit para rastrear conversões
+            stock_unit_info = item.get('stock_unit', 'N/A')
             logger.info(
-                f"Inserindo item - ingrediente_id: {ingredient_id}, "
-                f"quantity: {quantity}, unit_price: {unit_price}, total_price: {total_price}"
+                f"[PURCHASE_SERVICE] Inserindo item - ingrediente_id: {ingredient_id}, "
+                f"quantity (base): {quantity}, display_quantity: {display_quantity}, "
+                f"stock_unit: {stock_unit_info}, unit_price: {unit_price}, total_price: {total_price}"
             )
             
             # Inserir item da nota fiscal
@@ -443,6 +451,12 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
             
             # Dar entrada no estoque
             # ALTERAÇÃO: Corrigido nome do campo (CURRENT_STOCK ao invés de STOCK_QUANTITY)
+            # ALTERAÇÃO: Log antes de atualizar estoque para rastrear valores
+            logger.info(
+                f"[PURCHASE_SERVICE] Atualizando estoque - ingrediente_id: {ingredient_id}, "
+                f"quantidade a adicionar: {quantity}, stock_unit: {stock_unit_info}"
+            )
+            
             cur.execute("""
                 UPDATE INGREDIENTS
                 SET CURRENT_STOCK = CURRENT_STOCK + ?
@@ -492,6 +506,19 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
                 new_values=invoice_data,
                 notes=f'Nota fiscal criada - NF {invoice_data["invoice_number"]}'
             )
+        
+        # ALTERAÇÃO: Publicar evento de compra criada para atualização em tempo real
+        try:
+            from ..utils.event_publisher import publish_event
+            publish_event('purchase.created', {
+                'invoice_id': invoice_id,
+                'supplier_name': invoice_data.get('supplier_name'),
+                'total_amount': float(total_amount),
+                'payment_status': payment_status,
+                'expense_id': expense_id
+            })
+        except Exception as e:
+            logger.warning(f"Erro ao publicar evento de compra criada: {e}")
         
         return (True, None, {
             "invoice_id": invoice_id,
@@ -772,7 +799,8 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
         update_values = []
         
         # Verificar se há atualização de itens
-        if 'items' in invoice_data and invoice_data['items']:
+        # ALTERAÇÃO: Validar que items não está vazio (lista vazia não deve processar)
+        if 'items' in invoice_data and invoice_data['items'] and len(invoice_data['items']) > 0:
             # ALTERAÇÃO: Implementar atualização completa de itens com recálculo de estoque
             success, error_code, result = _update_invoice_items_with_stock_recalc(
                 invoice_id, invoice_data['items'], cur
@@ -783,13 +811,49 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
                 return (False, error_code, result)
             
             # Recalcular total_amount baseado nos novos itens
-            cur.execute("""
-                SELECT SUM(TOTAL_PRICE) 
-                FROM PURCHASE_INVOICE_ITEMS 
-                WHERE PURCHASE_INVOICE_ID = ?
-            """, (invoice_id,))
-            total_row = cur.fetchone()
-            new_total = float(total_row[0]) if total_row and total_row[0] else 0
+            # ALTERAÇÃO: Usar CAST explícito e tratamento robusto para evitar erro -804
+            # Firebird pode ter problemas com SQLDA quando SUM retorna NULL, então forçamos tipo DECIMAL
+            try:
+                cur.execute("""
+                    SELECT CAST(COALESCE(SUM(TOTAL_PRICE), 0) AS DECIMAL(12,2)) AS TOTAL
+                    FROM PURCHASE_INVOICE_ITEMS 
+                    WHERE PURCHASE_INVOICE_ID = ?
+                """, (invoice_id,))
+                
+                # ALTERAÇÃO: Verificar se a query foi executada antes de fazer fetchone()
+                total_row = cur.fetchone()
+                
+                # ALTERAÇÃO: Tratamento robusto para evitar erro -804 (empty pointer to data)
+                if total_row is not None:
+                    try:
+                        # Tentar acessar o valor de forma segura
+                        if len(total_row) > 0:
+                            total_value = total_row[0]
+                            if total_value is not None:
+                                new_total = float(total_value)
+                            else:
+                                new_total = 0.0
+                        else:
+                            new_total = 0.0
+                    except (IndexError, TypeError, ValueError) as e:
+                        logger.warning(
+                            f"Erro ao processar total_row na atualização: {e}. "
+                            f"total_row: {total_row}. Usando 0.0 como fallback."
+                        )
+                        new_total = 0.0
+                else:
+                    logger.warning(
+                        f"total_row é None na atualização de invoice_id {invoice_id}. "
+                        f"Usando 0.0 como fallback."
+                    )
+                    new_total = 0.0
+            except fdb.Error as db_err:
+                # ALTERAÇÃO: Se houver erro na query, usar 0.0 e logar o erro
+                logger.error(
+                    f"Erro ao calcular total na atualização (invoice_id {invoice_id}): {db_err}. "
+                    f"Usando 0.0 como fallback."
+                )
+                new_total = 0.0
             update_fields.append("TOTAL_AMOUNT = ?")
             update_values.append(new_total)
             
@@ -802,9 +866,10 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
             movement_row = cur.fetchone()
             if movement_row:
                 movement_id = movement_row[0]
+                # ALTERAÇÃO: Usar "VALUE" com aspas duplas (identificador delimitado no Firebird)
                 cur.execute("""
                     UPDATE FINANCIAL_MOVEMENTS
-                    SET VALUE = ?, UPDATED_AT = ?
+                    SET "VALUE" = ?, UPDATED_AT = ?
                     WHERE ID = ?
                 """, (new_total, datetime.now(), movement_id))
         
@@ -818,7 +883,9 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
             # Se mudou para Paid, definir payment_date se não existir
             if payment_status == 'Paid':
                 cur.execute("SELECT PAYMENT_DATE FROM PURCHASE_INVOICES WHERE ID = ?", (invoice_id,))
-                current_payment_date = cur.fetchone()[0]
+                payment_date_row = cur.fetchone()
+                # ALTERAÇÃO: Tratamento seguro para evitar erro ao acessar índice
+                current_payment_date = payment_date_row[0] if payment_date_row and len(payment_date_row) > 0 else None
                 if not current_payment_date:
                     payment_date = invoice_data.get('payment_date', datetime.now())
                     if isinstance(payment_date, str):
@@ -903,6 +970,19 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
         
         # Buscar nota fiscal atualizada
         updated_invoice = get_purchase_invoice_by_id(invoice_id)
+        
+        # ALTERAÇÃO: Publicar evento de compra atualizada para atualização em tempo real
+        try:
+            from ..utils.event_publisher import publish_event
+            event_data = {
+                'invoice_id': invoice_id,
+                'payment_status': invoice_data.get('payment_status') if 'payment_status' in invoice_data else None
+            }
+            if 'payment_status' in invoice_data:
+                event_data['payment_status'] = invoice_data['payment_status']
+            publish_event('purchase.updated', event_data)
+        except Exception as e:
+            logger.warning(f"Erro ao publicar evento de compra atualizada: {e}")
         
         return (True, None, updated_invoice)
         
@@ -1322,6 +1402,22 @@ def delete_purchase_invoice(invoice_id, deleted_by_user_id):
             movement_id = movement_row[0]
             cur.execute("DELETE FROM FINANCIAL_MOVEMENTS WHERE ID = ?", (movement_id,))
         
+        # ALTERAÇÃO: Registrar auditoria de exclusão ANTES de excluir a nota fiscal
+        # Isso evita violação de chave estrangeira (FK referencia PURCHASE_INVOICES.ID)
+        # ALTERAÇÃO: Se auditoria falhar, continuar com exclusão (auditoria não é crítica)
+        try:
+            _log_audit_entry(
+                invoice_id=invoice_id,
+                action_type='DELETE',
+                changed_by=deleted_by_user_id,
+                old_values=old_values,
+                notes=f'Nota fiscal excluída - NF {old_values["invoice_number"]}',
+                cur=cur
+            )
+        except Exception as audit_error:
+            # ALTERAÇÃO: Logar erro mas não interromper exclusão
+            logger.warning(f"Erro ao registrar auditoria de exclusão (continuando exclusão): {audit_error}")
+        
         # 4. Excluir itens da nota fiscal
         cur.execute("DELETE FROM PURCHASE_INVOICE_ITEMS WHERE PURCHASE_INVOICE_ID = ?", (invoice_id,))
         
@@ -1331,16 +1427,6 @@ def delete_purchase_invoice(invoice_id, deleted_by_user_id):
         if cur.rowcount == 0:
             conn.rollback()
             return (False, "DELETE_ERROR", "Erro ao excluir nota fiscal")
-        
-        # ALTERAÇÃO: Registrar auditoria de exclusão antes do commit
-        _log_audit_entry(
-            invoice_id=invoice_id,
-            action_type='DELETE',
-            changed_by=deleted_by_user_id,
-            old_values=old_values,
-            notes=f'Nota fiscal excluída - NF {old_values["invoice_number"]}',
-            cur=cur
-        )
         
         conn.commit()
         

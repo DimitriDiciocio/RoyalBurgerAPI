@@ -2,12 +2,14 @@ from flask import Blueprint, request, jsonify
 from ..services import settings_service
 from ..services.auth_service import require_role
 from flask_jwt_extended import get_jwt
+from ..middleware.rate_limiter import rate_limit  # ALTERAÇÃO: Import rate limiting
 import logging  # ALTERAÇÃO: Import centralizado para logging estruturado
 
 settings_bp = Blueprint('settings', __name__)
 logger = logging.getLogger(__name__)  # ALTERAÇÃO: Logger centralizado
 
 @settings_bp.route('/public', methods=['GET'])
+@rate_limit(max_requests=30, window_seconds=60)  # ALTERAÇÃO: Rate limiting para endpoint público
 def get_public_settings_route():
     """Retorna configurações públicas (sem autenticação) - taxas, prazos, info da empresa e taxas de conversão de pontos"""
     try:

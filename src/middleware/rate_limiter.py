@@ -1,13 +1,15 @@
 """
 Middleware de Rate Limiting para proteção contra brute force e abuse.
-Implementação básica usando cache em memória (para desenvolvimento).
-Em produção, considere usar Redis para cache distribuído.
+ALTERAÇÃO: Removido Redis - usando apenas cache em memória para melhor performance
 """
 import time
 from functools import wraps
 from flask import request, jsonify
 from collections import defaultdict
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Cache em memória para rate limiting
 _rate_limit_cache = defaultdict(list)
@@ -59,10 +61,10 @@ def rate_limit(max_requests: int = 5, window_seconds: int = 60, per: str = 'ip')
                 identifier = get_client_identifier()
             
             # Cria chave única para este endpoint + identificador
-            endpoint_key = f"{request.endpoint}:{identifier}"
+            endpoint_key = f"rate_limit:{request.endpoint}:{identifier}"
             current_time = time.time()
             
-            # Limpa requisições antigas da janela
+            # ALTERAÇÃO: Usar apenas cache em memória (removido Redis)
             with _rate_limit_lock:
                 # Remove requisições fora da janela de tempo
                 _rate_limit_cache[endpoint_key] = [
@@ -127,4 +129,3 @@ def get_rate_limit_stats(identifier: str = None):
                 "total_endpoints": len(_rate_limit_cache),
                 "total_requests": sum(len(reqs) for reqs in _rate_limit_cache.values())
             }
-

@@ -143,6 +143,9 @@ def create_app():
     app.register_blueprint(table_bp, url_prefix='/api/tables')
     from .routes.promotion_routes import promotion_bp
     app.register_blueprint(promotion_bp, url_prefix='/api/promotions')
+    # ALTERAÇÃO: Registrar rotas de eventos em tempo real
+    from .routes.events_routes import events_bp
+    app.register_blueprint(events_bp, url_prefix='/api/events')
     app.register_blueprint(swagger_bp, url_prefix='/api/docs')  
     app.register_blueprint(swaggerui_blueprint, url_prefix='/api/docs')  
     from .sockets import chat_events  

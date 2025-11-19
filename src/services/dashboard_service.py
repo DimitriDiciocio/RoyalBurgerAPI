@@ -87,14 +87,22 @@ def get_dashboard_metrics():
         metrics_row = cur.fetchone()
         
         # ALTERAÇÃO: Calcular tempo médio de preparo em query separada para evitar problemas de tipo SQLDA
+        # CORREÇÃO: Simplificar query para evitar problemas SQLDA com CAST e DATEDIFF aninhados
         cur.execute("""
-            SELECT COALESCE(AVG(CAST(DATEDIFF(DAY, CREATED_AT, UPDATED_AT) AS NUMERIC(18,6)) * 1440), 0)
+            SELECT COALESCE(AVG(
+                CAST(DATEDIFF(MINUTE FROM CREATED_AT TO UPDATED_AT) AS NUMERIC(18,6))
+            ), 0)
             FROM ORDERS 
             WHERE CREATED_AT >= ? AND CREATED_AT < ?
               AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
+              AND CREATED_AT IS NOT NULL
         """, (start_datetime, end_datetime))
         avg_prep_time_result = cur.fetchone()
-        avg_prep_time = float(avg_prep_time_result[0]) if avg_prep_time_result and avg_prep_time_result[0] is not None else 0.0
+        # ALTERAÇÃO: Verificar se resultado existe e não é None antes de acessar índice
+        if avg_prep_time_result and len(avg_prep_time_result) > 0 and avg_prep_time_result[0] is not None:
+            avg_prep_time = float(avg_prep_time_result[0])
+        else:
+            avg_prep_time = 0.0
         
         # Query separada para distribuição por tipo (mais simples que consolidar)
         cur.execute("""

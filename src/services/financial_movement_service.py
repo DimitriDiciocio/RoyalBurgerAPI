@@ -9,8 +9,11 @@ Gerencia o novo sistema de fluxo de caixa com suporte a:
 
 import fdb
 import logging
+import hashlib
+import json
 from datetime import datetime, date, timedelta
 from ..database import get_db_connection
+from ..utils.cache_manager import get_cache_manager
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,22 @@ CATEGORY_VARIABLE_COSTS = 'Custos Variáveis'
 CATEGORY_FIXED_COSTS = 'Custos Fixos'
 CATEGORY_TAXES = 'Tributos'
 CATEGORY_STOCK_PURCHASES = 'Compras de Estoque'
+
+
+def _invalidate_financial_movements_cache():
+    """
+    ALTERAÇÃO: Invalida cache de movimentações financeiras e resumo do fluxo de caixa
+    """
+    try:
+        cache = get_cache_manager()
+        # ALTERAÇÃO: Limpar todas as chaves de cache de movimentações
+        cache.clear_pattern('financial_movements:*')
+        # ALTERAÇÃO: Limpar também cache do resumo do fluxo de caixa
+        cache.clear_pattern('cash_flow_summary:*')
+        logger.debug("Cache de movimentações financeiras e resumo do fluxo de caixa invalidado")
+    except Exception as e:
+        logger.warning(f"Erro ao invalidar cache de movimentações: {e}")
+
 
 def create_financial_movement(movement_data, created_by_user_id, cur=None):
     """
@@ -66,11 +85,20 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
             cur = conn.cursor()
             should_close_conn = True
         
+        # ALTERAÇÃO: Log dos dados recebidos para debug
+        logger.info(f"create_financial_movement recebeu: {movement_data}")
+        
         # Validações
-        required_fields = ['type', 'value', 'category', 'description']
+        # ALTERAÇÃO: category agora é opcional (pode ser None ou string vazia)
+        required_fields = ['type', 'value', 'description']
         for field in required_fields:
             if not movement_data.get(field):
                 return (False, f"INVALID_{field.upper()}", f"Campo {field} é obrigatório")
+        
+        # ALTERAÇÃO: Validar category separadamente (pode ser None ou vazio)
+        category = movement_data.get('category')
+        if category is not None and category != '' and not isinstance(category, str):
+            return (False, "INVALID_CATEGORY", "Categoria deve ser uma string ou null")
         
         # Validar tipo
         valid_types = [TYPE_REVENUE, TYPE_EXPENSE, TYPE_CMV, TYPE_TAX]
@@ -98,12 +126,31 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
             movement_date = datetime.now()  # Obrigatório para Paid, usar data atual se não fornecida
         # Se Pending, movement_date pode ser NULL ou uma data futura (data esperada)
         
-        # Converter movement_date para datetime se for string
+        # ALTERAÇÃO: Converter movement_date para datetime se for string
+        # Aceita formatos: DD-MM-YYYY (brasileiro) ou YYYY-MM-DD (ISO) ou ISO com timezone
         if movement_date and isinstance(movement_date, str):
             try:
-                movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
-            except:
-                return (False, "INVALID_DATE", "Formato de data inválido")
+                # Remover espaços e pegar apenas a parte da data (antes de 'T' se houver)
+                date_str = movement_date.strip().split('T')[0].split(' ')[0]
+                
+                # Detectar formato pelo primeiro segmento
+                first_part = date_str.split('-')[0] if '-' in date_str else ''
+                
+                if len(first_part) == 4:
+                    # Formato ISO (YYYY-MM-DD)
+                    movement_date = datetime.strptime(date_str, '%Y-%m-%d')
+                elif len(first_part) == 2:
+                    # Formato brasileiro (DD-MM-YYYY)
+                    movement_date = datetime.strptime(date_str, '%d-%m-%Y')
+                elif 'T' in movement_date:
+                    # ISO com timezone (YYYY-MM-DDTHH:MM:SS)
+                    movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
+                else:
+                    # Tentar parse genérico
+                    movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
+            except (ValueError, AttributeError) as e:
+                logger.error(f"Erro ao converter data: {movement_date}, erro: {e}")
+                return (False, "INVALID_DATE", f"Formato de data inválido: {movement_date}. Use DD-MM-YYYY ou YYYY-MM-DD")
         
         # ALTERAÇÃO FASE 6: Incluir campos de gateway e conciliação
         # Inserir movimentação
@@ -119,10 +166,13 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
             RETURNING ID, CREATED_AT, UPDATED_AT
         """
         
+        # ALTERAÇÃO: Tratar category que pode ser None ou string vazia
+        category_value = category if category and category.strip() else None
+        
         cur.execute(sql, (
             movement_data['type'],
             value,
-            movement_data['category'],
+            category_value,  # ALTERAÇÃO: Pode ser None
             movement_data.get('subcategory'),
             movement_data['description'],
             movement_date,
@@ -147,11 +197,28 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
         if should_close_conn:
             conn.commit()
         
+        # ALTERAÇÃO: Invalidar cache após criar movimentação
+        _invalidate_financial_movements_cache()
+        
+        # ALTERAÇÃO: Publicar evento de movimentação criada para atualização em tempo real
+        try:
+            from ..utils.event_publisher import publish_event
+            publish_event('financial_movement.created', {
+                'movement_id': movement_id,
+                'type': movement_data['type'],
+                'value': float(value),
+                'payment_status': payment_status,
+                'related_entity_type': movement_data.get('related_entity_type'),
+                'related_entity_id': movement_data.get('related_entity_id')
+            })
+        except Exception as e:
+            logger.warning(f"Erro ao publicar evento de movimentação criada: {e}")
+        
         return (True, None, {
             "id": movement_id,
             "type": movement_data['type'],
             "value": value,
-            "category": movement_data['category'],
+            "category": category_value,  # ALTERAÇÃO: Usar category_value que pode ser None
             "subcategory": movement_data.get('subcategory'),
             "description": movement_data['description'],
             "movement_date": movement_date.isoformat() if movement_date else None,
@@ -171,11 +238,17 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
         })
         
     except fdb.Error as e:
-        # ALTERAÇÃO: Substituído print() por logger para código de produção
-        logger.error(f"Erro ao criar movimentação financeira: {e}", exc_info=True)
+        # ALTERAÇÃO: Log detalhado do erro do banco de dados
+        logger.error(f"Erro do banco de dados ao criar movimentação financeira: {e}", exc_info=True)
         if should_close_conn and conn:
             conn.rollback()
-        return (False, "DATABASE_ERROR", "Erro interno do servidor")
+        return (False, "DATABASE_ERROR", f"Erro no banco de dados: {str(e)}")
+    except Exception as e:
+        # ALTERAÇÃO: Capturar outras exceções não tratadas
+        logger.error(f"Erro inesperado ao criar movimentação financeira: {e}", exc_info=True)
+        if should_close_conn and conn:
+            conn.rollback()
+        return (False, "INTERNAL_ERROR", f"Erro interno: {str(e)}")
     finally:
         if should_close_conn and conn:
             conn.close()
@@ -208,61 +281,82 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
             cur = conn.cursor()
             should_close_conn = True
         
-        # Buscar dados do pedido para calcular CMV
-        # CORREÇÃO: Incluir extras no cálculo do CMV - Query otimizada
+        # ALTERAÇÃO: Buscar dados do pedido para calcular CMV
+        # CORREÇÃO: Separar queries para evitar problemas SQLDA no Firebird
+        # Primeiro, buscar itens do pedido com seus IDs
         cur.execute("""
             SELECT 
+                oi.ID,
                 oi.PRODUCT_ID,
                 oi.QUANTITY,
-                -- Custo do produto (usa COST_PRICE se disponível, senão calcula pelos ingredientes)
-                COALESCE(
-                    p.COST_PRICE,
-                    (SELECT SUM(pi.PORTIONS * ing.PRICE)
-                     FROM PRODUCT_INGREDIENTS pi
-                     JOIN INGREDIENTS ing ON pi.INGREDIENT_ID = ing.ID
-                     WHERE pi.PRODUCT_ID = oi.PRODUCT_ID)
-                ) as product_cost,
-                -- Custo dos extras
-                -- NOTA: INGREDIENTS não tem COST_PRICE, usa PRICE como custo
-                COALESCE(SUM(
-                    CASE 
-                        WHEN oie.TYPE = 'extra' THEN oie.QUANTITY * COALESCE(i.PRICE, 0)
-                        WHEN oie.TYPE = 'base' AND oie.DELTA > 0 THEN oie.DELTA * COALESCE(i.PRICE, 0)
-                        ELSE 0
-                    END
-                ), 0) as extras_cost
+                p.COST_PRICE
             FROM ORDER_ITEMS oi
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
-            LEFT JOIN ORDER_ITEM_EXTRAS oie ON oi.ID = oie.ORDER_ITEM_ID
-            LEFT JOIN INGREDIENTS i ON oie.INGREDIENT_ID = i.ID
             WHERE oi.ORDER_ID = ?
-            GROUP BY oi.PRODUCT_ID, oi.QUANTITY, p.COST_PRICE
         """, (order_id,))
         
         order_items = cur.fetchall()
         if not order_items:
-            return (False, None, None, "Pedido não encontrado ou sem itens")
+            return (False, None, None, None, "Pedido não encontrado ou sem itens")
         
-        # Calcular CMV (Custo de Mercadoria Vendida) incluindo extras
+        # ALTERAÇÃO: Calcular CMV (Custo de Mercadoria Vendida) incluindo extras
+        # CORREÇÃO PERFORMANCE: Buscar todos os extras de uma vez para evitar N+1 queries
+        item_ids = [item[0] for item in order_items]
+        extras_map = {}  # item_id -> extras_cost
+        
+        if item_ids:
+            try:
+                # ALTERAÇÃO: Buscar todos os extras de todos os itens em uma única query
+                placeholders = ','.join(['?' for _ in item_ids])
+                cur.execute(f"""
+                    SELECT 
+                        oie.ORDER_ITEM_ID,
+                        oie.TYPE,
+                        oie.QUANTITY,
+                        oie.DELTA,
+                        COALESCE(i.PRICE, 0) as PRICE
+                    FROM ORDER_ITEM_EXTRAS oie
+                    LEFT JOIN INGREDIENTS i ON oie.INGREDIENT_ID = i.ID
+                    WHERE oie.ORDER_ITEM_ID IN ({placeholders})
+                """, item_ids)
+                
+                extras_rows = cur.fetchall()
+                for row in extras_rows:
+                    item_id, extra_type, quantity, delta, price = row
+                    if item_id not in extras_map:
+                        extras_map[item_id] = 0.0
+                    
+                    price_float = float(price or 0)
+                    if extra_type == 'extra' and quantity:
+                        extras_map[item_id] += float(quantity or 0) * price_float
+                    elif extra_type == 'base' and delta and delta > 0:
+                        extras_map[item_id] += float(delta) * price_float
+            except Exception as e:
+                # ALTERAÇÃO: Se houver erro, logar e continuar sem extras
+                logger.warning(f"Erro ao calcular custo de extras para pedido {order_id}: {e}")
+        
         total_cmv = 0.0
         for item in order_items:
-            product_id, quantity, product_cost, extras_cost = item
+            item_id, product_id, quantity, product_cost = item
             
             # Custo do produto
             product_cost_float = float(product_cost or 0)
             if product_cost_float <= 0:
                 # Se não tem COST_PRICE, calcular pelos ingredientes
                 cur.execute("""
-                    SELECT SUM(pi.PORTIONS * ing.PRICE)
+                    SELECT COALESCE(SUM(pi.PORTIONS * ing.PRICE), 0)
                     FROM PRODUCT_INGREDIENTS pi
                     JOIN INGREDIENTS ing ON pi.INGREDIENT_ID = ing.ID
                     WHERE pi.PRODUCT_ID = ?
                 """, (product_id,))
                 cost_result = cur.fetchone()
-                product_cost_float = float(cost_result[0] or 0) if cost_result else 0.0
+                product_cost_float = float(cost_result[0] or 0) if cost_result and cost_result[0] is not None else 0.0
+            
+            # ALTERAÇÃO: Obter custo de extras do mapa (já calculado acima)
+            extras_cost = extras_map.get(item_id, 0.0)
             
             # Custo total do item = (custo produto × quantidade) + custo extras
-            total_cmv += (product_cost_float * quantity) + float(extras_cost or 0)
+            total_cmv += (product_cost_float * quantity) + extras_cost
         
         # Mapear método de pagamento para subcategoria
         payment_subcategory_map = {
@@ -280,7 +374,9 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
         elif isinstance(payment_date, str):
             try:
                 payment_date = datetime.fromisoformat(payment_date.replace('Z', '+00:00'))
-            except:
+            except (ValueError, AttributeError) as e:
+                # ALTERAÇÃO: Especificar exceções ao invés de bare except
+                logger.warning(f"Erro ao parsear payment_date: {e}. Usando data atual.")
                 payment_date = datetime.now()
         elif isinstance(payment_date, date) and not isinstance(payment_date, datetime):
             payment_date = datetime.combine(payment_date, datetime.min.time())
@@ -439,7 +535,8 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
 
 def get_financial_movements(filters=None):
     """
-    Busca movimentações financeiras com filtros
+    Busca movimentações financeiras com filtros e paginação
+    ALTERAÇÃO: Adicionado suporte a paginação e cache em memória para melhorar performance
     
     Args:
         filters: dict com:
@@ -450,10 +547,41 @@ def get_financial_movements(filters=None):
             - payment_status: 'Pending', 'Paid'
             - related_entity_type: str
             - related_entity_id: int
+            - page: int (opcional, default: 1) - Número da página
+            - page_size: int (opcional, default: 100) - Itens por página
     
     Returns:
-        list de movimentações
+        dict com:
+            - items: list de movimentações
+            - total: int - Total de registros
+            - page: int - Página atual
+            - page_size: int - Itens por página
+            - total_pages: int - Total de páginas
     """
+    # ALTERAÇÃO: Implementar cache em memória para queries frequentes
+    cache = get_cache_manager()
+    
+    # Construir chave de cache baseada nos filtros
+    filters_normalized = filters or {}
+    # Normalizar filtros para criar chave consistente
+    cache_key_parts = ['financial_movements']
+    if filters_normalized:
+        # Ordenar filtros para garantir chave consistente
+        sorted_filters = sorted(filters_normalized.items())
+        filters_str = json.dumps(sorted_filters, default=str, sort_keys=True)
+        filters_hash = hashlib.md5(filters_str.encode()).hexdigest()
+        cache_key_parts.append(filters_hash)
+    cache_key = ':'.join(cache_key_parts)
+    
+    # ALTERAÇÃO: Tentar obter do cache (TTL de 60 segundos para dados financeiros)
+    # Cache mais curto para garantir dados atualizados
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        logger.debug(f"Cache hit para movimentações financeiras: {cache_key}")
+        return cached_result
+    
+    logger.debug(f"Cache miss para movimentações financeiras: {cache_key}")
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -484,7 +612,9 @@ def get_financial_movements(filters=None):
                 if isinstance(start_date, str):
                     try:
                         start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                    except:
+                    except (ValueError, AttributeError):
+                        # ALTERAÇÃO: Especificar exceções ao invés de bare except
+                        # Se não conseguir parsear, manter como string e deixar o SQL tratar
                         pass
                 if isinstance(start_date, date) and not isinstance(start_date, datetime):
                     start_date = datetime.combine(start_date, datetime.min.time())
@@ -496,7 +626,9 @@ def get_financial_movements(filters=None):
                 if isinstance(end_date, str):
                     try:
                         end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                    except:
+                    except (ValueError, AttributeError):
+                        # ALTERAÇÃO: Especificar exceções ao invés de bare except
+                        # Se não conseguir parsear, manter como string e deixar o SQL tratar
                         pass
                 if isinstance(end_date, date) and not isinstance(end_date, datetime):
                     end_date = datetime.combine(end_date, datetime.min.time())
@@ -546,9 +678,72 @@ def get_financial_movements(filters=None):
                 conditions.append("fm.RECONCILED = ?")
                 params.append(bool(filters['reconciled']))
         
+        # ALTERAÇÃO: Adicionar paginação
+        page = filters.get('page', 1) if filters else 1
+        page_size = filters.get('page_size', 100) if filters else 100
+        
+        # Validar e limitar page_size (máximo 1000 para evitar sobrecarga)
+        try:
+            page = int(page)
+            page_size = int(page_size)
+            if page < 1:
+                page = 1
+            if page_size < 1:
+                page_size = 100
+            if page_size > 1000:
+                page_size = 1000
+        except (ValueError, TypeError):
+            page = 1
+            page_size = 100
+        
+        # Calcular offset
+        offset = (page - 1) * page_size
+        
+        # ALTERAÇÃO: Contar total de registros antes de aplicar paginação
+        count_sql = "SELECT COUNT(*) FROM FINANCIAL_MOVEMENTS fm"
+        if conditions:
+            count_sql += " WHERE " + " AND ".join(conditions)
+        
+        cur.execute(count_sql, params)
+        total_count = cur.fetchone()[0] or 0
+        
+        # ALTERAÇÃO: No Firebird, FIRST/SKIP deve vir logo após SELECT, não depois de ORDER BY
+        # Reconstruir a query com FIRST/SKIP no lugar correto
+        fields_clause = """
+                fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
+                fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
+                fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
+                fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
+                fm.NOTES, fm.CREATED_AT, fm.UPDATED_AT,
+                fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID, fm.BANK_ACCOUNT,
+                fm.RECONCILED, fm.RECONCILED_AT,
+                u.FULL_NAME as created_by_name
+        """
+        
+        # ALTERAÇÃO: Adicionar FIRST/SKIP logo após SELECT (sintaxe correta do Firebird)
+        # CORREÇÃO SEGURANÇA: page_size e offset são validados e convertidos para int acima
+        # Firebird não suporta parametrização de FIRST/SKIP, então f-string é necessário
+        # Garantir que são inteiros para evitar SQL injection
+        page_size = int(page_size)
+        offset = int(offset)
+        if offset > 0:
+            select_clause = f"SELECT FIRST {page_size} SKIP {offset}"
+        else:
+            select_clause = f"SELECT FIRST {page_size}"
+        
+        from_clause = """
+            FROM FINANCIAL_MOVEMENTS fm
+            LEFT JOIN USERS u ON fm.CREATED_BY = u.ID
+        """
+        
+        # Construir query completa
+        base_sql = select_clause + fields_clause + from_clause
+        
+        # Aplicar condições
         if conditions:
             base_sql += " WHERE " + " AND ".join(conditions)
         
+        # Adicionar ORDER BY
         base_sql += " ORDER BY fm.MOVEMENT_DATE DESC NULLS LAST, fm.CREATED_AT DESC"
         
         cur.execute(base_sql, params)
@@ -579,12 +774,34 @@ def get_financial_movements(filters=None):
                 "created_by_name": row[20]
             })
         
-        return movements
+        # ALTERAÇÃO: Calcular total de páginas
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+        
+        # ALTERAÇÃO: Retornar objeto com paginação
+        result = {
+            "items": movements,
+            "total": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages
+        }
+        
+        # ALTERAÇÃO: Cachear resultado (TTL de 60 segundos)
+        cache.set(cache_key, result, ttl=60)
+        
+        return result
         
     except fdb.Error as e:
         # ALTERAÇÃO: Substituído print() por logger para código de produção
         logger.error(f"Erro ao buscar movimentações financeiras: {e}", exc_info=True)
-        return []
+        # ALTERAÇÃO: Retornar estrutura de paginação mesmo em caso de erro
+        return {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "page_size": 100,
+            "total_pages": 0
+        }
     finally:
         if conn:
             conn.close()
@@ -717,8 +934,16 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
                 return (False, "INVALID_VALUE", "Valor deve ser um número válido")
         
         if 'category' in movement_data:
+            # ALTERAÇÃO: Tratar category que pode ser None ou string vazia
+            category_value = movement_data['category']
+            if category_value is not None and category_value != '':
+                category_value = category_value.strip() if isinstance(category_value, str) else category_value
+                if not category_value:
+                    category_value = None
+            else:
+                category_value = None
             update_fields.append("CATEGORY = ?")
-            params.append(movement_data['category'])
+            params.append(category_value)
         
         if 'subcategory' in movement_data:
             update_fields.append("SUBCATEGORY = ?")
@@ -730,11 +955,30 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
         
         if 'movement_date' in movement_data:
             movement_date = movement_data['movement_date']
+            # ALTERAÇÃO: Aceitar formatos: DD-MM-YYYY (brasileiro) ou YYYY-MM-DD (ISO) ou ISO com timezone
             if isinstance(movement_date, str):
                 try:
-                    movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
-                except:
-                    return (False, "INVALID_DATE", "Data inválida")
+                    # Remover espaços e pegar apenas a parte da data (antes de 'T' se houver)
+                    date_str = movement_date.strip().split('T')[0].split(' ')[0]
+                    
+                    # Detectar formato pelo primeiro segmento
+                    first_part = date_str.split('-')[0] if '-' in date_str else ''
+                    
+                    if len(first_part) == 4:
+                        # Formato ISO (YYYY-MM-DD)
+                        movement_date = datetime.strptime(date_str, '%Y-%m-%d')
+                    elif len(first_part) == 2:
+                        # Formato brasileiro (DD-MM-YYYY)
+                        movement_date = datetime.strptime(date_str, '%d-%m-%Y')
+                    elif 'T' in movement_date:
+                        # ISO com timezone (YYYY-MM-DDTHH:MM:SS)
+                        movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
+                    else:
+                        # Tentar parse genérico
+                        movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
+                except (ValueError, AttributeError) as e:
+                    logger.error(f"Erro ao converter data na atualização: {movement_date}, erro: {e}")
+                    return (False, "INVALID_DATE", f"Formato de data inválido: {movement_date}. Use DD-MM-YYYY ou YYYY-MM-DD")
             update_fields.append("MOVEMENT_DATE = ?")
             params.append(movement_date)
         
@@ -760,12 +1004,8 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
         if not update_fields:
             return (False, "NO_UPDATES", "Nenhum campo para atualizar")
         
-        # Adicionar UPDATED_AT
+        # ALTERAÇÃO: Adicionar UPDATED_AT (UPDATED_BY não existe na tabela)
         update_fields.append("UPDATED_AT = CURRENT_TIMESTAMP")
-        
-        if updated_by_user_id:
-            update_fields.append("UPDATED_BY = ?")
-            params.append(updated_by_user_id)
         
         # Executar atualização
         sql = f"""
@@ -780,6 +1020,9 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
         
         # Buscar movimentação atualizada
         updated_movement = get_financial_movement_by_id(movement_id)
+        
+        # ALTERAÇÃO: Invalidar cache após atualizar movimentação
+        _invalidate_financial_movements_cache()
         
         return (True, None, updated_movement)
         
@@ -796,6 +1039,7 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
 def get_cash_flow_summary(period='this_month', include_pending=False):
     """
     Calcula resumo do fluxo de caixa
+    ALTERAÇÃO: Adicionado cache em memória para melhorar performance
     
     Args:
         period: 'this_month', 'last_month', 'last_30_days', 'custom'
@@ -812,6 +1056,21 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
             - cash_flow: float (entradas - saídas)
             - pending_amount: float (se include_pending)
     """
+    # ALTERAÇÃO: Implementar cache em memória para queries frequentes de resumo
+    cache = get_cache_manager()
+    
+    # Construir chave de cache baseada nos parâmetros
+    cache_key = f"cash_flow_summary:{period}:{include_pending}"
+    
+    # ALTERAÇÃO: Tentar obter do cache (TTL de 60 segundos para dados financeiros)
+    # Cache mais curto para garantir dados atualizados
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        logger.debug(f"Cache hit para resumo do fluxo de caixa: {cache_key}")
+        return cached_result
+    
+    logger.debug(f"Cache miss para resumo do fluxo de caixa: {cache_key}")
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -834,19 +1093,31 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
             date_filter = "1=1"  # Todos os registros
         
         # Query para movimentações pagas (fluxo de caixa real)
+        # ALTERAÇÃO: Usar alias de tabela e CAST explícito para evitar erro -804 e -104
+        # Firebird precisa de alias e tipo explícito para funções agregadas
         sql = f"""
             SELECT 
-                TYPE,
-                SUM("VALUE") as total
-            FROM FINANCIAL_MOVEMENTS
-            WHERE PAYMENT_STATUS = 'Paid'
-            AND MOVEMENT_DATE IS NOT NULL
+                fm.TYPE,
+                CAST(COALESCE(SUM(fm."VALUE"), 0) AS DECIMAL(15,2)) AS TOTAL
+            FROM FINANCIAL_MOVEMENTS fm
+            WHERE fm.PAYMENT_STATUS = 'Paid'
+            AND fm.MOVEMENT_DATE IS NOT NULL
             AND ({date_filter})
-            GROUP BY TYPE
+            GROUP BY fm.TYPE
         """
         
-        cur.execute(sql)
-        results = cur.fetchall()
+        # ALTERAÇÃO: Tratamento robusto para evitar erro -804 (SQLDA inconsistente)
+        try:
+            cur.execute(sql)
+            # ALTERAÇÃO: Verificar se a query foi executada antes de fazer fetchall()
+            results = cur.fetchall()
+        except fdb.Error as db_err:
+            logger.error(
+                f"Erro ao executar query de resumo do fluxo de caixa: {db_err}. "
+                f"SQL: {sql}"
+            )
+            # ALTERAÇÃO: Retornar valores zerados em caso de erro
+            results = []
         
         totals = {
             TYPE_REVENUE: 0.0,
@@ -855,9 +1126,40 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
             TYPE_TAX: 0.0
         }
         
+        # ALTERAÇÃO: Tratamento robusto para processar resultados
         for row in results:
-            movement_type, total = row
-            totals[movement_type] = float(total or 0)
+            try:
+                # ALTERAÇÃO: Validar que a linha tem pelo menos 2 colunas
+                if row is not None and len(row) >= 2:
+                    movement_type = row[0]
+                    total_value = row[1]
+                    
+                    # ALTERAÇÃO: Validar tipos antes de converter
+                    if movement_type and total_value is not None:
+                        try:
+                            total_float = float(total_value)
+                            if movement_type in totals:
+                                totals[movement_type] = total_float
+                            else:
+                                logger.warning(
+                                    f"Tipo de movimentação desconhecido no resumo: {movement_type}"
+                                )
+                        except (ValueError, TypeError) as e:
+                            logger.warning(
+                                f"Erro ao converter total para float: {total_value}. "
+                                f"Erro: {e}. Linha: {row}"
+                            )
+                    else:
+                        logger.warning(f"Valores None na linha do resumo: {row}")
+                else:
+                    logger.warning(f"Linha inválida no resumo (menos de 2 colunas): {row}")
+            except Exception as e:
+                logger.error(
+                    f"Erro ao processar linha do resumo do fluxo de caixa: {e}. "
+                    f"Linha: {row}"
+                )
+                # ALTERAÇÃO: Continuar processamento mesmo se uma linha falhar
+                continue
         
         # Calcular métricas
         total_revenue = totals[TYPE_REVENUE]
@@ -907,24 +1209,53 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
             else:
                 pending_filter = "1=1"  # Todos os pendentes
             
-            cur.execute(f"""
-                SELECT 
-                    TYPE,
-                    SUM("VALUE") as total
-                FROM FINANCIAL_MOVEMENTS
-                WHERE PAYMENT_STATUS = 'Pending'
-                AND ({pending_filter})
-                GROUP BY TYPE
-            """)
+            # ALTERAÇÃO: Usar alias de tabela e CAST explícito para evitar erro -804 e -104
+            try:
+                cur.execute(f"""
+                    SELECT 
+                        fm.TYPE,
+                        CAST(COALESCE(SUM(fm."VALUE"), 0) AS DECIMAL(15,2)) AS TOTAL
+                    FROM FINANCIAL_MOVEMENTS fm
+                    WHERE fm.PAYMENT_STATUS = 'Pending'
+                    AND ({pending_filter})
+                    GROUP BY fm.TYPE
+                """)
+                
+                pending_results = cur.fetchall()
+            except fdb.Error as db_err:
+                logger.error(
+                    f"Erro ao executar query de pendentes no resumo do fluxo de caixa: {db_err}"
+                )
+                pending_results = []
             
-            pending_results = cur.fetchall()
             pending_amount = 0.0
+            # ALTERAÇÃO: Tratamento robusto para processar resultados de pendentes
             for row in pending_results:
-                movement_type, total = row
-                if movement_type in [TYPE_EXPENSE, TYPE_TAX]:
-                    pending_amount += float(total or 0)
+                try:
+                    if row is not None and len(row) >= 2:
+                        movement_type = row[0]
+                        total_value = row[1]
+                        
+                        if movement_type and total_value is not None:
+                            try:
+                                total_float = float(total_value)
+                                if movement_type in [TYPE_EXPENSE, TYPE_TAX]:
+                                    pending_amount += total_float
+                            except (ValueError, TypeError) as e:
+                                logger.warning(
+                                    f"Erro ao converter total pendente para float: {total_value}. "
+                                    f"Erro: {e}. Linha: {row}"
+                                )
+                except Exception as e:
+                    logger.error(
+                        f"Erro ao processar linha de pendentes: {e}. Linha: {row}"
+                    )
+                    continue
             
             result["pending_amount"] = pending_amount
+        
+        # ALTERAÇÃO: Cachear resultado (TTL de 60 segundos)
+        cache.set(cache_key, result, ttl=60)
         
         return result
         
@@ -949,6 +1280,8 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
 def update_payment_status(movement_id, payment_status, movement_date=None, updated_by_user_id=None):
     """
     Atualiza status de pagamento de uma movimentação
+    Se a movimentação estiver vinculada a uma compra (purchase_invoice),
+    também atualiza o status da compra para manter consistência.
     
     Args:
         movement_id: ID da movimentação
@@ -975,7 +1308,9 @@ def update_payment_status(movement_id, payment_status, movement_date=None, updat
             elif isinstance(movement_date, str):
                 try:
                     movement_date = datetime.fromisoformat(movement_date.replace('Z', '+00:00'))
-                except:
+                except (ValueError, AttributeError) as e:
+                    # ALTERAÇÃO: Especificar exceções ao invés de bare except
+                    logger.warning(f"Erro ao parsear movement_date: {e}. Usando data atual.")
                     movement_date = datetime.now()
             elif isinstance(movement_date, date) and not isinstance(movement_date, datetime):
                 movement_date = datetime.combine(movement_date, datetime.min.time())
@@ -983,7 +1318,21 @@ def update_payment_status(movement_id, payment_status, movement_date=None, updat
             # Se marcando como Pending, limpar movement_date
             movement_date = None
         
-        # Atualizar
+        # ALTERAÇÃO: Buscar informações da movimentação para verificar se está vinculada a uma compra
+        cur.execute("""
+            SELECT RELATED_ENTITY_TYPE, RELATED_ENTITY_ID
+            FROM FINANCIAL_MOVEMENTS
+            WHERE ID = ?
+        """, (movement_id,))
+        movement_info = cur.fetchone()
+        
+        related_entity_type = None
+        related_entity_id = None
+        if movement_info:
+            related_entity_type = movement_info[0]
+            related_entity_id = movement_info[1]
+        
+        # ALTERAÇÃO: Atualizar movimentação financeira
         sql = """
             UPDATE FINANCIAL_MOVEMENTS
             SET PAYMENT_STATUS = ?,
@@ -999,16 +1348,95 @@ def update_payment_status(movement_id, payment_status, movement_date=None, updat
         if not row:
             return (False, "NOT_FOUND", "Movimentação não encontrada")
         
+        # ALTERAÇÃO: Se a movimentação está vinculada a uma compra, sincronizar o status
+        purchase_updated = False
+        if related_entity_type and related_entity_id:
+            # Verificar se é uma compra (purchase_invoice ou variações)
+            normalized_entity_type = (related_entity_type or '').lower()
+            if normalized_entity_type in ['purchase_invoice', 'purchaseinvoice', 'purchase', 'compra', 'invoice']:
+                try:
+                    # Verificar se a compra existe e buscar payment_date em uma única query
+                    cur.execute("""
+                        SELECT ID, PAYMENT_STATUS, PAYMENT_DATE FROM PURCHASE_INVOICES WHERE ID = ?
+                    """, (related_entity_id,))
+                    purchase_row = cur.fetchone()
+                    
+                    if not purchase_row:
+                        logger.warning(f"Compra {related_entity_id} não encontrada para sincronização com movimentação {movement_id}")
+                    else:
+                        # Atualizar status da compra
+                        update_purchase_sql = """
+                            UPDATE PURCHASE_INVOICES
+                            SET PAYMENT_STATUS = ?,
+                                UPDATED_AT = CURRENT_TIMESTAMP
+                        """
+                        update_purchase_params = [payment_status]
+                        
+                        # Se marcando como Paid, atualizar payment_date se não existir
+                        if payment_status == STATUS_PAID:
+                            current_payment_date = purchase_row[2]  # PAYMENT_DATE é o terceiro campo
+                            if not current_payment_date:
+                                # Não tem payment_date, adicionar
+                                update_purchase_sql += ", PAYMENT_DATE = ?"
+                                update_purchase_params.append(movement_date if movement_date else datetime.now())
+                        
+                        update_purchase_sql += " WHERE ID = ?"
+                        update_purchase_params.append(related_entity_id)
+                        
+                        cur.execute(update_purchase_sql, update_purchase_params)
+                        
+                        # Verificar se a compra foi atualizada
+                        if cur.rowcount > 0:
+                            purchase_updated = True
+                            logger.info(f"Status da compra {related_entity_id} sincronizado com movimentação {movement_id}: {payment_status}")
+                        else:
+                            logger.warning(f"Falha ao atualizar compra {related_entity_id} (nenhuma linha afetada)")
+                            
+                except fdb.Error as e:
+                    logger.error(f"Erro de banco ao sincronizar status da compra {related_entity_id}: {e}", exc_info=True)
+                    # Fazer rollback para manter consistência
+                    conn.rollback()
+                    return (False, "SYNC_ERROR", f"Erro ao sincronizar status da compra: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Erro inesperado ao sincronizar status da compra {related_entity_id}: {e}", exc_info=True)
+                    # Fazer rollback para manter consistência
+                    conn.rollback()
+                    return (False, "SYNC_ERROR", f"Erro ao sincronizar status da compra: {str(e)}")
+        
+        # Commit da transação (ambas as atualizações ou nenhuma)
         conn.commit()
         
-        return (True, None, {
+        # ALTERAÇÃO: Invalidar cache após atualizar status
+        _invalidate_financial_movements_cache()
+        
+        # ALTERAÇÃO: Publicar evento de status de pagamento atualizado
+        try:
+            from ..utils.event_publisher import publish_event
+            publish_event('financial_movement.payment_status_updated', {
+                'movement_id': movement_id,
+                'payment_status': payment_status,
+                'related_entity_type': related_entity_type,
+                'related_entity_id': related_entity_id,
+                'purchase_updated': purchase_updated
+            })
+        except Exception as e:
+            logger.warning(f"Erro ao publicar evento de status atualizado: {e}")
+        
+        result = {
             "id": row[0],
             "type": row[1],
             "value": float(row[2]),
             "description": row[3],
             "payment_status": payment_status,
             "movement_date": movement_date.isoformat() if movement_date else None
-        })
+        }
+        
+        # ALTERAÇÃO: Incluir informação sobre sincronização da compra
+        if purchase_updated:
+            result["purchase_synced"] = True
+            result["purchase_id"] = related_entity_id
+        
+        return (True, None, result)
         
     except fdb.Error as e:
         # ALTERAÇÃO: Substituído print() por logger para código de produção
@@ -1016,6 +1444,130 @@ def update_payment_status(movement_id, payment_status, movement_date=None, updat
         if conn:
             conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
+    finally:
+        if conn:
+            conn.close()
+
+
+def delete_financial_movement(movement_id, deleted_by_user_id=None):
+    """
+    ALTERAÇÃO: Exclui uma movimentação financeira
+    ALTERAÇÃO: Se a movimentação estiver relacionada a uma compra, também exclui a compra
+    
+    Args:
+        movement_id: ID da movimentação
+        deleted_by_user_id: ID do usuário que está excluindo (opcional, necessário para exclusão de compra)
+    
+    Returns:
+        (success: bool, error_code: str, result: dict/str)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verificar se existe e obter informações sobre entidade relacionada
+        cur.execute("""
+            SELECT ID, RELATED_ENTITY_TYPE, RELATED_ENTITY_ID 
+            FROM FINANCIAL_MOVEMENTS 
+            WHERE ID = ?
+        """, (movement_id,))
+        row = cur.fetchone()
+        if not row:
+            return (False, "NOT_FOUND", "Movimentação não encontrada")
+        
+        related_entity_type = row[1] if len(row) > 1 else None
+        related_entity_id = row[2] if len(row) > 2 else None
+        
+        # ALTERAÇÃO: Se a movimentação está relacionada a uma compra, excluir a compra também
+        if related_entity_type and related_entity_id:
+            # Normalizar tipo de entidade
+            normalized_type = (related_entity_type or '').lower().strip()
+            purchase_types = ['purchase_invoice', 'purchaseinvoice', 'purchase', 'compra', 'invoice']
+            
+            if normalized_type in purchase_types or 'purchase' in normalized_type:
+                # É uma compra - excluir a compra primeiro (que vai excluir a movimentação também)
+                try:
+                    from . import purchase_service
+                    # Se deleted_by_user_id não foi fornecido, tentar obter do contexto atual
+                    if deleted_by_user_id is None:
+                        # TODO: REVISAR obter user_id do contexto JWT se disponível
+                        # Por enquanto, usar None e deixar o purchase_service validar
+                        deleted_by_user_id = None
+                    
+                    # ALTERAÇÃO: Fechar conexão atual antes de chamar purchase_service
+                    # para evitar conflitos de transação
+                    if conn:
+                        conn.close()
+                        conn = None
+                    
+                    # Excluir a compra (isso vai excluir a movimentação financeira automaticamente)
+                    success, error_code, result = purchase_service.delete_purchase_invoice(
+                        related_entity_id, 
+                        deleted_by_user_id
+                    )
+                    
+                    if success:
+                        logger.info(
+                            f"Movimentação {movement_id} e compra relacionada {related_entity_id} "
+                            f"excluídas com sucesso"
+                        )
+                        # ALTERAÇÃO: Invalidar cache após excluir movimentação
+                        _invalidate_financial_movements_cache()
+                        return (
+                            True, 
+                            None, 
+                            "Movimentação e compra relacionada excluídas com sucesso"
+                        )
+                    else:
+                        # ALTERAÇÃO: Se falhou ao excluir a compra, não excluir apenas a movimentação
+                        # Retornar erro para manter integridade referencial
+                        logger.warning(
+                            f"Falha ao excluir compra {related_entity_id} relacionada à movimentação {movement_id}: "
+                            f"{error_code} - {result}"
+                        )
+                        return (False, error_code, f"Erro ao excluir compra relacionada: {result}")
+                        
+                except ImportError:
+                    logger.error("Não foi possível importar purchase_service para exclusão em cascata")
+                    # ALTERAÇÃO: Se não conseguir importar, não excluir apenas a movimentação
+                    # para manter integridade referencial
+                    return (False, "IMPORT_ERROR", "Não é possível excluir movimentação relacionada a compra sem o serviço de compras")
+                except Exception as e:
+                    logger.error(
+                        f"Erro ao excluir compra relacionada à movimentação {movement_id}: {e}",
+                        exc_info=True
+                    )
+                    # ALTERAÇÃO: Se houver erro, não excluir apenas a movimentação
+                    # para manter integridade referencial
+                    return (False, "CASCADE_DELETE_ERROR", f"Erro ao excluir compra relacionada: {str(e)}")
+        
+        # ALTERAÇÃO: Se não é uma compra, excluir apenas a movimentação
+        # Se conn foi fechada acima, recriar
+        if not conn:
+            conn = get_db_connection()
+            cur = conn.cursor()
+        
+        cur.execute("DELETE FROM FINANCIAL_MOVEMENTS WHERE ID = ?", (movement_id,))
+        conn.commit()
+        
+        logger.info(f"Movimentação {movement_id} excluída com sucesso")
+        
+        # ALTERAÇÃO: Invalidar cache após excluir movimentação
+        _invalidate_financial_movements_cache()
+        
+        return (True, None, "Movimentação excluída com sucesso")
+        
+    except fdb.Error as e:
+        logger.error(f"Erro ao excluir movimentação {movement_id}: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return (False, "DATABASE_ERROR", f"Erro no banco de dados: {str(e)}")
+    except Exception as e:
+        logger.error(f"Erro inesperado ao excluir movimentação {movement_id}: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return (False, "INTERNAL_ERROR", f"Erro interno: {str(e)}")
     finally:
         if conn:
             conn.close()
@@ -1195,7 +1747,9 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
             if isinstance(start_date, str):
                 try:
                     start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                except:
+                except (ValueError, AttributeError):
+                    # ALTERAÇÃO: Especificar exceções ao invés de bare except
+                    # Se não conseguir parsear, manter como string e deixar o SQL tratar
                     pass
             if isinstance(start_date, date) and not isinstance(start_date, datetime):
                 start_date = datetime.combine(start_date, datetime.min.time())
@@ -1206,7 +1760,9 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
             if isinstance(end_date, str):
                 try:
                     end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                except:
+                except (ValueError, AttributeError):
+                    # ALTERAÇÃO: Especificar exceções ao invés de bare except
+                    # Se não conseguir parsear, manter como string e deixar o SQL tratar
                     pass
             if isinstance(end_date, date) and not isinstance(end_date, datetime):
                 end_date = datetime.combine(end_date, datetime.min.time())
