@@ -384,55 +384,89 @@ def delete_promotion(promotion_id):
             conn.close()
 
 
-def get_all_promotions(include_expired=False):
+def get_all_promotions(include_expired=False, search=None, status=None, page=1, page_size=20):
     """
     Lista todas as promoções com detalhes dos produtos
+    ALTERAÇÃO: Suporta filtros padronizados (search, status) e paginação
     
     Args:
-        include_expired: Se True, inclui promoções expiradas
+        include_expired: Se True, inclui promoções expiradas (legado)
+        search: Busca por nome do produto ou ID da promoção (padronizado)
+        status: Filtro por status - "ativas" ou "expiradas" (padronizado)
+        page: Número da página (padronizado)
+        page_size: Itens por página (padronizado)
     
     Returns:
-        Lista de promoções com detalhes
+        Dict com items, pagination (count, total_pages, current_page, next, previous)
     """
+    # ALTERAÇÃO: Validação de paginação
+    from ..utils.validators import validate_pagination_params
+    try:
+        page, page_size, offset = validate_pagination_params(page, page_size, max_page_size=100)
+    except ValueError:
+        page, page_size, offset = 1, 20, 0
+    
+    # ALTERAÇÃO: Determinar filtro de status baseado em parâmetros padronizados
+    now = datetime.now()
+    if status:
+        if status.lower() == 'ativas':
+            include_expired = False
+            filter_expired = "CAST(p.EXPIRES_AT AS TIMESTAMP) > CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"
+        elif status.lower() == 'expiradas':
+            include_expired = True
+            filter_expired = "CAST(p.EXPIRES_AT AS TIMESTAMP) <= CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"
+        else:
+            # Status não reconhecido, usar include_expired padrão
+            filter_expired = "1=1" if include_expired else "CAST(p.EXPIRES_AT AS TIMESTAMP) > CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"
+    else:
+        # Sem status padronizado, usar include_expired legado
+        filter_expired = "1=1" if include_expired else "CAST(p.EXPIRES_AT AS TIMESTAMP) > CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"
+    
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # ALTERAÇÃO: Incluir campos necessários do produto e filtrar produtos ativos
-        if include_expired:
-            sql = """
-                SELECT p.ID, p.PRODUCT_ID, p.DISCOUNT_PERCENTAGE, p.DISCOUNT_VALUE, 
-                       p.EXPIRES_AT, p.CREATED_AT, p.UPDATED_AT, p.CREATED_BY, p.UPDATED_BY,
-                       pr.NAME, pr.DESCRIPTION, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
-                       pr.PREPARATION_TIME_MINUTES, pr.CATEGORY_ID,
-                       u1.FULL_NAME as CREATED_BY_NAME, u2.FULL_NAME as UPDATED_BY_NAME
-                FROM PROMOTIONS p
-                INNER JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
-                LEFT JOIN USERS u1 ON p.CREATED_BY = u1.ID
-                LEFT JOIN USERS u2 ON p.UPDATED_BY = u2.ID
-                WHERE pr.IS_ACTIVE = TRUE
-                ORDER BY p.CREATED_AT DESC
-            """
-        else:
-            # ALTERAÇÃO: Filtrar promoções não expiradas E produtos ativos conforme roteiro
-            # ALTERAÇÃO: Comparar EXPIRES_AT (sem timezone) com CURRENT_TIMESTAMP (sem timezone) usando CAST
-            sql = """
-                SELECT p.ID, p.PRODUCT_ID, p.DISCOUNT_PERCENTAGE, p.DISCOUNT_VALUE, 
-                       p.EXPIRES_AT, p.CREATED_AT, p.UPDATED_AT, p.CREATED_BY, p.UPDATED_BY,
-                       pr.NAME, pr.DESCRIPTION, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
-                       pr.PREPARATION_TIME_MINUTES, pr.CATEGORY_ID,
-                       u1.FULL_NAME as CREATED_BY_NAME, u2.FULL_NAME as UPDATED_BY_NAME
-                FROM PROMOTIONS p
-                INNER JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
-                LEFT JOIN USERS u1 ON p.CREATED_BY = u1.ID
-                LEFT JOIN USERS u2 ON p.UPDATED_BY = u2.ID
-                WHERE CAST(p.EXPIRES_AT AS TIMESTAMP) > CAST(CURRENT_TIMESTAMP AS TIMESTAMP)
-                  AND pr.IS_ACTIVE = TRUE
-                ORDER BY p.CREATED_AT DESC
-            """
+        # ALTERAÇÃO: Construir WHERE clauses dinamicamente
+        where_clauses = ["pr.IS_ACTIVE = TRUE", filter_expired]
+        params = []
         
-        cur.execute(sql)
+        # ALTERAÇÃO: Adicionar filtro de busca (search)
+        if search:
+            where_clauses.append("(UPPER(pr.NAME) LIKE UPPER(?) OR CAST(p.ID AS VARCHAR(50)) LIKE ?)")
+            search_pattern = f"%{search}%"
+            params.append(search_pattern)
+            params.append(search_pattern)
+        
+        where_sql = " AND ".join(where_clauses)
+        
+        # ALTERAÇÃO: Contar total antes de paginar
+        count_sql = f"""
+            SELECT COUNT(*)
+            FROM PROMOTIONS p
+            INNER JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
+            WHERE {where_sql}
+        """
+        cur.execute(count_sql, tuple(params))
+        total = cur.fetchone()[0] or 0
+        
+        # ALTERAÇÃO: Query com paginação usando FIRST/SKIP do Firebird
+        sql = f"""
+            SELECT FIRST {page_size} SKIP {offset}
+                p.ID, p.PRODUCT_ID, p.DISCOUNT_PERCENTAGE, p.DISCOUNT_VALUE, 
+                p.EXPIRES_AT, p.CREATED_AT, p.UPDATED_AT, p.CREATED_BY, p.UPDATED_BY,
+                pr.NAME, pr.DESCRIPTION, pr.PRICE, pr.IMAGE_URL, pr.IS_ACTIVE,
+                pr.PREPARATION_TIME_MINUTES, pr.CATEGORY_ID,
+                u1.FULL_NAME as CREATED_BY_NAME, u2.FULL_NAME as UPDATED_BY_NAME
+            FROM PROMOTIONS p
+            INNER JOIN PRODUCTS pr ON p.PRODUCT_ID = pr.ID
+            LEFT JOIN USERS u1 ON p.CREATED_BY = u1.ID
+            LEFT JOIN USERS u2 ON p.UPDATED_BY = u2.ID
+            WHERE {where_sql}
+            ORDER BY p.CREATED_AT DESC
+        """
+        
+        cur.execute(sql, tuple(params))
         promotions = []
         
         for row in cur.fetchall():
@@ -487,12 +521,35 @@ def get_all_promotions(include_expired=False):
             
             promotions.append(promotion)
         
-        return promotions
+        # ALTERAÇÃO: Retornar formato padronizado com paginação
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+        
+        return {
+            "items": promotions,
+            "pagination": {
+                "total": total,
+                "total_pages": total_pages,
+                "current_page": page,
+                "page_size": page_size,
+                "next": page + 1 if page < total_pages else None,
+                "previous": page - 1 if page > 1 else None
+            }
+        }
         
     except fdb.Error as e:
         # ALTERAÇÃO: Substituído print() por logger.error() para logging estruturado
         logger.error(f"Erro ao listar promoções: {e}", exc_info=True)
-        return []
+        return {
+            "items": [],
+            "pagination": {
+                "total": 0,
+                "total_pages": 1,
+                "current_page": page,
+                "page_size": page_size,
+                "next": None,
+                "previous": None
+            }
+        }
     finally:
         if conn:
             conn.close()

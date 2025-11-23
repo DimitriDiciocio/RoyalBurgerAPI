@@ -834,48 +834,62 @@ def generate_tables_report_data(filters=None):
         where_clause = " AND ".join(conditions)
         
         # 1. RESUMO DE MESAS
-        cur.execute(f"""
+        # ALTERAÇÃO: Corrigir consulta SQL para tratar NULLs corretamente e evitar erro SQLCODE -804
+        # Separar em duas queries mais simples para evitar problemas com LEFT JOIN complexo
+        # Query 1: Total de mesas
+        cur.execute("SELECT COUNT(*) FROM RESTAURANT_TABLES")
+        total_tables_result = cur.fetchone()
+        total_tables = int(total_tables_result[0]) if total_tables_result and total_tables_result[0] is not None else 0
+        
+        # Query 2: Estatísticas de pedidos no período
+        cur.execute("""
             SELECT 
-                COUNT(DISTINCT rt.ID) as total_tables,
-                COUNT(DISTINCT o.TABLE_ID) as used_tables,
-                COUNT(o.ID) as total_orders,
-                SUM(o.TOTAL_AMOUNT) as total_revenue,
-                CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_duration
-            FROM RESTAURANT_TABLES rt
-            LEFT JOIN ORDERS o ON rt.ID = o.TABLE_ID
-            WHERE o.CREATED_AT >= ? AND o.CREATED_AT < ? OR o.ID IS NULL
+                CAST(COUNT(DISTINCT o.TABLE_ID) AS INTEGER) as used_tables,
+                CAST(COUNT(o.ID) AS INTEGER) as total_orders,
+                CAST(COALESCE(SUM(o.TOTAL_AMOUNT), 0) AS NUMERIC(18,2)) as total_revenue,
+                CAST(COALESCE(AVG(CAST(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) AS DOUBLE PRECISION) / 60.0), 0) AS NUMERIC(18,2)) as avg_duration
+            FROM ORDERS o
+            WHERE o.ORDER_TYPE = 'on_site'
+                AND o.CREATED_AT >= ?
+                AND o.CREATED_AT < ?
         """, (start_datetime, end_datetime))
         
         summary_row = cur.fetchone()
-        total_tables = summary_row[0] or 0
-        used_tables = summary_row[1] or 0
-        total_orders = summary_row[2] or 0
-        total_revenue = float(summary_row[3] or 0)
-        avg_duration = float(summary_row[4] or 0)
+        # ALTERAÇÃO: Tratar valores NULL do resultado de forma segura
+        if summary_row is None or len(summary_row) < 4:
+            used_tables = total_orders = 0
+            total_revenue = avg_duration = 0.0
+        else:
+            used_tables = int(summary_row[0]) if summary_row[0] is not None else 0
+            total_orders = int(summary_row[1]) if summary_row[1] is not None else 0
+            total_revenue = float(summary_row[2]) if summary_row[2] is not None else 0.0
+            avg_duration = float(summary_row[3]) if summary_row[3] is not None else 0.0
         
         occupancy_rate = safe_divide(used_tables, total_tables, 0) * 100 if total_tables > 0 else 0
         
         # 2. PERFORMANCE POR MESA
+        # ALTERAÇÃO: Corrigir consulta SQL para tratar NULLs e usar filtro correto no LEFT JOIN
+        join_clause = " AND ".join(conditions)
         cur.execute(f"""
             SELECT rt.NAME,
-                   COUNT(o.ID) as order_count,
-                   SUM(o.TOTAL_AMOUNT) as revenue,
-                   CAST(COALESCE(AVG(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) / 60.0), 0) AS NUMERIC(18,2)) as avg_duration
+                   CAST(COUNT(CASE WHEN o.ID IS NOT NULL THEN o.ID END) AS INTEGER) as order_count,
+                   CAST(COALESCE(SUM(CASE WHEN o.ID IS NOT NULL THEN o.TOTAL_AMOUNT END), 0) AS NUMERIC(18,2)) as revenue,
+                   CAST(COALESCE(AVG(CASE WHEN o.ID IS NOT NULL THEN CAST(DATEDIFF(SECOND, o.CREATED_AT, o.UPDATED_AT) AS DOUBLE PRECISION) / 60.0 END), 0) AS NUMERIC(18,2)) as avg_duration
             FROM RESTAURANT_TABLES rt
-            LEFT JOIN ORDERS o ON rt.ID = o.TABLE_ID
-            WHERE {where_clause} OR o.ID IS NULL
+            LEFT JOIN ORDERS o ON rt.ID = o.TABLE_ID AND {join_clause}
             GROUP BY rt.ID, rt.NAME
             ORDER BY revenue DESC NULLS LAST
         """, tuple(params))
         
         tables_performance = []
         for row in cur.fetchall():
-            tables_performance.append({
-                'name': row[0] or 'N/A',
-                'order_count': row[1] or 0,
-                'revenue': float(row[2] or 0),
-                'avg_duration': float(row[3] or 0)
-            })
+            if row and len(row) >= 4:
+                tables_performance.append({
+                    'name': row[0] or 'N/A',
+                    'order_count': int(row[1]) if row[1] is not None else 0,
+                    'revenue': float(row[2]) if row[2] is not None else 0.0,
+                    'avg_duration': float(row[3]) if row[3] is not None else 0.0
+                })
         
         # Prepara dados para gráficos
         chart_data = {}
@@ -1164,6 +1178,7 @@ def generate_reconciliation_report_data(filters=None):
         
         if validated_filters.get('reconciled'):
             reconciled = validated_filters['reconciled'] == 'true'
+            # ALTERAÇÃO: Comparar diretamente com BOOLEAN (Firebird aceita TRUE/FALSE diretamente)
             conditions.append("fm.RECONCILED = ?")
             params.append(reconciled)
         
@@ -1171,13 +1186,14 @@ def generate_reconciliation_report_data(filters=None):
         
         # 1. RESUMO DE CONCILIAÇÃO
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # ALTERAÇÃO: Usar comparação direta com BOOLEAN (TRUE/FALSE) ao invés de CAST para INTEGER
         cur.execute(f"""
             SELECT 
                 CAST(COUNT(*) AS INTEGER) as total_movements,
-                CAST(COUNT(CASE WHEN fm.RECONCILED = 1 THEN 1 END) AS INTEGER) as reconciled_count,
-                CAST(COUNT(CASE WHEN fm.RECONCILED = 0 THEN 1 END) AS INTEGER) as pending_count,
-                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = 1 THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as reconciled_amount,
-                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = 0 THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_amount
+                CAST(COUNT(CASE WHEN fm.RECONCILED = TRUE THEN 1 END) AS INTEGER) as reconciled_count,
+                CAST(COUNT(CASE WHEN fm.RECONCILED = FALSE OR fm.RECONCILED IS NULL THEN 1 END) AS INTEGER) as pending_count,
+                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = TRUE THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as reconciled_amount,
+                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = FALSE OR fm.RECONCILED IS NULL THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_amount
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
@@ -1190,12 +1206,13 @@ def generate_reconciliation_report_data(filters=None):
         pending_amount = float(summary_row[4] or 0) if summary_row and summary_row[4] is not None else 0.0
         
         # 2. MOVIMENTAÇÕES PENDENTES DE CONCILIAÇÃO
+        # ALTERAÇÃO: Comparar diretamente com BOOLEAN FALSE ao invés de CAST para INTEGER
         cur.execute(f"""
             SELECT fm.ID, fm.TYPE, fm."VALUE", fm.DESCRIPTION,
                    fm.MOVEMENT_DATE, fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID,
                    fm.BANK_ACCOUNT, fm.CREATED_AT
             FROM FINANCIAL_MOVEMENTS fm
-            WHERE {where_clause} AND fm.RECONCILED = 0
+            WHERE {where_clause} AND (fm.RECONCILED = FALSE OR fm.RECONCILED IS NULL)
             ORDER BY fm.MOVEMENT_DATE DESC
             ROWS 50
         """, tuple(params))

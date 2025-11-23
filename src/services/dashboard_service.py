@@ -130,7 +130,17 @@ def get_dashboard_metrics():
                 "created_at": row[4].isoformat() if row[4] else None
             })
         
+        # ALTERAÇÃO: Query para contar usuários ativos
+        cur.execute("""
+            SELECT CAST(COUNT(*) AS INTEGER) 
+            FROM USERS 
+            WHERE IS_ACTIVE = TRUE
+        """)
+        active_users_result = cur.fetchone()
+        active_users_count = active_users_result[0] if active_users_result and active_users_result[0] is not None else 0
+        
         # ALTERAÇÃO: Ajustar índices após remover avg_prep_time da query principal
+        # ALTERAÇÃO: Adicionar active_users_count ao resultado
         result = {  
             "total_orders_today": metrics_row[0] or 0,
             "revenue_today": float(metrics_row[1]) if metrics_row[1] else 0.0,
@@ -141,7 +151,8 @@ def get_dashboard_metrics():
             "low_stock_items_count": metrics_row[6] or 0,  # ALTERAÇÃO: Índice ajustado (era 7, agora é 6)
             "cancelled_orders": metrics_row[4] or 0,
             "order_distribution": order_distribution,
-            "recent_orders": recent_orders
+            "recent_orders": recent_orders,
+            "active_users_count": active_users_count  # ALTERAÇÃO: Contagem de usuários ativos
         }
         
         # OTIMIZAÇÃO: Salva resultado no cache
@@ -161,7 +172,8 @@ def get_dashboard_metrics():
             "low_stock_items_count": 0,
             "cancelled_orders": 0,
             "order_distribution": {},
-            "recent_orders": []
+            "recent_orders": [],
+            "active_users_count": 0  # ALTERAÇÃO: Incluir active_users_count no fallback de erro
         }
     finally:  
         if conn: conn.close()

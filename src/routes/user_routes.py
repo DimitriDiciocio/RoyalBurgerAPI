@@ -252,10 +252,13 @@ def get_my_profile_route():
 @user_bp.route('/', methods=['GET'])
 @require_role('admin', 'manager')
 def get_all_users_route():
-    # Parâmetros de paginação
+    # ALTERAÇÃO: Parâmetros padronizados
     page = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 20))
-    limit = int(request.args.get('limit', per_page))  # Compatibilidade com frontend
+    page_size = int(request.args.get('page_size', 20))  # Parâmetro padronizado
+    per_page = int(request.args.get('per_page', page_size))  # Parâmetro legado
+    limit = int(request.args.get('limit', page_size))  # Parâmetro legado (compatibilidade)
+    # Usar page_size se fornecido, senão usar limit/per_page
+    final_limit = page_size if request.args.get('page_size') else (limit if request.args.get('limit') else per_page)
     
     # Filtros
     filters = {}
@@ -263,24 +266,49 @@ def get_all_users_route():
         filters['name'] = request.args.get('name')
     if request.args.get('email'):
         filters['email'] = request.args.get('email')
-    if request.args.get('search'):  # Busca geral
+    if request.args.get('search'):  # Busca geral (padronizado)
         filters['search'] = request.args.get('search')
     if request.args.get('role'):
         role = request.args.get('role')
-        if role == 'all_staff':
+        # ALTERAÇÃO: Mapear cargos do frontend para roles do backend
+        role_map = {
+            'atendente': 'attendant',
+            'gerente': 'manager',
+            'entregador': 'delivery',
+            'admin': 'admin',
+            'cliente': 'customer'
+        }
+        # Se role está no mapeamento, usar valor mapeado; senão usar como está
+        mapped_role = role_map.get(role.lower(), role)
+        
+        if mapped_role == 'all_staff':
             filters['role'] = ['admin', 'manager', 'attendant', 'delivery']
-        elif role == 'all_employees':
+        elif mapped_role == 'all_employees':
             filters['role'] = ['admin', 'manager', 'attendant', 'delivery']
         else:
-            filters['role'] = role
-    if request.args.get('status') is not None:
-        filters['status'] = request.args.get('status').lower() == 'true'
+            filters['role'] = mapped_role
+    
+    # ALTERAÇÃO: Suportar status como string (padronizado: "ativo", "inativo") além de boolean (legado)
+    status_param = request.args.get('status')
+    if status_param is not None:
+        if isinstance(status_param, str):
+            status_lower = status_param.lower()
+            if status_lower == 'ativo':
+                filters['status'] = True
+            elif status_lower == 'inativo':
+                filters['status'] = False
+            else:
+                # Tentar interpretar como boolean (legado)
+                filters['status'] = status_lower == 'true'
+        else:
+            # Se já é boolean, usar diretamente
+            filters['status'] = bool(status_param)
     
     # Ordenação
     sort_by = request.args.get('sort_by', 'full_name')
     sort_order = request.args.get('sort_order', 'asc')
     
-    result = user_service.get_users_paginated(page, limit, filters, sort_by, sort_order)
+    result = user_service.get_users_paginated(page, final_limit, filters, sort_by, sort_order)
     return jsonify(result), 200
 
 

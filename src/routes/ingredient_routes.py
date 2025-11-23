@@ -6,13 +6,37 @@ ingredient_bp = Blueprint('ingredients', __name__)
 
 @ingredient_bp.route('/', methods=['GET'])
 def list_ingredients_route():  
-    """Lista ingredientes - ROTA PÚBLICA para permitir visualização no cardápio"""
+    """Lista ingredientes - ROTA PÚBLICA para permitir visualização no cardápio
+    ALTERAÇÃO: Suporta parâmetros padronizados (search, status, category, page, page_size)
+    """
+    # ALTERAÇÃO: Parâmetros padronizados
+    search = request.args.get('search')  # Parâmetro padronizado
+    name = request.args.get('name')  # Parâmetro legado (compatibilidade)
+    # Usar search se fornecido, senão usar name
+    name_filter = search or name
+    
     status_filter = request.args.get('status')  
-    name = request.args.get('name')
     category_filter = request.args.get('category')
     page = request.args.get('page', type=int, default=1)  
-    page_size = request.args.get('page_size', type=int, default=10)  
-    result = ingredient_service.list_ingredients(name_filter=name, status_filter=status_filter, category_filter=category_filter, page=page, page_size=page_size)
+    page_size = request.args.get('page_size', type=int, default=10)
+    
+    # ALTERAÇÃO: Mapear status do frontend para valores do backend
+    if status_filter:
+        status_map = {
+            'em-estoque': 'in_stock',
+            'estoque-baixo': 'low_stock',
+            'sem-estoque': 'out_of_stock'
+        }
+        # Se status está no mapeamento, usar valor mapeado; senão usar como está (pode ser valor legado)
+        status_filter = status_map.get(status_filter.lower(), status_filter)
+    
+    result = ingredient_service.list_ingredients(
+        name_filter=name_filter, 
+        status_filter=status_filter, 
+        category_filter=category_filter, 
+        page=page, 
+        page_size=page_size
+    )
     return jsonify(result), 200
 
 @ingredient_bp.route('/', methods=['POST'])  

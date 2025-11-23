@@ -12,15 +12,43 @@ logger = logging.getLogger(__name__)
 
 @product_bp.route('/', methods=['GET'])  
 def list_products_route():
-    name = request.args.get('name')  
-    category_id = request.args.get('category_id', type=int)  
+    # ALTERAÇÃO: Suportar parâmetros padronizados (search, category, status) além dos legados
+    # Priorizar parâmetros padronizados, mas manter compatibilidade com legados
+    search = request.args.get('search')  # Parâmetro padronizado
+    name = request.args.get('name')  # Parâmetro legado (compatibilidade)
+    # Usar search se fornecido, senão usar name
+    name_filter = search or name
+    
+    # ALTERAÇÃO: Suportar category como slug (padronizado) além de category_id (legado)
+    category = request.args.get('category')  # Parâmetro padronizado (slug)
+    category_id = request.args.get('category_id', type=int)  # Parâmetro legado (ID)
+    
+    # ALTERAÇÃO: Suportar status como string (padronizado: "ativo", "inativo")
+    status = request.args.get('status')  # Parâmetro padronizado
+    
     page = request.args.get('page', type=int, default=1)  
     page_size = request.args.get('page_size', type=int, default=10)  
-    # Corrigir interpretação de parâmetro booleano
-    # Flask interpreta qualquer string não vazia como True quando usa type=bool
-    # Então precisamos verificar explicitamente
-    include_inactive_param = request.args.get('include_inactive', '').lower()
-    include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
+    
+    # ALTERAÇÃO: Determinar include_inactive e only_inactive baseado em status padronizado
+    include_inactive = False
+    only_inactive = False
+    
+    if status:
+        # Se status padronizado fornecido, usar ele
+        if status.lower() == 'ativo':
+            include_inactive = False
+            only_inactive = False
+        elif status.lower() == 'inativo':
+            include_inactive = True
+            only_inactive = True
+        # Se status não for reconhecido, usar lógica legada abaixo
+    else:
+        # Fallback para parâmetros legados
+        include_inactive_param = request.args.get('include_inactive', '').lower()
+        include_inactive = include_inactive_param in ('true', '1', 'yes') if include_inactive_param else False
+        
+        only_inactive_param = request.args.get('only_inactive', '').lower()
+        only_inactive = only_inactive_param in ('true', '1', 'yes') if only_inactive_param else False
     
     # NOVO: Aceita parâmetro filter_unavailable para filtrar produtos sem estoque
     # Frontend pode usar filter_unavailable=true para esconder produtos indisponíveis
@@ -28,25 +56,34 @@ def list_products_route():
     filter_unavailable_param = request.args.get('filter_unavailable', '').lower()
     filter_unavailable = filter_unavailable_param in ('true', '1', 'yes') if filter_unavailable_param else False
     
-    # ALTERAÇÃO: Aceita parâmetro only_inactive para filtrar apenas produtos inativos
-    # Requer include_inactive=true para funcionar
-    only_inactive_param = request.args.get('only_inactive', '').lower()
-    only_inactive = only_inactive_param in ('true', '1', 'yes') if only_inactive_param else False
-    
     # ALTERAÇÃO: Reduzir logging excessivo - evitar logar detalhes de produtos em produção
     # Log apenas informações essenciais para debug quando necessário
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"list_products: page={page}, page_size={page_size}, "
-                    f"include_inactive={include_inactive}, only_inactive={only_inactive}, filter_unavailable={filter_unavailable}")
+                    f"search={search}, name={name}, category={category}, category_id={category_id}, "
+                    f"status={status}, include_inactive={include_inactive}, only_inactive={only_inactive}, "
+                    f"filter_unavailable={filter_unavailable}")
+    
+    # ALTERAÇÃO: Se category (slug) fornecido, tentar converter para category_id
+    # TODO: REVISAR - Implementar busca por slug quando categoria tiver campo slug
+    # Por enquanto, se category for um número, usar como category_id
+    if category and not category_id:
+        try:
+            # Tentar converter category para int (caso seja ID passado como string)
+            category_id = int(category)
+        except (ValueError, TypeError):
+            # Se não for número, category é slug (não implementado ainda)
+            logger.debug(f"Category '{category}' não é um ID numérico. Busca por slug não implementada ainda.")
+            category_id = None
     
     result = product_service.list_products(
-        name_filter=name, 
+        name_filter=name_filter, 
         category_id=category_id, 
         page=page, 
         page_size=page_size, 
         include_inactive=include_inactive,
-        only_inactive=only_inactive,  # ALTERAÇÃO: Adiciona suporte ao filtro only_inactive
-        filter_unavailable=filter_unavailable  # Aceita parâmetro da query string
+        only_inactive=only_inactive,
+        filter_unavailable=filter_unavailable
     )
     
     # ALTERAÇÃO: Log apenas contagem, não detalhes de produtos (evita exposição de dados)
@@ -446,18 +483,102 @@ def create_product_route():
                 
         if request.form.get('category_id'):
             try:
-                data['category_id'] = int(request.form.get('category_id'))
+                category_id_str = request.form.get('category_id')
+                # ALTERAÇÃO: Aceitar string vazia como None
+                if category_id_str and category_id_str.strip():
+                    data['category_id'] = int(category_id_str)
+                else:
+                    data['category_id'] = None
             except (ValueError, TypeError):
-                pass
+                data['category_id'] = None
+        
+        # ALTERAÇÃO: Processar is_active (boolean) - CRÍTICO: estava faltando no create_product_route
+        if request.form.get('is_active') is not None:
+            is_active_str = request.form.get('is_active')
+            # ALTERAÇÃO: Converter string para boolean
+            if isinstance(is_active_str, str):
+                data['is_active'] = is_active_str.lower() in ('true', '1', 'yes', 'on')
+            else:
+                data['is_active'] = bool(is_active_str)
+        else:
+            # ALTERAÇÃO: Padrão true se não fornecido
+            data['is_active'] = True
+        
+        # ALTERAÇÃO: Processar campo ingredients do FormData (JSON string)
+        if request.form.get('ingredients'):
+            try:
+                import json
+                ingredients_str = request.form.get('ingredients')
+                # ALTERAÇÃO: Validar que não está vazio antes de parsear
+                if not ingredients_str or not ingredients_str.strip():
+                    data['ingredients'] = []
+                else:
+                    # ALTERAÇÃO: Log raw para debug (apenas em modo debug, truncar para evitar logs muito grandes)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"[create_product_route] RAW ingredients string recebida: {ingredients_str[:200]}...")
+                    
+                    # ALTERAÇÃO: Parse do JSON string para lista de dicionários
+                    ingredients_data = json.loads(ingredients_str)
+                    
+                    # ALTERAÇÃO: Validação mais robusta
+                    if not isinstance(ingredients_data, list):
+                        logger.error(f"[create_product_route] ingredients não é uma lista: {type(ingredients_data)}")
+                        return jsonify({"error": "ingredients deve ser uma lista"}), 400
+                    
+                    # ALTERAÇÃO: Validar estrutura de cada item
+                    for idx, item in enumerate(ingredients_data):
+                        if not isinstance(item, dict):
+                            logger.error(f"[create_product_route] Ingrediente {idx} não é um objeto: {type(item)}")
+                            return jsonify({"error": f"Ingrediente {idx} deve ser um objeto"}), 400
+                        
+                        if 'ingredient_id' not in item:
+                            logger.error(f"[create_product_route] Ingrediente {idx} sem ingredient_id")
+                            return jsonify({"error": f"Ingrediente {idx} deve ter 'ingredient_id'"}), 400
+                    
+                    data['ingredients'] = ingredients_data
+                    logger.debug(f"[create_product_route] Ingredientes parseados com sucesso: {len(ingredients_data)} itens")
+            except json.JSONDecodeError as e:
+                # ALTERAÇÃO: Mensagem de erro mais específica para JSON inválido
+                logger.error(f"[create_product_route] Erro ao parsear ingredients JSON: {e}")
+                logger.error(f"[create_product_route] ingredients string recebida: {request.form.get('ingredients')[:200]}...")
+                return jsonify({"error": f"Formato JSON inválido nos ingredientes: {str(e)}"}), 400
+            except (ValueError, TypeError) as e:
+                # ALTERAÇÃO: Mensagem de erro mais específica para outros erros
+                logger.error(f"[create_product_route] Erro ao processar ingredients: {e}")
+                return jsonify({"error": f"Erro ao processar ingredientes: {str(e)}"}), 400
+        else:
+            # ALTERAÇÃO: Se não houver ingredientes, definir como lista vazia
+            data['ingredients'] = []
     
     # Verifica se há arquivo de imagem
     image_file = request.files.get('image')
     
+    # ALTERAÇÃO: Log de debug detalhado para verificar dados recebidos (apenas em modo DEBUG)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"[create_product_route] === INÍCIO CRIAÇÃO PRODUTO ===")
+        logger.debug(f"[create_product_route] Dados recebidos: {data}")
+        logger.debug(f"[create_product_route] Tem imagem: {image_file is not None}")
+        logger.debug(f"[create_product_route] Todos os campos do form: {list(request.form.keys())}")
+        if 'ingredients' in data:
+            # ALTERAÇÃO: Logar apenas contagem, não detalhes (evita exposição de dados)
+            logger.debug(f"[create_product_route] Quantidade de ingredientes: {len(data['ingredients'])}")
+    else:
+        # ALTERAÇÃO: Em produção, logar apenas informações essenciais
+        logger.info(f"[create_product_route] Criando produto: {data.get('name', 'N/A')}")
+    
     if not data and not image_file:
         return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
     
+    # ALTERAÇÃO: Log antes de chamar create_product
+    logger.info(f"[create_product_route] Chamando product_service.create_product com: {data}")
+    
     # Cria o produto primeiro (agora aceita lista "ingredients" com portions/min/max)
-    new_product, error_code, error_message = product_service.create_product(data)  
+    try:
+        new_product, error_code, error_message = product_service.create_product(data)
+    except Exception as e:
+        # ALTERAÇÃO: Capturar exceções não tratadas e logar detalhadamente
+        logger.error(f"[create_product_route] Exceção não tratada ao criar produto: {e}", exc_info=True)
+        return jsonify({"error": f"Erro interno ao criar produto: {str(e)}"}), 500  
     if not new_product:
         if error_code in ["INVALID_NAME", "INVALID_PRICE", "INVALID_COST_PRICE", "INVALID_PREP_TIME", "INVALID_CATEGORY"]:  
             return jsonify({"error": error_message}), 400  
@@ -533,11 +654,27 @@ def update_product_route(product_id):
             except (ValueError, TypeError):
                 pass
                 
+        # ALTERAÇÃO: Processar category_id (pode ser None ou string vazia)
         if request.form.get('category_id'):
             try:
-                data['category_id'] = int(request.form.get('category_id'))
+                category_id_str = request.form.get('category_id')
+                # ALTERAÇÃO: Aceitar string vazia como None
+                if category_id_str and category_id_str.strip():
+                    data['category_id'] = int(category_id_str)
+                else:
+                    data['category_id'] = None
             except (ValueError, TypeError):
-                pass
+                data['category_id'] = None
+        
+        # ALTERAÇÃO: Processar is_active (boolean)
+        if request.form.get('is_active') is not None:
+            is_active_str = request.form.get('is_active')
+            # ALTERAÇÃO: Converter string para boolean
+            if isinstance(is_active_str, str):
+                data['is_active'] = is_active_str.lower() in ('true', '1', 'yes', 'on')
+            else:
+                data['is_active'] = bool(is_active_str)
+        
         if request.form.get('ingredients'):
             try:
                 import json

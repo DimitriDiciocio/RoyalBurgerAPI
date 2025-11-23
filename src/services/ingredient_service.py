@@ -147,14 +147,18 @@ def list_ingredients(name_filter=None, status_filter=None, category_filter=None,
             "base_portion_quantity": float(row[11]) if row[11] is not None else 1.0,
             "base_portion_unit": row[12] if row[12] else "un"
         } for row in cur.fetchall()]  
-        total_pages = (total + page_size - 1) // page_size  
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+        # ALTERAÇÃO: Retornar formato padronizado com current_page, next, previous
         return {  
             "items": items,  
             "pagination": {  
                 "total": total,  
-                "page": page,  
+                "total_pages": total_pages,
+                "current_page": page,
+                "page": page,  # Manter para compatibilidade
                 "page_size": page_size,  
-                "total_pages": total_pages  
+                "next": page + 1 if page < total_pages else None,
+                "previous": page - 1 if page > 1 else None
             }  
         }  
     except fdb.Error as e:  
@@ -163,10 +167,13 @@ def list_ingredients(name_filter=None, status_filter=None, category_filter=None,
         return {  
             "items": [],  
             "pagination": {  
-                "total": 0,  
-                "page": page,  
+                "total": 0,
+                "total_pages": 1,
+                "current_page": page,
+                "page": page,  # Manter para compatibilidade
                 "page_size": page_size,  
-                "total_pages": 0  
+                "next": None,
+                "previous": None
             }  
         }  
     finally:  
@@ -277,28 +284,54 @@ def delete_ingredient(ingredient_id):
         if not cur.fetchone():  
             return (False, "INGREDIENT_NOT_FOUND", "Ingrediente não encontrado")  
         
-        # Verificar vínculos com produtos
-        cur.execute("SELECT COUNT(*) FROM PRODUCT_INGREDIENTS WHERE INGREDIENT_ID = ?", (ingredient_id,))  
-        count_links = cur.fetchone()[0] or 0  
+        # ALTERAÇÃO: Excluir primeiro registros das tabelas filhas (sem ON DELETE CASCADE)
+        # Ordem: primeiro tabelas filhas, depois tabela pai
         
-        if count_links > 0:  
-            return (False, "INGREDIENT_IN_USE", "Exclusão bloqueada: há produtos vinculados a este insumo")  
+        # 1. Excluir itens de notas fiscais de compra vinculados
+        cur.execute("DELETE FROM PURCHASE_INVOICE_ITEMS WHERE INGREDIENT_ID = ?", (ingredient_id,))  
+        deleted_invoice_items = cur.rowcount
         
-        # Excluir
+        # 2. Excluir extras de itens do carrinho vinculados
+        cur.execute("DELETE FROM CART_ITEM_EXTRAS WHERE INGREDIENT_ID = ?", (ingredient_id,))  
+        deleted_cart_extras = cur.rowcount
+        
+        # 3. Excluir extras de itens de pedidos vinculados
+        cur.execute("DELETE FROM ORDER_ITEM_EXTRAS WHERE INGREDIENT_ID = ?", (ingredient_id,))  
+        deleted_order_extras = cur.rowcount
+        
+        # Nota: As seguintes tabelas têm ON DELETE CASCADE, então serão excluídas automaticamente:
+        # - PRODUCT_INGREDIENTS
+        # - GROUP_INGREDIENTS
+        # - TEMPORARY_RESERVATIONS
+        
+        # 4. Excluir o ingrediente (tabela pai)
         cur.execute("DELETE FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))  
         rows_affected = cur.rowcount
         
         conn.commit()  
         
         if rows_affected > 0:
-            return (True, None, "Ingrediente excluído com sucesso")
+            # ALTERAÇÃO: Mensagem informando quantos registros foram excluídos
+            deleted_info = []
+            if deleted_invoice_items > 0:
+                deleted_info.append(f"{deleted_invoice_items} item(ns) de nota fiscal")
+            if deleted_cart_extras > 0:
+                deleted_info.append(f"{deleted_cart_extras} extra(s) do carrinho")
+            if deleted_order_extras > 0:
+                deleted_info.append(f"{deleted_order_extras} extra(s) de pedido")
+            
+            message = "Ingrediente excluído com sucesso"
+            if deleted_info:
+                message += f". Também foram excluídos: {', '.join(deleted_info)}"
+            
+            return (True, None, message)
         else:
             return (False, "NO_ROWS_AFFECTED", "Nenhuma linha foi afetada na exclusão")
             
     except fdb.Error as e:  
         # ALTERAÇÃO: Substituído print() por logging estruturado
         logger.error(f"Erro ao excluir ingrediente: {e}", exc_info=True)  
-        if conn: conn.rollback()  
+        if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")  
     except Exception as e:
         # ALTERAÇÃO: Substituído print() por logging estruturado
@@ -588,7 +621,10 @@ def get_ingredients_for_product(product_id, quantity=1):
                 "is_available": is_available,
                 "line_cost": round(line_cost, 2),
                 "min_quantity": min_quantity,
-                "max_quantity": effective_max_quantity,  # Menor entre regra e estoque (já calculado)
+                # ALTERAÇÃO: Retornar valor original do banco (max_quantity) para edição
+                # effective_max_quantity é calculado e pode ser diferente do valor configurado
+                "max_quantity": max_quantity,  # Valor original do banco (regra configurada)
+                "effective_max_quantity": effective_max_quantity,  # Valor calculado (menor entre regra e estoque)
                 # AJUSTE: Adicionar informações de estoque para validação
                 "current_stock": round(current_stock, 3),
                 "max_available": max_available_value,  # Mantém para referência

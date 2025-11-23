@@ -796,10 +796,20 @@ def get_all_orders(page=1, page_size=50, search=None, status=None, channel=None,
             params.append(search_pattern)
             params.append(search_pattern)
         
-        # Filtro de status
+        # ALTERAÇÃO: Fase Futura - Filtro de status (suporta múltiplos status separados por vírgula)
         if status:
-            where_clauses.append("o.STATUS = ?")
-            params.append(status)
+            # ALTERAÇÃO: Verificar se status contém vírgula (múltiplos status)
+            if ',' in status:
+                # ALTERAÇÃO: Separar status e criar filtro IN
+                status_list = [s.strip() for s in status.split(',') if s.strip()]
+                if status_list:
+                    placeholders = ', '.join(['?' for _ in status_list])
+                    where_clauses.append(f"o.STATUS IN ({placeholders})")
+                    params.extend(status_list)
+            else:
+                # ALTERAÇÃO: Status único (comportamento original)
+                where_clauses.append("o.STATUS = ?")
+                params.append(status)
         
         # Filtro de canal (tipo de pedido)
         if channel:
@@ -837,9 +847,10 @@ def get_all_orders(page=1, page_size=50, search=None, status=None, channel=None,
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
         
         # OTIMIZAÇÃO: Query com paginação usando FIRST/SKIP do Firebird
+        # ALTERAÇÃO: Incluir TOTAL_AMOUNT para permitir cálculos de receita no frontend
         sql = f"""
             SELECT FIRST {page_size} SKIP {offset}
-                o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, u.FULL_NAME, a.STREET, a."NUMBER"
+                o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, o.TOTAL_AMOUNT, u.FULL_NAME, a.STREET, a."NUMBER"
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
@@ -856,17 +867,19 @@ def get_all_orders(page=1, page_size=50, search=None, status=None, channel=None,
             address_str = None
             if order_type == ORDER_TYPE_PICKUP:
                 address_str = "Retirada no balcão"
-            elif row[6] and row[7]:  # STREET e NUMBER não nulos
-                address_str = f"{row[6]}, {row[7]}"
+            elif row[7] and row[8]:  # STREET e NUMBER não nulos (índices ajustados após adicionar TOTAL_AMOUNT)
+                address_str = f"{row[7]}, {row[8]}"
             else:
                 address_str = "Endereço não informado"
             
+            # ALTERAÇÃO: Incluir total_amount no retorno
             orders.append({
                 "id": row[0],  # Adicionado para compatibilidade com frontend
                 "order_id": row[0], "status": row[1], "confirmation_code": row[2],
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
                 "order_type": order_type,
-                "customer_name": row[5],
+                "total_amount": float(row[5]) if row[5] else 0.0,  # ALTERAÇÃO: Incluir total_amount
+                "customer_name": row[6],  # Índice ajustado após adicionar TOTAL_AMOUNT
                 "address": address_str
             })
         
@@ -1154,9 +1167,12 @@ def get_order_details(order_id, user_id, user_role):
 
         
         sql_order = """
-            SELECT ID, USER_ID, ADDRESS_ID, STATUS, CONFIRMATION_CODE, NOTES,
-                   PAYMENT_METHOD, TOTAL_AMOUNT, CREATED_AT, ORDER_TYPE, CHANGE_FOR_AMOUNT
-            FROM ORDERS WHERE ID = ?;
+            SELECT o.ID, o.USER_ID, o.ADDRESS_ID, o.STATUS, o.CONFIRMATION_CODE, o.NOTES,
+                   o.PAYMENT_METHOD, o.TOTAL_AMOUNT, o.CREATED_AT, o.ORDER_TYPE, o.CHANGE_FOR_AMOUNT,
+                   u.FULL_NAME
+            FROM ORDERS o
+            LEFT JOIN USERS u ON o.USER_ID = u.ID
+            WHERE o.ID = ?;
         """
         cur.execute(sql_order, (order_id,))
         order_row = cur.fetchone()
@@ -1176,7 +1192,8 @@ def get_order_details(order_id, user_id, user_role):
             "created_at": order_row[8].strftime('%Y-%m-%d %H:%M:%S') if order_row[8] else None,
             "order_type": order_row[9] if order_row[9] else 'delivery',
             "change_for_amount": change,
-            "amount_paid": amount_paid
+            "amount_paid": amount_paid,
+            "customer_name": order_row[11] if order_row[11] else None
         }
 
         # Verificação de segurança: cliente só pode ver seus próprios pedidos
@@ -1185,6 +1202,7 @@ def get_order_details(order_id, user_id, user_role):
 
         # CORREÇÃO: Evitar query N+1 - buscar todos os extras de uma vez
         # Primeiro busca todos os itens
+        # ALTERAÇÃO: Incluir COST_PRICE do produto para cálculo de CMV
         # Inclui PRODUCT_ID, imagem e tempo de preparo do produto para evitar roundtrips no frontend
         sql_items = """
             SELECT
@@ -1196,7 +1214,8 @@ def get_order_details(order_id, user_id, user_role):
                 oi.PRODUCT_ID,
                 p.IMAGE_URL,
                 NULL AS IMAGE_HASH, -- REVISAR: adicionar coluna real se existir
-                p.PREPARATION_TIME_MINUTES
+                p.PREPARATION_TIME_MINUTES,
+                COALESCE(p.COST_PRICE, 0) as COST_PRICE
             FROM ORDER_ITEMS oi
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
             WHERE oi.ORDER_ID = ?;
@@ -1224,15 +1243,38 @@ def get_order_details(order_id, user_id, user_role):
                 # Ignorar IDs inválidos (não devem acontecer, mas prevenir é melhor)
                 continue
         
+        # ALTERAÇÃO: Importar função de cálculo de CMV antes de usar
+        try:
+            from .financial_movement_service import _calculate_cost_per_base_portion
+        except ImportError:
+            # Fallback se não conseguir importar
+            def _calculate_cost_per_base_portion(price, stock_unit, base_portion_quantity, base_portion_unit):
+                if not price or price <= 0:
+                    return 0.0
+                stock_unit = str(stock_unit or 'un').strip().lower()
+                base_portion_unit = str(base_portion_unit or 'un').strip().lower()
+                if stock_unit == base_portion_unit or stock_unit == 'un' or base_portion_unit == 'un':
+                    return float(price) * float(base_portion_quantity or 1.0)
+                # Conversão simplificada (kg->g, L->ml)
+                conversion_factors = {'kg': {'g': 1000}, 'l': {'ml': 1000}, 'litro': {'ml': 1000}}
+                factor = 1
+                if conversion_factors.get(stock_unit) and conversion_factors[stock_unit].get(base_portion_unit):
+                    factor = conversion_factors[stock_unit][base_portion_unit]
+                elif conversion_factors.get(base_portion_unit) and conversion_factors[base_portion_unit].get(stock_unit):
+                    factor = 1 / conversion_factors[base_portion_unit][stock_unit]
+                return (float(price) / factor) * float(base_portion_quantity or 1.0)
+        
         # ALTERAÇÃO: Inicializar extras_dict vazio e só popular se houver IDs válidos
         # Se não há IDs válidos, os itens ainda serão processados abaixo, mas sem extras
         extras_dict = {}
         
         # ALTERAÇÃO: Só executar query se houver IDs válidos
+        # ALTERAÇÃO: Incluir dados do ingrediente para cálculo de custo unitário
         if validated_ids:
             placeholders = ', '.join(['?' for _ in validated_ids])
             sql_extras = f"""
-                SELECT e.ORDER_ITEM_ID, e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA
+                SELECT e.ORDER_ITEM_ID, e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA,
+                       COALESCE(i.PRICE, 0) as PRICE, i.STOCK_UNIT, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT
                 FROM ORDER_ITEM_EXTRAS e
                 JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
                 WHERE e.ORDER_ITEM_ID IN ({placeholders})
@@ -1245,11 +1287,34 @@ def get_order_details(order_id, user_id, user_role):
                 if order_item_id not in extras_dict:
                     extras_dict[order_item_id] = {'extras': [], 'base_modifications': []}
                 row_type = (ex[4] or 'extra').lower()
+                
+                # ALTERAÇÃO: Calcular custo unitário do insumo
+                ingredient_price = float(ex[6]) if ex[6] is not None else 0.0
+                stock_unit = ex[7] or 'un'
+                base_portion_quantity = float(ex[8] or 1) if ex[8] is not None else 1.0
+                base_portion_unit = ex[9] or 'un'
+                
+                # Calcular custo por porção base
+                try:
+                    cost_per_base_portion = _calculate_cost_per_base_portion(
+                        ingredient_price,
+                        stock_unit,
+                        base_portion_quantity,
+                        base_portion_unit
+                    )
+                except:
+                    cost_per_base_portion = 0.0
+                
                 if row_type == 'extra':
                     extras_dict[order_item_id]['extras'].append({
                         "ingredient_id": ex[1],
                         "name": ex[2],
-                        "quantity": ex[3]
+                        "quantity": ex[3],
+                        "unit_cost": cost_per_base_portion,  # ALTERAÇÃO: Custo unitário do insumo
+                        "price": ingredient_price,
+                        "stock_unit": stock_unit,
+                        "base_portion_quantity": base_portion_quantity,
+                        "base_portion_unit": base_portion_unit
                     })
                 elif row_type == 'base':
                     # ALTERAÇÃO: Validação de delta para prevenir erros
@@ -1264,13 +1329,87 @@ def get_order_details(order_id, user_id, user_role):
                     extras_dict[order_item_id]['base_modifications'].append({
                         "ingredient_id": ex[1],
                         "name": ex[2],
-                        "delta": delta_value
+                        "delta": delta_value,
+                        "unit_cost": cost_per_base_portion,  # ALTERAÇÃO: Custo unitário do insumo
+                        "price": ingredient_price,
+                        "stock_unit": stock_unit,
+                        "base_portion_quantity": base_portion_quantity,
+                        "base_portion_unit": base_portion_unit
                     })
 
         # Monta lista de itens com seus extras
         order_items = []
         for item_row in item_rows:
             order_item_id = item_row[0]
+            cost_price = float(item_row[9]) if item_row[9] is not None else 0.0
+            
+            # ALTERAÇÃO: Calcular CMV do item incluindo extras e modificações
+            item_cmv = cost_price * item_row[1]  # Custo base do produto
+            
+            # Calcular custo dos extras
+            item_extras = extras_dict.get(order_item_id, {}).get('extras', [])
+            for extra in item_extras:
+                if extra.get('ingredient_id'):
+                    try:
+                        # Buscar dados do ingrediente
+                        cur.execute("""
+                            SELECT PRICE, STOCK_UNIT, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT
+                            FROM INGREDIENTS
+                            WHERE ID = ?
+                        """, (extra['ingredient_id'],))
+                        ing_row = cur.fetchone()
+                        if ing_row and ing_row[0]:
+                            extra_price = float(ing_row[0])
+                            stock_unit = ing_row[1] or 'un'
+                            base_portion_quantity = float(ing_row[2] or 1)
+                            base_portion_unit = ing_row[3] or 'un'
+                            extra_quantity = extra.get('quantity', 1)
+                            
+                            # Calcular custo por porção base
+                            cost_per_base_portion = _calculate_cost_per_base_portion(
+                                extra_price,
+                                stock_unit,
+                                base_portion_quantity,
+                                base_portion_unit
+                            )
+                            
+                            # Adicionar ao CMV
+                            item_cmv += cost_per_base_portion * extra_quantity
+                    except Exception as e:
+                        logger.warning(f"Erro ao calcular custo de extra {extra.get('ingredient_id')}: {e}")
+            
+            # Calcular custo das modificações de base
+            item_base_mods = extras_dict.get(order_item_id, {}).get('base_modifications', [])
+            for mod in item_base_mods:
+                if mod.get('ingredient_id') and mod.get('delta', 0) > 0:
+                    try:
+                        # Buscar dados do ingrediente
+                        cur.execute("""
+                            SELECT PRICE, STOCK_UNIT, BASE_PORTION_QUANTITY, BASE_PORTION_UNIT
+                            FROM INGREDIENTS
+                            WHERE ID = ?
+                        """, (mod['ingredient_id'],))
+                        ing_row = cur.fetchone()
+                        if ing_row and ing_row[0]:
+                            mod_price = float(ing_row[0])
+                            stock_unit = ing_row[1] or 'un'
+                            base_portion_quantity = float(ing_row[2] or 1)
+                            base_portion_unit = ing_row[3] or 'un'
+                            delta = mod.get('delta', 0)
+                            
+                            # Calcular custo por porção base
+                            cost_per_base_portion = _calculate_cost_per_base_portion(
+                                mod_price,
+                                stock_unit,
+                                base_portion_quantity,
+                                base_portion_unit
+                            )
+                            
+                            # Adicionar ao CMV
+                            item_cmv += cost_per_base_portion * delta
+                    except Exception as e:
+                        logger.warning(f"Erro ao calcular custo de modificação {mod.get('ingredient_id')}: {e}")
+            
             item_dict = {
                 "quantity": item_row[1],
                 "unit_price": item_row[2],
@@ -1279,16 +1418,20 @@ def get_order_details(order_id, user_id, user_role):
                 "product_id": item_row[5],                 # adicionado
                 "product_image_url": item_row[6],          # adicionado
                 "product_image_hash": item_row[7],         # adicionado (pode ser None)
+                "cost_price": cost_price,                 # ALTERAÇÃO: Incluir cost_price
+                "unit_cost": cost_price,                   # ALTERAÇÃO: Custo unitário do produto
+                "total_cost": item_cmv,                    # ALTERAÇÃO: CMV total do item (produto + extras + mods)
                 "product": {
                     "id": item_row[5],
                     "name": item_row[3],
                     "description": item_row[4],
                     "image_url": item_row[6],
                     "image_hash": item_row[7],
-                    "preparation_time_minutes": int(item_row[8]) if item_row[8] else 0  # Tempo de preparo do produto
+                    "preparation_time_minutes": int(item_row[8]) if item_row[8] else 0,  # Tempo de preparo do produto
+                    "cost_price": cost_price               # ALTERAÇÃO: Incluir cost_price no objeto product
                 },
-                "extras": extras_dict.get(order_item_id, {}).get('extras', []),
-                "base_modifications": extras_dict.get(order_item_id, {}).get('base_modifications', [])
+                "extras": item_extras,
+                "base_modifications": item_base_mods
             }
             order_items.append(item_dict)
         

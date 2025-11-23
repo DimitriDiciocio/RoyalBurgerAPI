@@ -15,77 +15,346 @@ def create_product(product_data):
     description = product_data.get('description')  
     price = product_data.get('price')  
     cost_price = product_data.get('cost_price', 0.0)  
-    preparation_time_minutes = product_data.get('preparation_time_minutes', 0)  
-    category_id = product_data.get('category_id')  
+    # ALTERAÇÃO: Garantir que preparation_time_minutes seja int ou None
+    prep_time_raw = product_data.get('preparation_time_minutes', 0)
+    try:
+        preparation_time_minutes = int(prep_time_raw) if prep_time_raw is not None and prep_time_raw != '' else None
+    except (ValueError, TypeError):
+        preparation_time_minutes = None
+    
+    # ALTERAÇÃO: Normalizar category_id (converter string vazia para None, garantir tipo correto)
+    category_id_raw = product_data.get('category_id')
+    if category_id_raw is None or category_id_raw == '' or category_id_raw == 'null' or str(category_id_raw).strip() == '':
+        category_id = None
+    else:
+        try:
+            category_id = int(category_id_raw) if category_id_raw is not None else None
+            # ALTERAÇÃO: Validar que é positivo
+            if category_id is not None and category_id <= 0:
+                return (None, "INVALID_CATEGORY", "ID da categoria deve ser um número positivo")
+        except (ValueError, TypeError):
+            category_id = None
     ingredients = product_data.get('ingredients') or []
+    
+    # ALTERAÇÃO: Validar ingredientes obrigatórios ANTES de criar o produto
+    # Isso evita criar produto e depois fazer rollback se não houver ingredientes obrigatórios
+    if ingredients:
+        if not isinstance(ingredients, list):
+            return (None, "INVALID_INGREDIENTS", "ingredients deve ser uma lista")
+        
+        # Verificar se há pelo menos 1 ingrediente obrigatório (portions > 0)
+        has_required_ingredient = False
+        for item in ingredients:
+            if not isinstance(item, dict):
+                continue
+            portions = item.get('portions', 0)
+            try:
+                portions_float = float(portions) if portions is not None else 0.0
+                if portions_float > 0:
+                    has_required_ingredient = True
+                    break
+            except (ValueError, TypeError):
+                continue
+        
+        if not has_required_ingredient:
+            return (None, "INCOMPLETE_RECIPE", "Produto deve ter pelo menos um ingrediente obrigatório (PORTIONS > 0) na receita")
+    
+    # ALTERAÇÃO: Processar is_active (padrão True se não fornecido)
+    is_active = product_data.get('is_active', True)
+    if isinstance(is_active, str):
+        is_active = is_active.lower() in ('true', '1', 'yes', 'on')
+    is_active = bool(is_active)
+    
     if not name or not name.strip():  
         return (None, "INVALID_NAME", "Nome do produto é obrigatório")  
     if price is None or price <= 0:  
         return (None, "INVALID_PRICE", "Preço deve ser maior que zero")  
     if cost_price is not None and cost_price < 0:  
         return (None, "INVALID_COST_PRICE", "Preço de custo não pode ser negativo")  
-    if preparation_time_minutes is not None and preparation_time_minutes < 0:  
-        return (None, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")  
-    if category_id is None:  
-        return (None, "INVALID_CATEGORY", "Categoria é obrigatória")  
+    # ALTERAÇÃO: Validar preparation_time_minutes apenas se não for None
+    if preparation_time_minutes is not None:
+        try:
+            prep_time_int = int(preparation_time_minutes)
+            if prep_time_int < 0:
+                return (None, "INVALID_PREP_TIME", "Tempo de preparo não pode ser negativo")
+            preparation_time_minutes = prep_time_int
+        except (ValueError, TypeError):
+            return (None, "INVALID_PREP_TIME", "Tempo de preparo deve ser um número válido")  
+    # ALTERAÇÃO: Categoria não é mais obrigatória (pode ser None)
+    # if category_id is None:
+    #     return (None, "INVALID_CATEGORY", "Categoria é obrigatória")
     conn = None  
     try:  
-        conn = get_db_connection()  
-        cur = conn.cursor()  
-        # valida categoria existente e ativa  
-        cur.execute("SELECT 1 FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (category_id,))  
-        if not cur.fetchone():  
-            return (None, "CATEGORY_NOT_FOUND", "Categoria informada não existe ou está inativa")  
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # ALTERAÇÃO: Validar categoria apenas se fornecida (não None)
+        if category_id is not None:
+            cur.execute("SELECT 1 FROM CATEGORIES WHERE ID = ? AND IS_ACTIVE = TRUE;", (category_id,))
+            if not cur.fetchone():
+                return (None, "CATEGORY_NOT_FOUND", "Categoria informada não existe ou está inativa")
         sql_check = "SELECT ID FROM PRODUCTS WHERE UPPER(NAME) = UPPER(?) AND IS_ACTIVE = TRUE;"  
         cur.execute(sql_check, (name,))  
         if cur.fetchone():  
             return (None, "PRODUCT_NAME_EXISTS", "Já existe um produto com este nome")  
-        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ID;"  
-        cur.execute(sql, (name, description, price, cost_price, preparation_time_minutes, category_id, None))  
-        new_product_id = cur.fetchone()[0]  
+        # ALTERAÇÃO: Garantir tipos corretos antes de inserir (Firebird é estrito com tipos)
+        # preparation_time_minutes: NOT NULL no schema, então usar 0 se None
+        prep_time_value = int(preparation_time_minutes) if preparation_time_minutes is not None else 0
+        
+        # category_id: pode ser NULL no schema, então usar None se não fornecido
+        category_id_value = None if category_id is None else int(category_id)
+        
+        # ALTERAÇÃO: Log de debug para verificar tipos
+        logger.debug(f"[create_product] Valores antes do INSERT: name={name}, price={price}, cost_price={cost_price}, prep_time={prep_time_value} (type: {type(prep_time_value)}), category_id={category_id_value} (type: {type(category_id_value)}), is_active={is_active} (type: {type(is_active)})")
+        
+        # ALTERAÇÃO: Incluir IS_ACTIVE no INSERT
+        sql = "INSERT INTO PRODUCTS (NAME, DESCRIPTION, PRICE, COST_PRICE, PREPARATION_TIME_MINUTES, CATEGORY_ID, IMAGE_URL, IS_ACTIVE) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ID;"  
+        cur.execute(sql, (name, description, price, cost_price, prep_time_value, category_id_value, None, is_active))  
+        result = cur.fetchone()
+        if not result or result[0] is None:
+            raise ValueError("Erro ao obter ID do produto criado")
+        new_product_id_raw = result[0]
+        # ALTERAÇÃO: Garantir que new_product_id seja int (Firebird pode retornar como outro tipo)
+        try:
+            new_product_id = int(new_product_id_raw)
+        except (ValueError, TypeError) as e:
+            logger.error(f"[create_product] Erro ao converter new_product_id para int: {new_product_id_raw} (tipo: {type(new_product_id_raw)}), erro: {e}")
+            raise ValueError(f"Erro ao obter ID do produto criado: {new_product_id_raw} não é um número válido")
+        if new_product_id <= 0:
+            raise ValueError(f"ID do produto inválido: {new_product_id}")  
 
+        # ALTERAÇÃO: Log de debug para ingredientes recebidos
+        logger.debug(f"[create_product] Ingredientes recebidos: {ingredients}")
+        logger.debug(f"[create_product] Tipo de ingredientes: {type(ingredients)}")
+        logger.debug(f"[create_product] É lista: {isinstance(ingredients, list)}")
+        
         # Insere ingredientes, se fornecidos
         if ingredients:
-            for item in ingredients:
-                ingredient_id = item.get('ingredient_id')
+            if not isinstance(ingredients, list):
+                raise ValueError("ingredients deve ser uma lista")
+            
+            logger.debug(f"[create_product] Processando {len(ingredients)} ingredientes")
+            
+            for idx, item in enumerate(ingredients):
+                if not isinstance(item, dict):
+                    raise ValueError(f"Ingrediente {idx} deve ser um dicionário")
+                
+                ingredient_id_raw = item.get('ingredient_id')
                 portions = item.get('portions', 0)
                 min_quantity = item.get('min_quantity', 0)
                 max_quantity = item.get('max_quantity', 0)
 
-                if not ingredient_id and ingredient_id != 0:
+                # ALTERAÇÃO: Garantir que ingredient_id seja int (Firebird requer INTEGER)
+                if ingredient_id_raw is None:
                     raise ValueError("ingredient_id é obrigatório nos ingredientes")
-                if portions is None or portions < 0:
+                try:
+                    ingredient_id = int(ingredient_id_raw)
+                except (ValueError, TypeError):
+                    raise ValueError(f"ingredient_id deve ser um número inteiro válido (recebido: {ingredient_id_raw}, tipo: {type(ingredient_id_raw)})")
+
+                # ALTERAÇÃO: Log de debug para cada ingrediente
+                logger.debug(f"[create_product] Ingrediente {idx}: ingredient_id={ingredient_id} (type: {type(ingredient_id)}), portions={portions}, type(portions)={type(portions)}")
+                
+                # ALTERAÇÃO: Garantir que portions seja número
+                try:
+                    portions = float(portions) if portions is not None else 0.0
+                except (ValueError, TypeError):
+                    raise ValueError(f"portions deve ser um número válido (recebido: {portions}, tipo: {type(portions)})")
+                
+                if portions < 0:
                     raise ValueError("portions deve ser >= 0")
-                if min_quantity is None or min_quantity < 0:
+                
+                try:
+                    min_quantity = float(min_quantity) if min_quantity is not None else 0.0
+                except (ValueError, TypeError):
+                    min_quantity = 0.0
+                    
+                try:
+                    max_quantity = float(max_quantity) if max_quantity is not None else 0.0
+                except (ValueError, TypeError):
+                    max_quantity = 0.0
+                
+                if min_quantity < 0:
                     raise ValueError("min_quantity deve ser >= 0")
-                if max_quantity is None or max_quantity < 0:
+                if max_quantity < 0:
                     raise ValueError("max_quantity deve ser >= 0")
                 if max_quantity and min_quantity and max_quantity < min_quantity:
                     raise ValueError("max_quantity não pode ser menor que min_quantity")
 
+                # ALTERAÇÃO: Validar tipos antes de inserir (Firebird é estrito)
+                # Garantir que todos os valores sejam do tipo correto
+                # ALTERAÇÃO: Verificar se new_product_id está definido
+                if 'new_product_id' not in locals() or new_product_id is None:
+                    raise ValueError("new_product_id não está definido. Erro ao criar produto.")
+                
+                # ALTERAÇÃO: Converter e validar product_id PRIMEIRO
+                try:
+                    product_id_int = int(new_product_id)
+                    if product_id_int <= 0:
+                        raise ValueError(f"product_id_int deve ser maior que zero: {product_id_int}")
+                    if not isinstance(product_id_int, int):
+                        raise ValueError(f"product_id_int deve ser int, recebido: {type(product_id_int)}")
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[create_product] Erro ao converter product_id para int: new_product_id={new_product_id} (type: {type(new_product_id)}), erro: {e}")
+                    raise ValueError(f"Erro ao converter product_id para int: {new_product_id}")
+                
+                # ALTERAÇÃO: Converter e validar ingredient_id ANTES de usar na query
+                try:
+                    ingredient_id_int = int(ingredient_id)
+                    if ingredient_id_int <= 0:
+                        raise ValueError(f"ingredient_id_int deve ser maior que zero: {ingredient_id_int}")
+                    if not isinstance(ingredient_id_int, int):
+                        raise ValueError(f"ingredient_id_int deve ser int, recebido: {type(ingredient_id_int)}")
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[create_product] Erro ao converter ingredient_id para int: ingredient_id={ingredient_id} (type: {type(ingredient_id)}), erro: {e}")
+                    raise ValueError(f"Erro ao converter ingredient_id para int: {ingredient_id}")
+                
                 # valida existência do ingrediente
-                cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ingredient_id,))
+                # ALTERAÇÃO: Usar ingredient_id_int já convertido
+                cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ingredient_id_int,))
                 if not cur.fetchone():
-                    raise ValueError(f"Ingrediente {ingredient_id} não encontrado")
+                    raise ValueError(f"Ingrediente {ingredient_id_int} não encontrado")
+                
+                try:
+                    portions_float = float(portions)
+                    if portions_float < 0:
+                        raise ValueError(f"portions_float deve ser >= 0: {portions_float}")
+                    # ALTERAÇÃO: Validar limite máximo para portions
+                    if portions_float > 1000:
+                        raise ValueError(f"portions excede o limite máximo (1000): {portions_float}")
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[create_product] Erro ao converter portions para float: portions={portions} (type: {type(portions)}), erro: {e}")
+                    raise ValueError(f"Erro ao converter portions para float: {portions}")
+                
+                try:
+                    min_quantity_float = float(min_quantity) if min_quantity is not None else 0.0
+                    if min_quantity_float < 0:
+                        min_quantity_float = 0.0
+                    # ALTERAÇÃO: Validar limite máximo para min_quantity
+                    if min_quantity_float > 10000:
+                        raise ValueError(f"min_quantity excede o limite máximo (10000): {min_quantity_float}")
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[create_product] Erro ao converter min_quantity para float: min_quantity={min_quantity} (type: {type(min_quantity)}), erro: {e}")
+                    min_quantity_float = 0.0
+                
+                try:
+                    max_quantity_float = float(max_quantity) if max_quantity is not None else 0.0
+                    if max_quantity_float < 0:
+                        max_quantity_float = 0.0
+                    # ALTERAÇÃO: Validar limite máximo para max_quantity
+                    if max_quantity_float > 10000:
+                        raise ValueError(f"max_quantity excede o limite máximo (10000): {max_quantity_float}")
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[create_product] Erro ao converter max_quantity para float: max_quantity={max_quantity} (type: {type(max_quantity)}), erro: {e}")
+                    max_quantity_float = 0.0
+                
+                # ALTERAÇÃO: Validação final de tipos antes de inserir
+                if not isinstance(product_id_int, int):
+                    raise ValueError(f"product_id_int deve ser int, recebido: {type(product_id_int)}")
+                if not isinstance(ingredient_id_int, int):
+                    raise ValueError(f"ingredient_id_int deve ser int, recebido: {type(ingredient_id_int)}")
+                if not isinstance(portions_float, (int, float)):
+                    raise ValueError(f"portions_float deve ser número, recebido: {type(portions_float)}")
+                if not isinstance(min_quantity_float, (int, float)):
+                    raise ValueError(f"min_quantity_float deve ser número, recebido: {type(min_quantity_float)}")
+                if not isinstance(max_quantity_float, (int, float)):
+                    raise ValueError(f"max_quantity_float deve ser número, recebido: {type(max_quantity_float)}")
+                
+                # ALTERAÇÃO: Log detalhado antes de inserir
+                logger.debug(f"[create_product] Inserindo ingrediente {idx}:")
+                logger.debug(f"  product_id_int={product_id_int} (type: {type(product_id_int).__name__}, isinstance int: {isinstance(product_id_int, int)})")
+                logger.debug(f"  ingredient_id_int={ingredient_id_int} (type: {type(ingredient_id_int).__name__}, isinstance int: {isinstance(ingredient_id_int, int)})")
+                logger.debug(f"  portions_float={portions_float} (type: {type(portions_float).__name__})")
+                logger.debug(f"  min_quantity_float={min_quantity_float} (type: {type(min_quantity_float).__name__})")
+                logger.debug(f"  max_quantity_float={max_quantity_float} (type: {type(max_quantity_float).__name__})")
+                logger.debug(f"  Tupla completa: ({product_id_int}, {ingredient_id_int}, {portions_float}, {min_quantity_float}, {max_quantity_float})")
+                logger.debug(f"  Tipos da tupla: ({type(product_id_int).__name__}, {type(ingredient_id_int).__name__}, {type(portions_float).__name__}, {type(min_quantity_float).__name__}, {type(max_quantity_float).__name__})")
+
+                # ALTERAÇÃO: Criar tupla final com valores garantidamente do tipo correto
+                # Firebird requer tipos específicos: INTEGER para IDs e MIN/MAX_QUANTITY, DECIMAL para PORTIONS
+                # ALTERAÇÃO: MIN_QUANTITY e MAX_QUANTITY são INTEGER no Firebird, não DECIMAL
+                try:
+                    final_product_id = int(product_id_int)
+                    final_ingredient_id = int(ingredient_id_int)
+                    # ALTERAÇÃO: Converter para Decimal apenas para PORTIONS (campo DECIMAL)
+                    final_portions = Decimal(str(portions_float))
+                    # ALTERAÇÃO: Converter para int para MIN_QUANTITY e MAX_QUANTITY (campos INTEGER)
+                    final_min_qty = int(min_quantity_float) if min_quantity_float is not None else 0
+                    final_max_qty = int(max_quantity_float) if max_quantity_float is not None else 0
+                    
+                    # ALTERAÇÃO: Validação final de tipos
+                    if not isinstance(final_product_id, int):
+                        raise ValueError(f"final_product_id deve ser int, recebido: {type(final_product_id)}")
+                    if not isinstance(final_ingredient_id, int):
+                        raise ValueError(f"final_ingredient_id deve ser int, recebido: {type(final_ingredient_id)}")
+                    if not isinstance(final_portions, Decimal):
+                        raise ValueError(f"final_portions deve ser Decimal, recebido: {type(final_portions)}")
+                    if not isinstance(final_min_qty, int):
+                        raise ValueError(f"final_min_qty deve ser int, recebido: {type(final_min_qty)}")
+                    if not isinstance(final_max_qty, int):
+                        raise ValueError(f"final_max_qty deve ser int, recebido: {type(final_max_qty)}")
+                    
+                    params_tuple = (
+                        final_product_id,
+                        final_ingredient_id,
+                        final_portions,
+                        final_min_qty,
+                        final_max_qty
+                    )
+                    
+                    logger.info(f"[create_product] Tupla final para INSERT (ingrediente {idx}): {params_tuple}")
+                    logger.info(f"[create_product] Tipos da tupla final: {tuple(type(v).__name__ for v in params_tuple)}")
+                    logger.info(f"[create_product] Validação isinstance: product_id={isinstance(final_product_id, int)}, ingredient_id={isinstance(final_ingredient_id, int)}, portions={isinstance(final_portions, Decimal)}, min_qty={isinstance(final_min_qty, int)}, max_qty={isinstance(final_max_qty, int)}")
+                    
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[create_product] Erro ao criar tupla final para ingrediente {idx}: {e}")
+                    logger.error(f"[create_product] Valores originais: product_id_int={product_id_int} (type: {type(product_id_int)}), ingredient_id_int={ingredient_id_int} (type: {type(ingredient_id_int)}), portions_float={portions_float} (type: {type(portions_float)}), min_quantity_float={min_quantity_float} (type: {type(min_quantity_float)}), max_quantity_float={max_quantity_float} (type: {type(max_quantity_float)})")
+                    raise
 
                 cur.execute(
                     """
                     INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (new_product_id, ingredient_id, portions, min_quantity, max_quantity)
+                    params_tuple
                 )
         
         # ALTERAÇÃO: Valida receita completa antes de commitar
         # Verifica se produto tem pelo menos um ingrediente obrigatório (PORTIONS > 0)
+        # ALTERAÇÃO: Garantir que new_product_id seja int antes de usar nas queries
+        try:
+            new_product_id_int = int(new_product_id)
+        except (ValueError, TypeError) as e:
+            logger.error(f"[create_product] Erro ao converter new_product_id para validação: new_product_id={new_product_id} (type: {type(new_product_id)}), erro: {e}")
+            raise ValueError(f"Erro ao converter new_product_id para validação: {new_product_id}")
+        
         cur.execute("""
             SELECT COUNT(*) FROM PRODUCT_INGREDIENTS
             WHERE PRODUCT_ID = ? AND PORTIONS > 0
-        """, (new_product_id,))
+        """, (new_product_id_int,))
         required_ingredients_count = cur.fetchone()[0] or 0
+        
+        # ALTERAÇÃO: Log de debug para validação
+        logger.debug(f"[create_product] Ingredientes obrigatórios encontrados: {required_ingredients_count}")
+        
+        # ALTERAÇÃO: Verificar também quantos ingredientes foram inseridos no total
+        cur.execute("""
+            SELECT COUNT(*) FROM PRODUCT_INGREDIENTS
+            WHERE PRODUCT_ID = ?
+        """, (new_product_id_int,))
+        total_ingredients_count = cur.fetchone()[0] or 0
+        logger.debug(f"[create_product] Total de ingredientes inseridos: {total_ingredients_count}")
+        
+        # ALTERAÇÃO: Listar todos os ingredientes inseridos para debug
+        cur.execute("""
+            SELECT INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY FROM PRODUCT_INGREDIENTS
+            WHERE PRODUCT_ID = ?
+        """, (new_product_id_int,))  # ALTERAÇÃO: Usar new_product_id_int já convertido
+        all_ingredients = cur.fetchall()
+        logger.debug(f"[create_product] Ingredientes no banco: {all_ingredients}")
         
         if required_ingredients_count == 0:
             conn.rollback()
+            logger.warning(f"[create_product] Produto {new_product_id} rejeitado: nenhum ingrediente obrigatório (PORTIONS > 0)")
             return (None, "INCOMPLETE_RECIPE", "Produto deve ter pelo menos um ingrediente obrigatório (PORTIONS > 0) na receita")
 
         conn.commit()
@@ -93,10 +362,15 @@ def create_product(product_data):
         # OTIMIZAÇÃO: Invalida cache após criar produto
         _invalidate_product_cache()
         
-        return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id}, None, None)  
+        return ({"id": new_product_id, "name": name, "description": description, "price": price, "cost_price": cost_price, "preparation_time_minutes": preparation_time_minutes, "category_id": category_id, "is_active": is_active}, None, None)  
     except fdb.Error as e:  
         # ALTERAÇÃO: Logger já está definido no topo do módulo, não precisa redefinir
-        logger.error(f"Erro ao criar produto: {e}", exc_info=True)
+        # ALTERAÇÃO: Logar stack trace apenas em modo debug para evitar exposição de informações sensíveis
+        import logging
+        if logger.level <= logging.DEBUG:
+            logger.error(f"Erro ao criar produto: {e}", exc_info=True)
+        else:
+            logger.error(f"Erro ao criar produto: {str(e)}")
         if conn: conn.rollback()  
         return (None, "DATABASE_ERROR", "Erro interno do servidor")  
     except ValueError as ve:
@@ -1382,6 +1656,14 @@ def get_product_by_id(product_id, quantity=1):
 
 
 def update_product(product_id, update_data):  
+    # ALTERAÇÃO: Garantir que product_id seja int (Firebird requer INTEGER)
+    try:
+        product_id = int(product_id) if product_id is not None else None
+    except (ValueError, TypeError):
+        return (False, "INVALID_PRODUCT_ID", f"product_id deve ser um número inteiro válido (recebido: {product_id}, tipo: {type(product_id)})")
+    if product_id is None:
+        return (False, "INVALID_PRODUCT_ID", "product_id é obrigatório")
+    
     allowed_fields = ['name', 'description', 'price', 'cost_price', 'preparation_time_minutes', 'is_active', 'category_id']  
     fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}  
     new_ingredients = update_data.get('ingredients') if isinstance(update_data, dict) else None
@@ -1410,8 +1692,10 @@ def update_product(product_id, update_data):
         if category_id == -1:  # Valor especial para remoção de categoria
             # Remove a categoria (define como NULL no banco)
             fields_to_update['category_id'] = None
-        elif category_id is None:  
-            return (False, "INVALID_CATEGORY", "Categoria é obrigatória")  
+        # ALTERAÇÃO: Categoria pode ser None (produto sem categoria)
+        # Removida validação que impedia None
+        # elif category_id is None:  
+        #     return (False, "INVALID_CATEGORY", "Categoria é obrigatória")  
     conn = None  
     try:  
         conn = get_db_connection()  
@@ -1439,15 +1723,22 @@ def update_product(product_id, update_data):
 
         # Atualização das regras de ingredientes, se fornecidas
         if new_ingredients is not None:
+            # ALTERAÇÃO: Garantir que product_id seja int antes de usar na query
+            try:
+                product_id_int = int(product_id)
+            except (ValueError, TypeError) as e:
+                logger.error(f"[update_product] Erro ao converter product_id para buscar ingredientes: product_id={product_id}, erro: {e}")
+                return (False, "INVALID_PRODUCT_ID", f"Erro ao converter product_id: {product_id}")
+            
             # Busca estado atual
             cur.execute(
                 "SELECT INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ?",
-                (product_id,)
+                (product_id_int,)
             )
-            current = {row[0]: {
+            current = {int(row[0]): {  # ALTERAÇÃO: Garantir que ingredient_id seja int
                 "portions": float(row[1]) if row[1] is not None else 0.0,
-                "min_quantity": int(row[2]) if row[2] is not None else 0,
-                "max_quantity": int(row[3]) if row[3] is not None else 0
+                "min_quantity": float(row[2]) if row[2] is not None else 0.0,  # ALTERAÇÃO: float em vez de int
+                "max_quantity": float(row[3]) if row[3] is not None else 0.0  # ALTERAÇÃO: float em vez de int
             } for row in cur.fetchall()}
 
             # Normaliza nova lista
@@ -1458,8 +1749,14 @@ def update_product(product_id, update_data):
                 min_quantity = item.get('min_quantity', 0)
                 max_quantity = item.get('max_quantity', 0)
 
+                # ALTERAÇÃO: Garantir que ingredient_id seja int (Firebird requer INTEGER)
                 if ingredient_id is None:
                     return (False, "INVALID_INGREDIENTS", "ingredient_id é obrigatório")
+                try:
+                    ingredient_id = int(ingredient_id)
+                except (ValueError, TypeError):
+                    return (False, "INVALID_INGREDIENTS", f"ingredient_id deve ser um número inteiro válido (recebido: {ingredient_id}, tipo: {type(ingredient_id)})")
+                
                 if portions is None or portions < 0:
                     return (False, "INVALID_INGREDIENTS", "portions deve ser >= 0")
                 if min_quantity is None or min_quantity < 0:
@@ -1471,8 +1768,8 @@ def update_product(product_id, update_data):
 
                 desired[ingredient_id] = {
                     "portions": float(portions),
-                    "min_quantity": int(min_quantity),
-                    "max_quantity": int(max_quantity)
+                    "min_quantity": float(min_quantity) if min_quantity is not None else 0.0,
+                    "max_quantity": float(max_quantity) if max_quantity is not None else 0.0
                 }
 
             current_ids = set(current.keys())
@@ -1483,52 +1780,134 @@ def update_product(product_id, update_data):
             if to_delete:
                 # ALTERAÇÃO: Construção segura de placeholders - apenas IDs validados são usados
                 # to_delete contém apenas IDs de ingredientes já validados no loop anterior
-                placeholders = ', '.join(['?' for _ in to_delete])
+                # ALTERAÇÃO: Garantir que product_id seja int antes de usar na query
+                try:
+                    product_id_int = int(product_id)
+                    # Converter todos os IDs para int
+                    to_delete_ints = [int(ing_id) for ing_id in to_delete]
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[update_product] Erro ao converter tipos para deleção: product_id={product_id}, to_delete={to_delete}, erro: {e}")
+                    return (False, "INVALID_INGREDIENTS", f"Erro ao converter tipos dos ingredientes: {e}")
+                
+                placeholders = ', '.join(['?' for _ in to_delete_ints])
                 cur.execute(
                     f"DELETE FROM PRODUCT_INGREDIENTS WHERE PRODUCT_ID = ? AND INGREDIENT_ID IN ({placeholders})",
-                    (product_id, *tuple(to_delete))
+                    (product_id_int, *tuple(to_delete_ints))
                 )
 
             # Inserir adicionados
             to_insert = desired_ids - current_ids
             for ing_id in to_insert:
                 vals = desired[ing_id]
+                # ALTERAÇÃO: Garantir que todos os valores sejam do tipo correto antes de inserir
+                # MIN_QUANTITY e MAX_QUANTITY são INTEGER no Firebird, não DECIMAL
+                try:
+                    product_id_int = int(product_id)
+                    ingredient_id_int = int(ing_id)
+                    # ALTERAÇÃO: PORTIONS é DECIMAL, então usar Decimal
+                    portions_decimal = Decimal(str(vals['portions']))
+                    # ALTERAÇÃO: MIN_QUANTITY e MAX_QUANTITY são INTEGER, então converter para int
+                    min_quantity_int = int(vals['min_quantity']) if vals['min_quantity'] is not None else 0
+                    max_quantity_int = int(vals['max_quantity']) if vals['max_quantity'] is not None else 0
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[update_product] Erro ao converter tipos para inserção: product_id={product_id}, ing_id={ing_id}, vals={vals}, erro: {e}")
+                    return (False, "INVALID_INGREDIENTS", f"Erro ao converter tipos dos ingredientes: {e}")
+                
                 # valida existência do ingrediente
-                cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ing_id,))
+                cur.execute("SELECT 1 FROM INGREDIENTS WHERE ID = ?", (ingredient_id_int,))
                 if not cur.fetchone():
                     return (False, "INGREDIENT_NOT_FOUND", f"Ingrediente {ing_id} não encontrado")
+                
+                logger.debug(f"[update_product] Inserindo ingrediente: product_id={product_id_int} (type: {type(product_id_int)}), ingredient_id={ingredient_id_int} (type: {type(ingredient_id_int)}), portions={portions_decimal} (type: {type(portions_decimal)}), min_quantity={min_quantity_int} (type: {type(min_quantity_int)}), max_quantity={max_quantity_int} (type: {type(max_quantity_int)})")
+                
                 cur.execute(
                     """
                     INSERT INTO PRODUCT_INGREDIENTS (PRODUCT_ID, INGREDIENT_ID, PORTIONS, MIN_QUANTITY, MAX_QUANTITY)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (product_id, ing_id, vals['portions'], vals['min_quantity'], vals['max_quantity'])
+                    (product_id_int, ingredient_id_int, portions_decimal, min_quantity_int, max_quantity_int)
                 )
 
             # Atualizar alterados
             to_update = current_ids & desired_ids
             for ing_id in to_update:
-                cur_vals = current[ing_id]
-                new_vals = desired[ing_id]
-                if (cur_vals['portions'] != new_vals['portions'] or
-                    cur_vals['min_quantity'] != new_vals['min_quantity'] or
-                    cur_vals['max_quantity'] != new_vals['max_quantity']):
+                # ALTERAÇÃO: Garantir que ing_id seja int para acessar o dicionário
+                try:
+                    ing_id_int = int(ing_id)
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[update_product] Erro ao converter ing_id para atualização: ing_id={ing_id}, erro: {e}")
+                    continue  # Pular este ingrediente e continuar com os outros
+                
+                cur_vals = current.get(ing_id_int, {})
+                new_vals = desired.get(ing_id_int, {})
+                
+                # ALTERAÇÃO: Comparar valores convertidos para float
+                cur_portions = float(cur_vals.get('portions', 0) or 0)
+                new_portions = float(new_vals.get('portions', 0) or 0)
+                cur_min_qty = float(cur_vals.get('min_quantity', 0) or 0)
+                new_min_qty = float(new_vals.get('min_quantity', 0) or 0)
+                cur_max_qty = float(cur_vals.get('max_quantity', 0) or 0)
+                new_max_qty = float(new_vals.get('max_quantity', 0) or 0)
+                
+                if (cur_portions != new_portions or
+                    cur_min_qty != new_min_qty or
+                    cur_max_qty != new_max_qty):
+                    # ALTERAÇÃO: Garantir que todos os valores sejam do tipo correto antes de atualizar
+                    # MIN_QUANTITY e MAX_QUANTITY são INTEGER no Firebird, não DECIMAL
+                    try:
+                        product_id_int = int(product_id)
+                        ingredient_id_int = int(ing_id_int)  # ALTERAÇÃO: Usar ing_id_int já convertido
+                        # ALTERAÇÃO: PORTIONS é DECIMAL, então usar Decimal
+                        portions_decimal = Decimal(str(new_portions))
+                        # ALTERAÇÃO: MIN_QUANTITY e MAX_QUANTITY são INTEGER, então converter para int
+                        min_quantity_int = int(new_min_qty) if new_min_qty is not None else 0
+                        max_quantity_int = int(new_max_qty) if new_max_qty is not None else 0
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"[update_product] Erro ao converter tipos para atualização: product_id={product_id}, ing_id={ing_id_int}, new_vals={new_vals}, erro: {e}")
+                        continue  # Pular este ingrediente e continuar com os outros
+                    
+                    # ALTERAÇÃO: Validação final de tipos
+                    if not isinstance(product_id_int, int):
+                        logger.error(f"[update_product] product_id_int não é int: {type(product_id_int)}")
+                        continue
+                    if not isinstance(ingredient_id_int, int):
+                        logger.error(f"[update_product] ingredient_id_int não é int: {type(ingredient_id_int)}")
+                        continue
+                    if not isinstance(portions_decimal, Decimal):
+                        logger.error(f"[update_product] portions_decimal não é Decimal: {type(portions_decimal)}")
+                        continue
+                    if not isinstance(min_quantity_int, int):
+                        logger.error(f"[update_product] min_quantity_int não é int: {type(min_quantity_int)}")
+                        continue
+                    if not isinstance(max_quantity_int, int):
+                        logger.error(f"[update_product] max_quantity_int não é int: {type(max_quantity_int)}")
+                        continue
+                    
+                    logger.debug(f"[update_product] Atualizando ingrediente: product_id={product_id_int} (type: {type(product_id_int)}), ingredient_id={ingredient_id_int} (type: {type(ingredient_id_int)}), portions={portions_decimal} (type: {type(portions_decimal)}), min_quantity={min_quantity_int} (type: {type(min_quantity_int)}), max_quantity={max_quantity_int} (type: {type(max_quantity_int)})")
+                    
                     cur.execute(
                         """
                         UPDATE PRODUCT_INGREDIENTS
                         SET PORTIONS = ?, MIN_QUANTITY = ?, MAX_QUANTITY = ?
                         WHERE PRODUCT_ID = ? AND INGREDIENT_ID = ?
                         """,
-                        (new_vals['portions'], new_vals['min_quantity'], new_vals['max_quantity'], product_id, ing_id)
+                        (portions_decimal, min_quantity_int, max_quantity_int, product_id_int, ingredient_id_int)
                     )
         
         # ALTERAÇÃO: Valida receita completa antes de commitar
         # Verifica se produto tem pelo menos um ingrediente obrigatório (PORTIONS > 0)
         if new_ingredients is not None:
+            # ALTERAÇÃO: Garantir que product_id seja int antes de usar na query
+            try:
+                product_id_int = int(product_id)
+            except (ValueError, TypeError) as e:
+                logger.error(f"[update_product] Erro ao converter product_id para validação: product_id={product_id}, erro: {e}")
+                return (False, "INVALID_PRODUCT_ID", f"Erro ao converter product_id: {product_id}")
+            
             cur.execute("""
                 SELECT COUNT(*) FROM PRODUCT_INGREDIENTS
                 WHERE PRODUCT_ID = ? AND PORTIONS > 0
-            """, (product_id,))
+            """, (product_id_int,))
             required_ingredients_count = cur.fetchone()[0] or 0
             
             if required_ingredients_count == 0:

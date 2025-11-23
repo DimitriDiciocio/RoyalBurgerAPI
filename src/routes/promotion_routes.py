@@ -83,18 +83,37 @@ def create_promotion_route():
 @promotion_bp.route('/', methods=['GET'])
 def list_promotions_route():
     """
-    Lista todas as promoções ativas com detalhes dos produtos
+    Lista todas as promoções com detalhes dos produtos
+    ALTERAÇÃO: Suporta parâmetros padronizados (search, status, page, page_size)
     """
-    # ALTERAÇÃO: Corrigido parsing de boolean - type=bool no Flask converte qualquer string não vazia para True
-    # Usar comparação explícita com 'true' para garantir comportamento correto
-    include_expired = request.args.get('include_expired', 'false').lower() == 'true'
+    # ALTERAÇÃO: Parâmetros padronizados
+    page = request.args.get('page', type=int, default=1)
+    page_size = request.args.get('page_size', type=int, default=20)
+    search = request.args.get('search')  # Busca por produto ou ID da promoção
+    status = request.args.get('status')  # "ativas" ou "expiradas"
     
-    promotions = promotion_service.get_all_promotions(include_expired=include_expired)
+    # ALTERAÇÃO: Determinar include_expired baseado em status padronizado
+    include_expired = False
+    if status:
+        if status.lower() == 'ativas':
+            include_expired = False
+        elif status.lower() == 'expiradas':
+            include_expired = True
+            status = 'expiradas'  # Marcar para filtro específico
+    else:
+        # Fallback para parâmetro legado
+        include_expired = request.args.get('include_expired', 'false').lower() == 'true'
     
-    return jsonify({
-        "items": promotions,
-        "total": len(promotions)
-    }), 200
+    # ALTERAÇÃO: Usar serviço atualizado com paginação e filtros
+    result = promotion_service.get_all_promotions(
+        include_expired=include_expired,
+        search=search,
+        status=status,
+        page=page,
+        page_size=page_size
+    )
+    
+    return jsonify(result), 200
 
 
 @promotion_bp.route('/<int:promotion_id>', methods=['GET'])

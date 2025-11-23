@@ -226,6 +226,35 @@ def get_my_orders_route():
     # Novo formato com paginação
     return jsonify(result), 200  
 
+@order_bp.route('/today', methods=['GET'])
+@require_role('admin', 'manager')
+def get_today_orders_route():
+    """
+    Retorna pedidos do dia atual
+    Fase Futura: Endpoint específico para melhorar performance
+    """
+    # ALTERAÇÃO: Validação de parâmetros de paginação
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 50, type=int)
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 50
+    if page_size > 100:
+        page_size = 100
+    
+    # ALTERAÇÃO: Buscar pedidos de hoje usando o service com período 'today'
+    orders = order_service.get_all_orders(
+        page=page,
+        page_size=page_size,
+        search=None,
+        status=None,
+        channel=None,
+        period='today'
+    )
+    
+    return jsonify(orders), 200
+
 @order_bp.route('/all', methods=['GET'])  
 @require_role('admin', 'manager')  
 def get_all_orders_route():  
@@ -439,3 +468,4 @@ def get_kitchen_ticket_pdf_route(order_id):
     return Response(pdf_bytes, mimetype='application/pdf', headers={
         'Content-Disposition': f'inline; filename="kitchen-ticket-{order_id}.pdf"'
     })
+

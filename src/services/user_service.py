@@ -980,19 +980,38 @@ def get_users_paginated(page=1, per_page=20, filters=None, sort_by='full_name', 
                 "two_factor_enabled": bool(row[9]) if row[9] is not None else False,
             })
         
+        # ALTERAÇÃO: Retornar formato padronizado com total_pages, current_page, next, previous
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+        
         return {
             "users": users,
             "pagination": {
-                "page": page,
-                "per_page": per_page,
                 "total": total,
-                "pages": (total + per_page - 1) // per_page
+                "total_pages": total_pages,
+                "current_page": page,
+                "page_size": per_page,
+                "per_page": per_page,  # Manter para compatibilidade
+                "next": page + 1 if page < total_pages else None,
+                "previous": page - 1 if page > 1 else None,
+                "pages": total_pages  # Manter para compatibilidade
             }
         }
         
     except fdb.Error as e:
         logger.error(f"Erro ao buscar usuários paginados: {e}", exc_info=True)
-        return {"users": [], "pagination": {"page": page, "per_page": per_page, "total": 0, "pages": 0}}
+        return {
+            "users": [], 
+            "pagination": {
+                "total": 0,
+                "total_pages": 1,
+                "current_page": page,
+                "page_size": per_page,
+                "per_page": per_page,
+                "next": None,
+                "previous": None,
+                "pages": 0
+            }
+        }
     finally:
         if conn: conn.close()
 

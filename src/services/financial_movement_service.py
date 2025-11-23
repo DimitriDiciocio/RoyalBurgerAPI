@@ -12,8 +12,10 @@ import logging
 import hashlib
 import json
 from datetime import datetime, date, timedelta
+from decimal import Decimal
 from ..database import get_db_connection
 from ..utils.cache_manager import get_cache_manager
+from .stock_service import _convert_unit
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,82 @@ def _invalidate_financial_movements_cache():
         logger.debug("Cache de movimentações financeiras e resumo do fluxo de caixa invalidado")
     except Exception as e:
         logger.warning(f"Erro ao invalidar cache de movimentações: {e}")
+
+
+def _calculate_cost_per_base_portion(price, stock_unit, base_portion_quantity, base_portion_unit):
+    """
+    Calcula o custo por porção base de um insumo, convertendo corretamente as unidades.
+    
+    Etapa 1: Converte o preço da unidade de compra (stock_unit) para unidade base (g ou ml)
+    Etapa 2: Calcula o custo da porção base multiplicando pelo base_portion_quantity
+    
+    Exemplos:
+    - PRICE = R$ 25,00 por kg, BASE_PORTION_QUANTITY = 30g
+      → preço_por_g = R$ 25,00 / 1000 = R$ 0,025 por g
+      → custo_por_porcao = R$ 0,025 × 30 = R$ 0,75
+    
+    - PRICE = R$ 12,00 por L, BASE_PORTION_QUANTITY = 100ml
+      → preço_por_ml = R$ 12,00 / 1000 = R$ 0,012 por ml
+      → custo_por_porcao = R$ 0,012 × 100 = R$ 1,20
+    
+    Args:
+        price: Preço do insumo na unidade de compra (STOCK_UNIT)
+        stock_unit: Unidade de compra do insumo (ex: 'kg', 'g', 'L', 'ml')
+        base_portion_quantity: Quantidade da porção base (ex: 30, 100)
+        base_portion_unit: Unidade da porção base (ex: 'g', 'ml')
+    
+    Returns:
+        float: Custo por porção base em reais
+    """
+    try:
+        # Se preço é zero, retorna zero
+        if not price or price <= 0:
+            return 0.0
+        
+        # Normalizar unidades
+        stock_unit = str(stock_unit or 'un').strip().lower()
+        base_portion_unit = str(base_portion_unit or 'un').strip().lower()
+        base_portion_quantity = float(base_portion_quantity or 1.0)
+        
+        # Se unidades são iguais ou são 'un', não precisa conversão
+        if stock_unit == base_portion_unit or stock_unit == 'un' or base_portion_unit == 'un':
+            # Se unidades são iguais, custo por porção = preço × quantidade
+            return float(price) * base_portion_quantity
+        
+        # Converter preço para unidade base (g ou ml)
+        # Primeiro, converte 1 unidade de stock_unit para base_portion_unit
+        try:
+            # Converte 1 unidade de stock_unit para base_portion_unit
+            # Exemplo: 1 kg → 1000 g, então 1 g = 1/1000 kg
+            conversion_factor = _convert_unit(
+                Decimal('1'), 
+                from_unit=stock_unit, 
+                to_unit=base_portion_unit
+            )
+            
+            # Preço por unidade base = preço / fator_conversao
+            # Exemplo: R$ 25,00 por kg → R$ 25,00 / 1000 = R$ 0,025 por g
+            price_per_base_unit = float(price) / float(conversion_factor)
+            
+            # Custo por porção base = preço por unidade base × quantidade da porção
+            # Exemplo: R$ 0,025 por g × 30 g = R$ 0,75
+            cost_per_base_portion = price_per_base_unit * base_portion_quantity
+            
+            return cost_per_base_portion
+            
+        except (ValueError, Exception) as e:
+            # Se conversão falhar, logar e usar cálculo direto como fallback
+            logger.warning(
+                f"Erro ao converter unidades para cálculo de CMV: "
+                f"stock_unit={stock_unit}, base_portion_unit={base_portion_unit}, "
+                f"erro={e}. Usando cálculo direto como fallback."
+            )
+            # Fallback: assume que são unidades compatíveis e calcula diretamente
+            return float(price) * base_portion_quantity
+            
+    except Exception as e:
+        logger.error(f"Erro ao calcular custo por porção base: {e}")
+        return 0.0
 
 
 def create_financial_movement(movement_data, created_by_user_id, cur=None):
@@ -300,13 +378,14 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
             return (False, None, None, None, "Pedido não encontrado ou sem itens")
         
         # ALTERAÇÃO: Calcular CMV (Custo de Mercadoria Vendida) incluindo extras
+        # CORREÇÃO: Usar conversão de unidades para calcular custo correto por porção base
         # CORREÇÃO PERFORMANCE: Buscar todos os extras de uma vez para evitar N+1 queries
         item_ids = [item[0] for item in order_items]
         extras_map = {}  # item_id -> extras_cost
         
         if item_ids:
             try:
-                # ALTERAÇÃO: Buscar todos os extras de todos os itens em uma única query
+                # ALTERAÇÃO: Buscar todos os extras com informações de unidade e porção base
                 placeholders = ','.join(['?' for _ in item_ids])
                 cur.execute(f"""
                     SELECT 
@@ -314,7 +393,10 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
                         oie.TYPE,
                         oie.QUANTITY,
                         oie.DELTA,
-                        COALESCE(i.PRICE, 0) as PRICE
+                        COALESCE(i.PRICE, 0) as PRICE,
+                        COALESCE(i.STOCK_UNIT, 'un') as STOCK_UNIT,
+                        COALESCE(i.BASE_PORTION_QUANTITY, 1.0) as BASE_PORTION_QUANTITY,
+                        COALESCE(i.BASE_PORTION_UNIT, 'un') as BASE_PORTION_UNIT
                     FROM ORDER_ITEM_EXTRAS oie
                     LEFT JOIN INGREDIENTS i ON oie.INGREDIENT_ID = i.ID
                     WHERE oie.ORDER_ITEM_ID IN ({placeholders})
@@ -322,15 +404,23 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
                 
                 extras_rows = cur.fetchall()
                 for row in extras_rows:
-                    item_id, extra_type, quantity, delta, price = row
+                    item_id, extra_type, quantity, delta, price, stock_unit, base_portion_quantity, base_portion_unit = row
                     if item_id not in extras_map:
                         extras_map[item_id] = 0.0
                     
-                    price_float = float(price or 0)
+                    # ALTERAÇÃO: Calcular custo por porção base com conversão de unidades
+                    cost_per_base_portion = _calculate_cost_per_base_portion(
+                        price=float(price or 0),
+                        stock_unit=str(stock_unit or 'un'),
+                        base_portion_quantity=float(base_portion_quantity or 1.0),
+                        base_portion_unit=str(base_portion_unit or 'un')
+                    )
+                    
+                    # Calcular custo do extra ou modificação
                     if extra_type == 'extra' and quantity:
-                        extras_map[item_id] += float(quantity or 0) * price_float
+                        extras_map[item_id] += float(quantity or 0) * cost_per_base_portion
                     elif extra_type == 'base' and delta and delta > 0:
-                        extras_map[item_id] += float(delta) * price_float
+                        extras_map[item_id] += float(delta) * cost_per_base_portion
             except Exception as e:
                 # ALTERAÇÃO: Se houver erro, logar e continuar sem extras
                 logger.warning(f"Erro ao calcular custo de extras para pedido {order_id}: {e}")
@@ -675,6 +765,7 @@ def get_financial_movements(filters=None):
                 params.append(filters['bank_account'])
             
             if filters.get('reconciled') is not None:
+                # ALTERAÇÃO: Comparar diretamente com BOOLEAN (Firebird aceita TRUE/FALSE diretamente)
                 conditions.append("fm.RECONCILED = ?")
                 params.append(bool(filters['reconciled']))
         
@@ -1771,6 +1862,7 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
             params.append(end_date)
         
         if reconciled is not None:
+            # ALTERAÇÃO: Comparar diretamente com BOOLEAN (Firebird aceita TRUE/FALSE diretamente)
             conditions.append("fm.RECONCILED = ?")
             params.append(bool(reconciled))
         
@@ -1784,13 +1876,14 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         
         # ALTERAÇÃO: Buscar estatísticas com CAST para garantir compatibilidade de tipos
+        # ALTERAÇÃO: Usar CASE WHEN para converter BOOLEAN para comparação numérica (Firebird não permite CAST direto de BOOLEAN)
         stats_sql = """
             SELECT 
                 CAST(COUNT(*) AS INTEGER) as total,
-                CAST(SUM(CASE WHEN fm.RECONCILED = 1 THEN 1 ELSE 0 END) AS INTEGER) as reconciled_count,
-                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = 0 THEN 1 ELSE 0 END) AS INTEGER) as unreconciled_count,
-                CAST(SUM(CASE WHEN fm.RECONCILED = 1 THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as reconciled_amount,
-                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = 0 THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as unreconciled_amount
+                CAST(SUM(CASE WHEN fm.RECONCILED = TRUE THEN 1 ELSE 0 END) AS INTEGER) as reconciled_count,
+                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = FALSE THEN 1 ELSE 0 END) AS INTEGER) as unreconciled_count,
+                CAST(SUM(CASE WHEN fm.RECONCILED = TRUE THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as reconciled_amount,
+                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = FALSE THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as unreconciled_amount
             FROM FINANCIAL_MOVEMENTS fm
         """ + where_clause
         
