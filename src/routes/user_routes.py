@@ -751,11 +751,24 @@ def change_password_route():
 def verify_2fa_route():
     try:
         data = request.get_json()
+        if not data:
+            return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+            
         user_id = data.get('user_id')
         code = data.get('code')
         
         if not user_id or not code:
             return jsonify({"error": "user_id e code são obrigatórios"}), 400
+        
+        # ALTERAÇÃO: Converter user_id para int (pode vir como string do mobile)
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": "user_id deve ser um número válido"}), 400
+        
+        # ALTERAÇÃO: Validar formato do código (6 dígitos)
+        if not isinstance(code, str) or len(code) != 6 or not code.isdigit():
+            return jsonify({"error": "Código deve ter exatamente 6 dígitos"}), 400
         
         token, error_code, message = auth_service.verify_2fa_and_login(user_id, code)
         
@@ -799,18 +812,22 @@ def toggle_2fa_route():
         enable = data.get('enable', False)
         # SMS removido
 
+        # ALTERAÇÃO: Atualizar TWO_FACTOR_ENABLED diretamente no banco de dados
+        # Tanto para ativar quanto para desativar
+        success, error_code, message = two_factor_service.toggle_2fa(user_id, enable)
+        if not success:
+            return jsonify({"error": message}), 400
+        
+        # Se está ativando, também envia código de verificação por email
         if enable:
-            # Passo 1: enviar código pelo canal escolhido
-            success, error_code, message = two_factor_service.create_2fa_verification(user_id, None)
-            if not success:
-                return jsonify({"error": message}), 400
-            return jsonify({"message": message, "requires_confirmation": True}), 200
-        else:
-            # Desabilitar diretamente
-            success, error_code, message = two_factor_service.toggle_2fa(user_id, False)
-            if not success:
-                return jsonify({"error": message}), 400
-            return jsonify({"message": message}), 200
+            try:
+                # Envia código de verificação (não bloqueia se falhar)
+                two_factor_service.create_2fa_verification(user_id, None)
+            except Exception as e:
+                # Log mas não falha a operação
+                logger.warning(f"Erro ao enviar código 2FA após ativação: {e}", exc_info=True)
+        
+        return jsonify({"message": message}), 200
     except Exception as e:
         # ALTERAÇÃO: Logging estruturado ao invés de print
         logger.error(f"Erro ao alterar 2FA: {e}", exc_info=True)
@@ -847,6 +864,50 @@ def get_2fa_status_route():
     except Exception as e:
         # ALTERAÇÃO: Logging estruturado ao invés de print
         logger.error(f"Erro ao verificar status 2FA: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@user_bp.route('/resend-2fa-code', methods=['POST'])
+@rate_limit(max_requests=3, window_seconds=300)  # IMPLEMENTAÇÃO: Rate limiting - 3 tentativas por 5 minutos
+def resend_2fa_code_route():
+    """
+    Reenvia código 2FA para o usuário.
+    Body: { "user_id": int }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Corpo da requisição não pode ser vazio"}), 400
+            
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({"error": "user_id é obrigatório"}), 400
+        
+        # ALTERAÇÃO: Converter user_id para int
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": "user_id deve ser um número válido"}), 400
+        
+        # ALTERAÇÃO: create_2fa_verification busca o email internamente, então passamos None
+        # A função busca o email do usuário no banco de dados
+        success, error_code, message = two_factor_service.create_2fa_verification(user_id, None)
+        
+        if success:
+            return jsonify({"msg": message}), 200
+        else:
+            if error_code == "USER_NOT_FOUND":
+                return jsonify({"error": "Usuário não encontrado"}), 404
+            elif error_code == "EMAIL_ERROR":
+                return jsonify({"error": message}), 500
+            elif error_code == "DATABASE_ERROR":
+                return jsonify({"error": "Erro interno do servidor"}), 500
+            else:
+                return jsonify({"error": message}), 400
+                
+    except Exception as e:
+        # ALTERAÇÃO: Logging estruturado ao invés de print
+        logger.error(f"Erro ao reenviar código 2FA: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 

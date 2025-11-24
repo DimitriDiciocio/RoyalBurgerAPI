@@ -1,9 +1,12 @@
 import fdb
 import random
 import string
+import logging
 from datetime import datetime, timedelta
 from ..database import get_db_connection
 from . import email_service
+
+logger = logging.getLogger(__name__)
 
 def generate_2fa_code():
     """Gera código de 6 dígitos para 2FA"""
@@ -54,7 +57,7 @@ def create_2fa_verification(user_id, email):
         return (False, "USER_NOT_FOUND", "Usuário não encontrado")
         
     except fdb.Error as e:
-        print(f"Erro ao criar verificação 2FA: {e}")
+        logger.error(f"Erro ao criar verificação 2FA: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -104,7 +107,7 @@ def verify_2fa_code(user_id, code):
         return (True, None, "Código verificado com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao verificar código 2FA: {e}")
+        logger.error(f"Erro ao verificar código 2FA: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -124,7 +127,7 @@ def toggle_2fa(user_id, enable):
         return (True, None, "2FA atualizado com sucesso")
         
     except fdb.Error as e:
-        print(f"Erro ao atualizar 2FA: {e}")
+        logger.error(f"Erro ao atualizar 2FA: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -147,7 +150,7 @@ def enable_2fa_confirm(user_id, code):
         conn.commit()
         return (True, None, "2FA habilitado com sucesso")
     except fdb.Error as e:
-        print(f"Erro ao habilitar 2FA após confirmação: {e}")
+        logger.error(f"Erro ao habilitar 2FA após confirmação: {e}", exc_info=True)
         if conn: conn.rollback()
         return (False, "DATABASE_ERROR", "Erro interno do servidor")
     finally:
@@ -167,7 +170,7 @@ def is_2fa_enabled(user_id):
         return bool(result[0]) if result else False
         
     except fdb.Error as e:
-        print(f"Erro ao verificar 2FA: {e}")
+        logger.error(f"Erro ao verificar 2FA: {e}", exc_info=True)
         return False
     finally:
         if conn: conn.close()

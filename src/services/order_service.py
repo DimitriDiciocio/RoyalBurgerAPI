@@ -284,9 +284,15 @@ def _add_order_items(order_id, items, cur, promotions_map=None):
         # Garante que o preço é float
         unit_price = float(unit_price)
 
-        # ALTERAÇÃO: Salvar preço COM desconto aplicado no banco
-        sql_item = "INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE) VALUES (?, ?, ?, ?) RETURNING ID;"
-        cur.execute(sql_item, (order_id, product_id, quantity, unit_price))
+        # ALTERAÇÃO: Obter observações do item (notes)
+        item_notes = item.get('notes', '') or ''
+        # Garantir que notes é string
+        if item_notes and not isinstance(item_notes, str):
+            item_notes = str(item_notes)
+
+        # ALTERAÇÃO: Salvar preço COM desconto aplicado no banco e incluir observações
+        sql_item = "INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE, NOTES) VALUES (?, ?, ?, ?, ?) RETURNING ID;"
+        cur.execute(sql_item, (order_id, product_id, quantity, unit_price, item_notes))
         new_order_item_id = cur.fetchone()[0]
 
         # Insere extras (TYPE='extra')
@@ -523,17 +529,29 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             # Valida resgate de pontos
             _validate_points_redemption(points_to_redeem, order_total)
 
-            # Valida e processa valor pago para pagamento em dinheiro
+            # ALTERAÇÃO: Valida e processa valor pago para pagamento em dinheiro
+            # amount_paid só é obrigatório para entrega (delivery), não para pickup
             paid_amount = None
             if payment_method and payment_method.lower() in ['money', 'dinheiro', 'cash']:
-                if amount_paid is None:
-                    return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro")
-                try:
-                    paid_amount = float(amount_paid)
-                    if paid_amount < order_total:
-                        return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {order_total:.2f})")
-                except (ValueError, TypeError):
-                    return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+                # ALTERAÇÃO: amount_paid não é obrigatório para pickup (pagamento é feito no balcão)
+                if order_type != ORDER_TYPE_PICKUP:
+                    if amount_paid is None:
+                        return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro para entrega")
+                    try:
+                        paid_amount = float(amount_paid)
+                        if paid_amount < order_total:
+                            return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {order_total:.2f})")
+                    except (ValueError, TypeError):
+                        return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+                # Se for pickup, amount_paid pode ser None (pagamento é feito no balcão)
+                elif amount_paid is not None:
+                    # Se amount_paid foi fornecido mesmo sendo pickup, valida mas não é obrigatório
+                    try:
+                        paid_amount = float(amount_paid)
+                        if paid_amount < order_total:
+                            return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {order_total:.2f})")
+                    except (ValueError, TypeError):
+                        return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
 
             # Cria o pedido (address_id None para pickup e on-site, table_id só para on-site quando fornecido)
             confirmation_code = _generate_confirmation_code()
@@ -1204,6 +1222,7 @@ def get_order_details(order_id, user_id, user_role):
         # Primeiro busca todos os itens
         # ALTERAÇÃO: Incluir COST_PRICE do produto para cálculo de CMV
         # Inclui PRODUCT_ID, imagem e tempo de preparo do produto para evitar roundtrips no frontend
+        # ALTERAÇÃO: Incluir NOTES do item para exibir observações
         sql_items = """
             SELECT
                 oi.ID,
@@ -1215,7 +1234,8 @@ def get_order_details(order_id, user_id, user_role):
                 p.IMAGE_URL,
                 NULL AS IMAGE_HASH, -- REVISAR: adicionar coluna real se existir
                 p.PREPARATION_TIME_MINUTES,
-                COALESCE(p.COST_PRICE, 0) as COST_PRICE
+                COALESCE(p.COST_PRICE, 0) as COST_PRICE,
+                oi.NOTES
             FROM ORDER_ITEMS oi
             JOIN PRODUCTS p ON oi.PRODUCT_ID = p.ID
             WHERE oi.ORDER_ID = ?;
@@ -1342,6 +1362,16 @@ def get_order_details(order_id, user_id, user_role):
         for item_row in item_rows:
             order_item_id = item_row[0]
             cost_price = float(item_row[9]) if item_row[9] is not None else 0.0
+            # ALTERAÇÃO: Obter observações do item (NOTES)
+            item_notes = item_row[10] if len(item_row) > 10 else None
+            # Converter BLOB para string se necessário
+            if item_notes is not None:
+                if isinstance(item_notes, bytes):
+                    item_notes = item_notes.decode('utf-8')
+                elif not isinstance(item_notes, str):
+                    item_notes = str(item_notes) if item_notes else ''
+            else:
+                item_notes = ''
             
             # ALTERAÇÃO: Calcular CMV do item incluindo extras e modificações
             item_cmv = cost_price * item_row[1]  # Custo base do produto
@@ -1421,6 +1451,8 @@ def get_order_details(order_id, user_id, user_role):
                 "cost_price": cost_price,                 # ALTERAÇÃO: Incluir cost_price
                 "unit_cost": cost_price,                   # ALTERAÇÃO: Custo unitário do produto
                 "total_cost": item_cmv,                    # ALTERAÇÃO: CMV total do item (produto + extras + mods)
+                "notes": item_notes,                       # ALTERAÇÃO: Incluir observações do item
+                "observacoes": item_notes,                 # ALTERAÇÃO: Alias para compatibilidade
                 "product": {
                     "id": item_row[5],
                     "name": item_row[3],
@@ -1871,17 +1903,29 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             if expected_discount > total_with_delivery:
                 return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
         
-        # Valida e processa valor pago para pagamento em dinheiro
+        # ALTERAÇÃO: Valida e processa valor pago para pagamento em dinheiro
+        # amount_paid só é obrigatório para entrega (delivery), não para pickup
         paid_amount = None
         if payment_method and payment_method.lower() in ['money', 'dinheiro', 'cash']:
-            if amount_paid is None:
-                return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro")
-            try:
-                paid_amount = float(amount_paid)
-                if paid_amount < total_with_delivery:
-                    return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {total_with_delivery:.2f})")
-            except (ValueError, TypeError):
-                return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+            # ALTERAÇÃO: amount_paid não é obrigatório para pickup (pagamento é feito no balcão)
+            if order_type != ORDER_TYPE_PICKUP:
+                if amount_paid is None:
+                    return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro para entrega")
+                try:
+                    paid_amount = float(amount_paid)
+                    if paid_amount < total_with_delivery:
+                        return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {total_with_delivery:.2f})")
+                except (ValueError, TypeError):
+                    return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+            # Se for pickup, amount_paid pode ser None (pagamento é feito no balcão)
+            elif amount_paid is not None:
+                # Se amount_paid foi fornecido mesmo sendo pickup, valida mas não é obrigatório
+                try:
+                    paid_amount = float(amount_paid)
+                    if paid_amount < total_with_delivery:
+                        return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {total_with_delivery:.2f})")
+                except (ValueError, TypeError):
+                    return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
         
         # Cria o pedido (address_id None para pickup e on-site, table_id só para on-site quando fornecido)
         # ALTERAÇÃO: STATUS inicial 'active_table' apenas para pedidos on-site COM mesa vinculada
@@ -1957,11 +2001,17 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
             # Garante que unit_price é float
             unit_price_float = float(unit_price_float)
             
+            # ALTERAÇÃO: Obter observações do item (notes)
+            item_notes = item.get('notes', '') or ''
+            # Garantir que notes é string
+            if item_notes and not isinstance(item_notes, str):
+                item_notes = str(item_notes)
+            
             sql_item = """
-                INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE)
-                VALUES (?, ?, ?, ?) RETURNING ID;
+                INSERT INTO ORDER_ITEMS (ORDER_ID, PRODUCT_ID, QUANTITY, UNIT_PRICE, NOTES)
+                VALUES (?, ?, ?, ?, ?) RETURNING ID;
             """
-            cur.execute(sql_item, (order_id, product_id, quantity, unit_price_float))
+            cur.execute(sql_item, (order_id, product_id, quantity, unit_price_float, item_notes))
             order_item_id = cur.fetchone()[0]
 
             # Insere extras do item (TYPE='extra')
