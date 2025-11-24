@@ -13,9 +13,17 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# Cores padrão para gráficos
-DEFAULT_COLORS = ['#4CAF50', '#2196F3', '#FF9800', '#F44336', '#9C27B0', 
-                  '#00BCD4', '#FFC107', '#795548', '#607D8B', '#E91E63']
+# Paleta padrão em tons de azul (garante identidade visual consistente)
+PRIMARY_BLUE = '#1565C0'
+SECONDARY_BLUE = '#1E88E5'
+ACCENT_BLUE = '#42A5F5'
+LIGHT_BLUE = '#90CAF9'
+DEEP_BLUE = '#0D47A1'
+
+DEFAULT_COLORS = [
+    PRIMARY_BLUE, SECONDARY_BLUE, ACCENT_BLUE, DEEP_BLUE, LIGHT_BLUE,
+    '#5E92F3', '#82B1FF', '#1976D2', '#64B5F6', '#0B59B5'
+]
 
 
 def _hex_to_rgb(hex_color):
@@ -45,7 +53,7 @@ def _encode_image_to_base64(image):
         return None
 
 
-def generate_line_chart(data, title, x_label='', y_label='', width=10, height=6):
+def generate_line_chart(data, title, x_label='', y_label='', width=7, height=3.8):
     """
     Gera gráfico de linha (tendências temporais)
     
@@ -62,15 +70,15 @@ def generate_line_chart(data, title, x_label='', y_label='', width=10, height=6)
         str: Imagem em base64 ou None se erro
     """
     try:
-        # Converte polegadas para pixels (100 DPI)
-        img_width = int(width * 100)
-        img_height = int(height * 100)
+        # Converte polegadas para pixels (125 DPI para manter nitidez em tamanho reduzido)
+        img_width = int(width * 125)
+        img_height = int(height * 125)
         
-        # Margens
-        margin_top = 60
-        margin_bottom = 50
-        margin_left = 70
-        margin_right = 30
+        # Margens mais compactas
+        margin_top = 40
+        margin_bottom = 38
+        margin_left = 60
+        margin_right = 20
         
         chart_width = img_width - margin_left - margin_right
         chart_height = img_height - margin_top - margin_bottom
@@ -104,9 +112,9 @@ def generate_line_chart(data, title, x_label='', y_label='', width=10, height=6)
         
         # Desenha título
         try:
-            font_title = ImageFont.truetype("arial.ttf", 16)
-            font_label = ImageFont.truetype("arial.ttf", 11)
-            font_axis = ImageFont.truetype("arial.ttf", 9)
+            font_title = ImageFont.truetype("arial.ttf", 20)
+            font_label = ImageFont.truetype("arial.ttf", 13)
+            font_axis = ImageFont.truetype("arial.ttf", 12)
         except:
             font_title = ImageFont.load_default()
             font_label = ImageFont.load_default()
@@ -130,7 +138,7 @@ def generate_line_chart(data, title, x_label='', y_label='', width=10, height=6)
             draw.text((15, (img_height - y_label_bbox[3]) // 2), y_label_text, fill='black', font=font_label)
         
         # Desenha eixos
-        axis_color = (100, 100, 100)
+        axis_color = _hex_to_rgb('#4F5B62')
         # Eixo Y
         draw.line([(margin_left, margin_top), (margin_left, margin_top + chart_height)], fill=axis_color, width=2)
         # Eixo X
@@ -158,11 +166,11 @@ def generate_line_chart(data, title, x_label='', y_label='', width=10, height=6)
         # Desenha linha
         if len(points) > 1:
             for i in range(len(points) - 1):
-                draw.line([points[i], points[i+1]], fill='#2196F3', width=3)
+                draw.line([points[i], points[i+1]], fill=PRIMARY_BLUE, width=3)
         
         # Desenha pontos
         for point in points:
-            draw.ellipse([point[0] - 4, point[1] - 4, point[0] + 4, point[1] + 4], fill='#2196F3', outline='white', width=1)
+            draw.ellipse([point[0] - 3, point[1] - 3, point[0] + 3, point[1] + 3], fill=ACCENT_BLUE, outline='white', width=1)
         
         # Labels do eixo X (datas)
         if dates:
@@ -182,8 +190,8 @@ def generate_line_chart(data, title, x_label='', y_label='', width=10, height=6)
         return None
 
 
-def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6, 
-                       horizontal=False, color='#4CAF50'):
+def generate_bar_chart(data, title, x_label='', y_label='', width=7, height=3.8, 
+                       horizontal=False, color=PRIMARY_BLUE):
     """
     Gera gráfico de barras (comparações)
     
@@ -202,13 +210,13 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
         str: Imagem em base64 ou None se erro
     """
     try:
-        img_width = int(width * 100)
-        img_height = int(height * 100)
+        img_width = int(width * 125)
+        img_height = int(height * 125)
         
-        margin_top = 60
-        margin_bottom = 50
-        margin_left = 70
-        margin_right = 30
+        margin_top = 40
+        margin_bottom = 40
+        margin_left = 60
+        margin_right = 20
         
         chart_width = img_width - margin_left - margin_right
         chart_height = img_height - margin_top - margin_bottom
@@ -235,9 +243,9 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
         labels = [label[:15] + '...' if len(label) > 15 else label for label in labels]
         
         try:
-            font_title = ImageFont.truetype("arial.ttf", 16)
-            font_label = ImageFont.truetype("arial.ttf", 11)
-            font_axis = ImageFont.truetype("arial.ttf", 9)
+            font_title = ImageFont.truetype("arial.ttf", 20)
+            font_label = ImageFont.truetype("arial.ttf", 13)
+            font_axis = ImageFont.truetype("arial.ttf", 12)
         except:
             font_title = ImageFont.load_default()
             font_label = ImageFont.load_default()
@@ -274,21 +282,37 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
                 # Rotaciona 90 graus (simulado com posicionamento)
                 draw.text((15, y_label_y), y_label, fill='black', font=font_label)
         
-        # Calcula ranges
-        max_val = max(values) if values else 1
-        min_val = min(0, min(values)) if values else 0
-        val_range = max_val - min_val if max_val != min_val else 1
+        # Calcula ranges com suporte a eixos inteiros dinâmicos
+        max_val_data = max(values) if values else 1
+        min_val_data = min(values) if values else 0
+        are_integer_values = all(float(v).is_integer() for v in values)
+        use_integer_ticks = bool(
+            are_integer_values and max_val_data <= 20 and (max_val_data - min_val_data) <= 10
+        )
+        
+        if use_integer_ticks:
+            min_val = 0 if min_val_data >= 0 else min_val_data
+            max_val = max_val_data
+            if max_val == min_val:
+                max_val = min_val + 1
+        else:
+            min_val = min(0, min_val_data)
+            max_val = max_val_data
+            if max_val == min_val:
+                max_val = min_val + 1
+        
+        val_range = max_val - min_val
         
         bar_color = _hex_to_rgb(color)
-        axis_color = (100, 100, 100)
+        axis_color = _hex_to_rgb('#4F5B62')
         
         if horizontal:
             # Barras horizontais
             # Aumenta margem esquerda para dar espaço aos labels dos produtos
-            margin_left_labels = 100  # Mais espaço para labels longos
+            margin_left_labels = 90  # Mais espaço para labels longos
             chart_width_adj = img_width - margin_left_labels - margin_right
             
-            bar_height = chart_height / len(labels) * 0.7
+            bar_height = chart_height / len(labels) * 0.65
             bar_spacing = chart_height / len(labels)
             
             # Eixo Y (vertical, à esquerda)
@@ -297,16 +321,22 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
             draw.line([(margin_left_labels, margin_top + chart_height), (margin_left_labels + chart_width_adj, margin_top + chart_height)], fill=axis_color, width=2)
             
             # Grid e labels do eixo X (valores numéricos)
-            num_ticks = 5
-            for i in range(num_ticks + 1):
-                x_pos = margin_left_labels + (i * chart_width_adj / num_ticks)
-                val = min_val + (val_range * i / num_ticks)
-                label = f"{val:.1f}"
+            if use_integer_ticks:
+                tick_values = list(range(int(min_val), int(max_val) + 1))
+                if len(tick_values) == 1:
+                    tick_values.append(tick_values[0] + 1)
+            else:
+                num_ticks = 5
+                tick_values = [min_val + (val_range * i / num_ticks) for i in range(num_ticks + 1)]
+            
+            for val in tick_values:
+                x_pos = margin_left_labels + (((val - min_val) / val_range) * chart_width_adj)
+                label = f"{int(val)}" if use_integer_ticks else f"{val:.1f}"
                 label_bbox = draw.textbbox((0, 0), label, font=font_axis)
                 label_width = label_bbox[2] - label_bbox[0]
                 draw.text((x_pos - label_width // 2, margin_top + chart_height + 5), label, fill='black', font=font_axis)
-                if i > 0:
-                    draw.line([(x_pos, margin_top), (x_pos, margin_top + chart_height)], fill=(200, 200, 200), width=1)
+                if val > min_val:
+                    draw.line([(x_pos, margin_top), (x_pos, margin_top + chart_height)], fill=(220, 230, 245), width=1)
             
             # Desenha barras
             for i, (label, value) in enumerate(zip(labels, values)):
@@ -331,7 +361,7 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
         else:
             # Barras verticais
             # Aumenta margem inferior para evitar sobreposição de labels
-            margin_bottom_labels = 80  # Mais espaço para labels rotacionados
+            margin_bottom_labels = 65  # Mais espaço para labels rotacionados
             chart_height_adj = img_height - margin_top - margin_bottom_labels
             
             bar_width = chart_width / len(labels) * 0.6  # Reduz largura para dar mais espaço
@@ -343,16 +373,22 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
             draw.line([(margin_left, margin_top + chart_height_adj), (margin_left + chart_width, margin_top + chart_height_adj)], fill=axis_color, width=2)
             
             # Grid e labels do eixo Y
-            num_ticks = 5
-            for i in range(num_ticks + 1):
-                y_pos = margin_top + chart_height_adj - (i * chart_height_adj // num_ticks)
-                val = min_val + (val_range * i / num_ticks)
-                label = f"{val:.1f}"
+            if use_integer_ticks:
+                tick_values = list(range(int(min_val), int(max_val) + 1))
+                if len(tick_values) == 1:
+                    tick_values.append(tick_values[0] + 1)
+            else:
+                num_ticks = 5
+                tick_values = [min_val + (val_range * i / num_ticks) for i in range(num_ticks + 1)]
+            
+            for val in tick_values:
+                y_pos = margin_top + chart_height_adj - (((val - min_val) / val_range) * chart_height_adj)
+                label = f"{int(val)}" if use_integer_ticks else f"{val:.1f}"
                 label_bbox = draw.textbbox((0, 0), label, font=font_axis)
                 label_width = label_bbox[2] - label_bbox[0]
                 draw.text((margin_left - label_width - 5, y_pos - 5), label, fill='black', font=font_axis)
-                if i > 0 and i < num_ticks:
-                    draw.line([(margin_left, y_pos), (margin_left + chart_width, y_pos)], fill=(200, 200, 200), width=1)
+                if val > min_val and val < max_val:
+                    draw.line([(margin_left, y_pos), (margin_left + chart_width, y_pos)], fill=(220, 230, 245), width=1)
             
             # Desenha barras
             # Lista para rastrear posições dos labels e evitar sobreposição
@@ -420,7 +456,7 @@ def generate_bar_chart(data, title, x_label='', y_label='', width=10, height=6,
         return None
 
 
-def generate_pie_chart(data, title, width=8, height=8, colors=None):
+def generate_pie_chart(data, title, width=5.5, height=5.5, colors=None):
     """
     Gera gráfico de pizza (distribuições)
     
@@ -438,8 +474,8 @@ def generate_pie_chart(data, title, width=8, height=8, colors=None):
     try:
         # Garante que seja quadrado para gráfico circular (não oval)
         size = min(width, height)  # Usa o menor valor
-        img_width = int(size * 100)
-        img_height = int(size * 100)
+        img_width = int(size * 125)
+        img_height = int(size * 125)
         
         img = Image.new('RGB', (img_width, img_height), color='white')
         draw = ImageDraw.Draw(img)
@@ -478,9 +514,9 @@ def generate_pie_chart(data, title, width=8, height=8, colors=None):
         percentages = [v / total * 100 for v in values]
         
         try:
-            font_title = ImageFont.truetype("arial.ttf", 16)
-            font_label = ImageFont.truetype("arial.ttf", 10)
-            font_percent = ImageFont.truetype("arial.ttf", 9)
+            font_title = ImageFont.truetype("arial.ttf", 20)
+            font_label = ImageFont.truetype("arial.ttf", 13)
+            font_percent = ImageFont.truetype("arial.ttf", 12)
         except:
             font_title = ImageFont.load_default()
             font_label = ImageFont.load_default()
@@ -493,7 +529,7 @@ def generate_pie_chart(data, title, width=8, height=8, colors=None):
         
         # Área do gráfico
         center_x = img_width // 2
-        center_y = img_height // 2 + 20
+        center_y = img_height // 2 + 8
         radius = min(img_width, img_height) // 3
         
         # Desenha pizza
@@ -527,8 +563,8 @@ def generate_pie_chart(data, title, width=8, height=8, colors=None):
             # Label e percentual (fora do gráfico)
             mid_angle = current_angle + angle / 2
             mid_angle_rad = math.radians(mid_angle)
-            label_x = center_x + (radius + 30) * math.cos(mid_angle_rad)
-            label_y = center_y + (radius + 30) * math.sin(mid_angle_rad)
+            label_x = center_x + (radius + 25) * math.cos(mid_angle_rad)
+            label_y = center_y + (radius + 25) * math.sin(mid_angle_rad)
             
             label_text = f"{label}: {percent:.1f}%"
             label_bbox = draw.textbbox((0, 0), label_text, font=font_label)

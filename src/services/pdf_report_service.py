@@ -154,13 +154,13 @@ class BaseReportPDF(FPDF):
         self.set_draw_color(*PRIMARY_COLOR)
         self.set_line_width(0.5)
         self.line(self.MARGIN_LEFT, self.get_y(), self.w - self.MARGIN_RIGHT, self.get_y())
-        self.ln(6)
+        self.ln(4)  # Reduzido de 6 para 4mm para economizar espaço
         self.set_text_color(*PRIMARY_COLOR)  # Restaura cor padrão
         
     def footer(self):
         """Rodapé padrão para todos os relatórios com estilo melhorado"""
-        # Posiciona o rodapé usando constante
-        self.set_y(-15)
+        # Posiciona o rodapé usando constante - reduzido para economizar espaço
+        self.set_y(-12)
         
         # Data de emissão usando constante
         self.set_font('Arial', 'I', self.FONT_SIZE_SMALL)
@@ -586,8 +586,8 @@ class BaseReportPDF(FPDF):
                 available_width = get_chart_width(self.content_width, CHART_WIDTH_RATIO)
                 # Para pizza, sempre usa dimensões quadradas
                 # Usa a largura disponível como base, mas limita pela altura disponível também
-                available_height = self.h - self.get_y() - self.MARGIN_BOTTOM - 20  # 20mm para título
-                size = min(available_width, available_height, 120)  # Máximo 120mm para não ficar muito grande
+                available_height = self.h - self.get_y() - self.MARGIN_BOTTOM - 15  # 15mm para título (reduzido)
+                size = min(available_width, available_height, CHART_HEIGHT_MAX)  # Usa constante do config
                 width = size
                 height = size
             else:
@@ -656,16 +656,16 @@ class BaseReportPDF(FPDF):
         self.set_draw_color(*PRIMARY_COLOR)
         self.rect(x_start, y_start, card_width, card_height)
             
-        # Label (estilo do outro projeto)
-        self.set_xy(x_start + 5, y_start + 5)
+        # Label (estilo do outro projeto) - mais compacto
+        self.set_xy(x_start + 4, y_start + 4)
         self.set_font('Arial', '', self.FONT_SIZE_NORMAL)
         self.set_text_color(*PRIMARY_COLOR)
-        self.cell(0, 6, str(label), 0, 1, 'L')
+        self.cell(0, 5, str(label), 0, 1, 'L')
         
-        # Valor (estilo do outro projeto)
-        self.set_font('Arial', 'B', self.FONT_SIZE_XXLARGE)
-        value_y = y_start + 14  # 5 (topo) + 6 (label) + 3 (espaço)
-        self.set_xy(x_start + 5, value_y)
+        # Valor (estilo do outro projeto) - mais compacto
+        self.set_font('Arial', 'B', self.FONT_SIZE_XLARGE)  # Reduzido de XXLARGE para XLARGE
+        value_y = y_start + 11  # 4 (topo) + 5 (label) + 2 (espaço) - reduzido
+        self.set_xy(x_start + 4, value_y)
         self.cell(0, line_height, str(value), 0, 0, 'L')
         
         # Comparação se fornecida
@@ -694,13 +694,13 @@ class BaseReportPDF(FPDF):
         if width is None:
             width = self.content_width
         
-        # Calcula altura se não fornecida
+        # Calcula altura se não fornecida - mais compacto
         if height is None:
             num_items = len(data_dict)
             num_rows = (num_items + 1) // 2  # 2 colunas
             title_height = self.get_line_height(self.FONT_SIZE_LARGE)
             line_height = self.get_line_height(self.FONT_SIZE_NORMAL)
-            height = title_height + (line_height * num_rows) + (self.CELL_PADDING_V * 4) + self.PADDING_SMALL
+            height = title_height + (line_height * num_rows) + (self.CELL_PADDING_V * 2) + self.PADDING_SMALL
         
         x_start = self.get_x()
         y_start = self.get_y()
@@ -740,13 +740,13 @@ class BaseReportPDF(FPDF):
             row = i // 2
             
             col_x = col1_x if col == 0 else col2_x
-            y_pos = start_data_y + (row * (line_h + 1))
+            y_pos = start_data_y + (row * (line_h + 0.5))  # Espaçamento reduzido
             
             self.set_xy(col_x, y_pos)
             self.set_font('Arial', '', self.FONT_SIZE_NORMAL)
-            self.cell(30, line_h, f"{label}:", 0, 0, 'L')
+            self.cell(28, line_h, f"{label}:", 0, 0, 'L')
             self.set_font('Arial', 'B', self.FONT_SIZE_NORMAL)
-            self.cell(col_width - 30, line_h, str(value), 0, 0, 'L')
+            self.cell(col_width - 28, line_h, str(value), 0, 0, 'L')
             
             # Move para próxima linha
         self.set_xy(self.MARGIN_LEFT, y_start + height + self.PADDING_MEDIUM)
@@ -830,21 +830,21 @@ class BaseReportPDF(FPDF):
             else:
                 title_value = str(data)
             
-            # Desenha título (estilo do outro projeto: 5mm do topo, fonte B 10pt)
-            self.set_xy(start_x + 5, start_y + 5)
+            # Desenha título (estilo do outro projeto: mais compacto)
+            self.set_xy(start_x + 4, start_y + 4)
             self.set_font('Arial', 'B', self.FONT_SIZE_NORMAL)
             self.set_text_color(*PRIMARY_COLOR)
             title_text = str(title_value)
             # Trunca se necessário
-            max_title_width = width - 10
+            max_title_width = width - 8
             if self.get_string_width(title_text) > max_title_width:
                 while self.get_string_width(title_text + '...') > max_title_width and len(title_text):
                     title_text = title_text[:-1]
                 title_text += '...'
-            self.cell(max_title_width, 6, title_text, 0, 1, 'L')
+            self.cell(max_title_width, 5, title_text, 0, 1, 'L')
         
-        # Campos restantes (estilo do outro projeto: 14mm do topo, linha a cada 6mm)
-        y_pos = start_y + 14  # 5 (topo) + 6 (título) + 3 (espaço)
+        # Campos restantes (estilo do outro projeto: mais compacto)
+        y_pos = start_y + 11  # 4 (topo) + 5 (título) + 2 (espaço) - reduzido
         
         for field in fields[1:]:  # Pula o primeiro que já foi usado como título
             if y_pos + line_height > start_y + height - 5:
@@ -864,22 +864,22 @@ class BaseReportPDF(FPDF):
             else:
                 value = str(data)
             
-            # Label (estilo do outro projeto: fonte normal 9pt, largura fixa 30mm)
-            self.set_xy(start_x + 5, y_pos)
-            self.set_font('Arial', '', 9)  # FONT_SIZE_SMALL = 9
-            self.cell(30, line_height, f"{label}:", 0, 0, 'L')
+            # Label (estilo do outro projeto: mais compacto)
+            self.set_xy(start_x + 4, y_pos)
+            self.set_font('Arial', '', self.FONT_SIZE_SMALL)
+            self.cell(28, line_height, f"{label}:", 0, 0, 'L')
             
-            # Valor (estilo do outro projeto: fonte B 9pt)
-            self.set_font('Arial', 'B', 9)
+            # Valor (estilo do outro projeto: mais compacto)
+            self.set_font('Arial', 'B', self.FONT_SIZE_SMALL)
             value_text = str(value)
-            max_value_width = width - 40  # 30 para label + 10 de margem
+            max_value_width = width - 36  # 28 para label + 8 de margem
             if self.get_string_width(value_text) > max_value_width:
                 while self.get_string_width(value_text + '...') > max_value_width and len(value_text):
                     value_text = value_text[:-1]
                 value_text += '...'
             self.cell(max_value_width, line_height, value_text, 0, 0, 'L')
             
-            y_pos += line_height + 1  # Espaçamento entre linhas
+            y_pos += line_height + 0.5  # Espaçamento entre linhas reduzido
     
     def add_comparison_section(self, current_data, previous_data, title="Comparação de Períodos"):
         """
