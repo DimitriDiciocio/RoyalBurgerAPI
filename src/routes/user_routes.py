@@ -274,7 +274,8 @@ def get_all_users_route():
         role_map = {
             'atendente': 'attendant',
             'gerente': 'manager',
-            'entregador': 'delivery',
+            'entregador': 'deliverer',
+            'delivery': 'deliverer',
             'admin': 'admin',
             'cliente': 'customer'
         }
@@ -282,9 +283,9 @@ def get_all_users_route():
         mapped_role = role_map.get(role.lower(), role)
         
         if mapped_role == 'all_staff':
-            filters['role'] = ['admin', 'manager', 'attendant', 'delivery']
+            filters['role'] = ['admin', 'manager', 'attendant', 'deliverer']
         elif mapped_role == 'all_employees':
-            filters['role'] = ['admin', 'manager', 'attendant', 'delivery']
+            filters['role'] = ['admin', 'manager', 'attendant', 'deliverer']
         else:
             filters['role'] = mapped_role
     
@@ -323,9 +324,11 @@ def create_user_route():
         return jsonify({"error": "Campos obrigatórios: nome, email, senha e cargo"}), 400
     
     # Validação de cargo
-    valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+    if data['role'] == 'delivery':
+        data['role'] = 'deliverer'
+    valid_roles = ['admin', 'manager', 'attendant', 'deliverer', 'customer']
     if data['role'] not in valid_roles:
-        return jsonify({"error": "Cargo inválido. Cargos válidos: admin, manager, attendant, delivery, customer"}), 400
+        return jsonify({"error": "Cargo inválido. Cargos válidos: admin, manager, attendant, deliverer, customer"}), 400
     
     # Validação de data de nascimento se fornecida
     if 'date_of_birth' in data and data['date_of_birth']:
@@ -403,7 +406,9 @@ def update_user_role_route(user_id):
     if not data or 'role' not in data:
         return jsonify({"error": "Campo 'role' é obrigatório"}), 400
     
-    valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+    if data['role'] == 'delivery':
+        data['role'] = 'deliverer'
+    valid_roles = ['admin', 'manager', 'attendant', 'deliverer', 'customer']
     if data['role'] not in valid_roles:
         return jsonify({"error": "Cargo inválido"}), 400
     
@@ -442,7 +447,9 @@ def update_user_route(user_id):
     
     # Validação de cargo se fornecido
     if 'role' in data:
-        valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+        if data['role'] == 'delivery':
+            data['role'] = 'deliverer'
+        valid_roles = ['admin', 'manager', 'attendant', 'deliverer', 'customer']
         if data['role'] not in valid_roles:
             return jsonify({"error": "Cargo inválido"}), 400
     
@@ -587,7 +594,7 @@ def get_available_roles_route():
         {"value": "admin", "label": "Administrador"},
         {"value": "manager", "label": "Gerente"},
         {"value": "attendant", "label": "Atendente"},
-        {"value": "delivery", "label": "Entregador"},
+        {"value": "deliverer", "label": "Entregador"},  # ALTERAÇÃO: alinhar com roles aceitos pelo backend
         {"value": "customer", "label": "Cliente"}
     ]
     return jsonify({"roles": roles}), 200

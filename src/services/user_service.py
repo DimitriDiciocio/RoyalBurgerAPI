@@ -99,6 +99,9 @@ def create_user(user_data):
         return (None, "WEAK_PASSWORD", message)
 
     role = user_data.get('role', 'customer')
+    if role == 'delivery':
+        role = 'deliverer'
+        user_data['role'] = role
     hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
     conn = None
@@ -433,9 +436,12 @@ def update_user(user_id, update_data, is_admin_request=False):
 
         if 'role' in update_data:
             new_role = update_data['role']
-            valid_roles = ['admin', 'manager', 'attendant', 'delivery', 'customer']
+            if new_role == 'delivery':
+                new_role = 'deliverer'
+                update_data['role'] = new_role
+            valid_roles = ['admin', 'manager', 'attendant', 'deliverer', 'customer']
             if new_role not in valid_roles:
-                return (False, "INVALID_ROLE", "Cargo inválido. Cargos válidos: admin, manager, attendant, delivery, customer")
+                return (False, "INVALID_ROLE", "Cargo inválido. Cargos válidos: admin, manager, attendant, deliverer, customer")
 
         allowed_fields = ['full_name', 'date_of_birth', 'phone', 'cpf', 'notify_order_updates', 'notify_promotions']
         if is_admin_request:
@@ -1154,7 +1160,7 @@ def get_users_general_metrics():
             roles_count[row[0]] = row[1]
         
         # Funcionários vs Clientes
-        funcionarios = sum(roles_count.get(role, 0) for role in ['admin', 'manager', 'attendant', 'delivery'])
+        funcionarios = sum(roles_count.get(role, 0) for role in ['admin', 'manager', 'attendant', 'deliverer'])
         clientes = roles_count.get('customer', 0)
         
         return {
@@ -1251,6 +1257,8 @@ def update_user_status(user_id, is_active):
 
 def update_user_role(user_id, new_role):
     """Atualiza o cargo/role de um usuário."""
+    if new_role == 'delivery':
+        new_role = 'deliverer'
     conn = None
     try:
         conn = get_db_connection()
