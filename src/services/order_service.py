@@ -530,22 +530,24 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             _validate_points_redemption(points_to_redeem, order_total)
 
             # ALTERAÇÃO: Valida e processa valor pago para pagamento em dinheiro
-            # amount_paid só é obrigatório para entrega (delivery), não para pickup
+            # Para pedidos de pickup (retirada no balcão), não exigir amount_paid (não precisa de troco)
             paid_amount = None
             if payment_method and payment_method.lower() in ['money', 'dinheiro', 'cash']:
-                # ALTERAÇÃO: amount_paid não é obrigatório para pickup (pagamento é feito no balcão)
-                if order_type != ORDER_TYPE_PICKUP:
+                # Para pedidos de pickup, amount_paid não é obrigatório
+                if order_type == ORDER_TYPE_PICKUP:
+                    # Se amount_paid foi fornecido, validar; caso contrário, usar None (não precisa de troco)
+                    if amount_paid is not None:
+                        try:
+                            paid_amount = float(amount_paid)
+                            if paid_amount < order_total:
+                                return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {order_total:.2f})")
+                        except (ValueError, TypeError):
+                            return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+                    # Se não foi fornecido, paid_amount permanece None (OK para pickup)
+                else:
+                    # Para entregas, amount_paid é obrigatório
                     if amount_paid is None:
-                        return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro para entrega")
-                    try:
-                        paid_amount = float(amount_paid)
-                        if paid_amount < order_total:
-                            return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {order_total:.2f})")
-                    except (ValueError, TypeError):
-                        return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
-                # Se for pickup, amount_paid pode ser None (pagamento é feito no balcão)
-                elif amount_paid is not None:
-                    # Se amount_paid foi fornecido mesmo sendo pickup, valida mas não é obrigatório
+                        return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro para entregas")
                     try:
                         paid_amount = float(amount_paid)
                         if paid_amount < order_total:
@@ -1292,9 +1294,13 @@ def get_order_details(order_id, user_id, user_role):
         # ALTERAÇÃO: Incluir dados do ingrediente para cálculo de custo unitário
         if validated_ids:
             placeholders = ', '.join(['?' for _ in validated_ids])
+            # ALTERAÇÃO: Priorizar ADDITIONAL_PRICE sobre PRICE para modificações de produtos
+            # ADDITIONAL_PRICE é o preço quando o ingrediente é adicionado como modificação/extra
             sql_extras = f"""
                 SELECT e.ORDER_ITEM_ID, e.INGREDIENT_ID, i.NAME, e.QUANTITY, e.TYPE, COALESCE(e.DELTA, e.QUANTITY) as DELTA,
-                       COALESCE(i.PRICE, 0) as PRICE, i.STOCK_UNIT, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT
+                       COALESCE(i.ADDITIONAL_PRICE, i.PRICE, 0) as PRICE, 
+                       i.ADDITIONAL_PRICE, i.PRICE as INGREDIENT_PRICE,
+                       i.STOCK_UNIT, i.BASE_PORTION_QUANTITY, i.BASE_PORTION_UNIT
                 FROM ORDER_ITEM_EXTRAS e
                 JOIN INGREDIENTS i ON i.ID = e.INGREDIENT_ID
                 WHERE e.ORDER_ITEM_ID IN ({placeholders})
@@ -1308,11 +1314,17 @@ def get_order_details(order_id, user_id, user_role):
                     extras_dict[order_item_id] = {'extras': [], 'base_modifications': []}
                 row_type = (ex[4] or 'extra').lower()
                 
-                # ALTERAÇÃO: Calcular custo unitário do insumo
-                ingredient_price = float(ex[6]) if ex[6] is not None else 0.0
-                stock_unit = ex[7] or 'un'
-                base_portion_quantity = float(ex[8] or 1) if ex[8] is not None else 1.0
-                base_portion_unit = ex[9] or 'un'
+                # ALTERAÇÃO: Usar ADDITIONAL_PRICE (prioritário) ou PRICE como fallback
+                # A query agora retorna: PRICE (com COALESCE), ADDITIONAL_PRICE, INGREDIENT_PRICE
+                # ex[6] = PRICE (já com COALESCE(ADDITIONAL_PRICE, PRICE))
+                # ex[7] = ADDITIONAL_PRICE (pode ser None)
+                # ex[8] = INGREDIENT_PRICE (PRICE original)
+                ingredient_price = float(ex[6]) if ex[6] is not None else 0.0  # Já usa ADDITIONAL_PRICE primeiro
+                additional_price = float(ex[7]) if ex[7] is not None else None
+                ingredient_price_original = float(ex[8]) if ex[8] is not None else 0.0
+                stock_unit = ex[9] or 'un'
+                base_portion_quantity = float(ex[10] or 1) if ex[10] is not None else 1.0
+                base_portion_unit = ex[11] or 'un'
                 
                 # Calcular custo por porção base
                 try:
@@ -1331,7 +1343,9 @@ def get_order_details(order_id, user_id, user_role):
                         "name": ex[2],
                         "quantity": ex[3],
                         "unit_cost": cost_per_base_portion,  # ALTERAÇÃO: Custo unitário do insumo
-                        "price": ingredient_price,
+                        "additional_price": additional_price if additional_price is not None else ingredient_price,  # ALTERAÇÃO: Usar additional_price
+                        "price": ingredient_price_original,  # ALTERAÇÃO: Manter price original para referência
+                        "ingredient_price": ingredient_price,  # ALTERAÇÃO: Preço usado (ADDITIONAL_PRICE ou PRICE)
                         "stock_unit": stock_unit,
                         "base_portion_quantity": base_portion_quantity,
                         "base_portion_unit": base_portion_unit
@@ -1351,7 +1365,9 @@ def get_order_details(order_id, user_id, user_role):
                         "name": ex[2],
                         "delta": delta_value,
                         "unit_cost": cost_per_base_portion,  # ALTERAÇÃO: Custo unitário do insumo
-                        "price": ingredient_price,
+                        "additional_price": additional_price if additional_price is not None else ingredient_price,  # ALTERAÇÃO: Usar additional_price
+                        "price": ingredient_price_original,  # ALTERAÇÃO: Manter price original para referência
+                        "ingredient_price": ingredient_price,  # ALTERAÇÃO: Preço usado (ADDITIONAL_PRICE ou PRICE)
                         "stock_unit": stock_unit,
                         "base_portion_quantity": base_portion_quantity,
                         "base_portion_unit": base_portion_unit
@@ -1904,22 +1920,24 @@ def create_order_from_cart(user_id, address_id, payment_method, amount_paid=None
                 return (None, "INVALID_DISCOUNT", "O valor do desconto não pode ser maior que o total do pedido.")
         
         # ALTERAÇÃO: Valida e processa valor pago para pagamento em dinheiro
-        # amount_paid só é obrigatório para entrega (delivery), não para pickup
+        # Para pedidos de pickup (retirada no balcão), não exigir amount_paid (não precisa de troco)
         paid_amount = None
         if payment_method and payment_method.lower() in ['money', 'dinheiro', 'cash']:
-            # ALTERAÇÃO: amount_paid não é obrigatório para pickup (pagamento é feito no balcão)
-            if order_type != ORDER_TYPE_PICKUP:
+            # Para pedidos de pickup, amount_paid não é obrigatório
+            if order_type == ORDER_TYPE_PICKUP:
+                # Se amount_paid foi fornecido, validar; caso contrário, usar None (não precisa de troco)
+                if amount_paid is not None:
+                    try:
+                        paid_amount = float(amount_paid)
+                        if paid_amount < total_with_delivery:
+                            return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {total_with_delivery:.2f})")
+                    except (ValueError, TypeError):
+                        return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
+                # Se não foi fornecido, paid_amount permanece None (OK para pickup)
+            else:
+                # Para entregas, amount_paid é obrigatório
                 if amount_paid is None:
-                    return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro para entrega")
-                try:
-                    paid_amount = float(amount_paid)
-                    if paid_amount < total_with_delivery:
-                        return (None, "VALIDATION_ERROR", f"O valor pago (R$ {paid_amount:.2f}) deve ser maior ou igual ao total do pedido (R$ {total_with_delivery:.2f})")
-                except (ValueError, TypeError):
-                    return (None, "VALIDATION_ERROR", "O valor pago deve ser um número válido")
-            # Se for pickup, amount_paid pode ser None (pagamento é feito no balcão)
-            elif amount_paid is not None:
-                # Se amount_paid foi fornecido mesmo sendo pickup, valida mas não é obrigatório
+                    return (None, "VALIDATION_ERROR", "amount_paid é obrigatório quando o pagamento é em dinheiro para entregas")
                 try:
                     paid_amount = float(amount_paid)
                     if paid_amount < total_with_delivery:
