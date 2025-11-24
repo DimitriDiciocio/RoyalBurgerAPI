@@ -345,9 +345,9 @@ def _notify_kitchen(order_id):
         logger.warning(f"Falha ao notificar cozinha sobre pedido {order_id}: {e}", exc_info=True)
 
 
-def _generate_confirmation_code(length=8):
-    """Gera um código de confirmação alfanumérico aleatório."""
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+def _generate_confirmation_code(length=4):
+    """Gera um código de confirmação numérico aleatório de 4 dígitos."""
+    return ''.join(random.choices(string.digits, k=length))
 
 def _calculate_estimated_delivery_time(order_status, order_type):
     """
