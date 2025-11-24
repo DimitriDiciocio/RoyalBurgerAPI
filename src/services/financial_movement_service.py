@@ -247,6 +247,11 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
         # ALTERAÇÃO: Tratar category que pode ser None ou string vazia
         category_value = category if category and category.strip() else None
         
+        # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB, usar string vazia
+        notes_value = movement_data.get('notes')
+        if notes_value is None:
+            notes_value = ''  # String vazia ao invés de None para BLOB
+        
         cur.execute(sql, (
             movement_data['type'],
             value,
@@ -259,7 +264,7 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
             movement_data.get('sender_receiver'),
             movement_data.get('related_entity_type'),
             movement_data.get('related_entity_id'),
-            movement_data.get('notes'),
+            notes_value,  # ALTERAÇÃO FDB4: String vazia ao invés de None
             created_by_user_id,
             movement_data.get('payment_gateway_id'),  # FASE 6
             movement_data.get('transaction_id'),  # FASE 6
@@ -678,13 +683,15 @@ def get_financial_movements(filters=None):
         cur = conn.cursor()
         
         # ALTERAÇÃO FASE 6: Incluir campos de gateway e conciliação
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         base_sql = """
             SELECT 
                 fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
                 fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
                 fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
                 fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
-                fm.NOTES, fm.CREATED_AT, fm.UPDATED_AT,
+                CAST(COALESCE(fm.NOTES, '') AS VARCHAR(255)) as NOTES, 
+                fm.CREATED_AT, fm.UPDATED_AT,
                 fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID, fm.BANK_ACCOUNT,
                 fm.RECONCILED, fm.RECONCILED_AT,
                 u.FULL_NAME as created_by_name
@@ -800,12 +807,14 @@ def get_financial_movements(filters=None):
         
         # ALTERAÇÃO: No Firebird, FIRST/SKIP deve vir logo após SELECT, não depois de ORDER BY
         # Reconstruir a query com FIRST/SKIP no lugar correto
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         fields_clause = """
                 fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
                 fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
                 fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
                 fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
-                fm.NOTES, fm.CREATED_AT, fm.UPDATED_AT,
+                CAST(COALESCE(fm.NOTES, '') AS VARCHAR(255)) as NOTES,
+                fm.CREATED_AT, fm.UPDATED_AT,
                 fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID, fm.BANK_ACCOUNT,
                 fm.RECONCILED, fm.RECONCILED_AT,
                 u.FULL_NAME as created_by_name
@@ -914,13 +923,15 @@ def get_financial_movement_by_id(movement_id):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         sql = """
             SELECT 
                 fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
                 fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
                 fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
                 fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
-                fm.NOTES, fm.CREATED_AT, fm.UPDATED_AT,
+                CAST(COALESCE(fm.NOTES, '') AS VARCHAR(255)) as NOTES,
+                fm.CREATED_AT, fm.UPDATED_AT,
                 fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID, fm.BANK_ACCOUNT,
                 fm.RECONCILED, fm.RECONCILED_AT,
                 u.FULL_NAME as created_by_name
@@ -1088,8 +1099,12 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
             params.append(movement_data['sender_receiver'])
         
         if 'notes' in movement_data:
+            # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB
+            notes_value = movement_data['notes']
+            if notes_value is None:
+                notes_value = ''  # String vazia ao invés de None para BLOB
             update_fields.append("NOTES = ?")
-            params.append(movement_data['notes'])
+            params.append(notes_value)
         
         # Se não há campos para atualizar
         if not update_fields:

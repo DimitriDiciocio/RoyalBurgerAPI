@@ -196,6 +196,7 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
         
         # 2. ALTERAÇÃO: Usar SQL fixo com todos os campos (mesmo que alguns sejam None)
         # Firebird aceita None em campos nullable quando passado explicitamente
+        # ALTERAÇÃO FDB4: Usar RETURNING para obter ID gerado (compatível com Firebird 4 e 5)
         invoice_sql = """
             INSERT INTO PURCHASE_INVOICES (
                 INVOICE_NUMBER, SUPPLIER_NAME, TOTAL_AMOUNT,
@@ -203,6 +204,7 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
                 PAYMENT_DATE, NOTES, CREATED_BY
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING ID, CREATED_AT
         """
         
         # ALTERAÇÃO: Converter datetime para naive (sem timezone) - Firebird pode não aceitar timezone-aware
@@ -242,6 +244,17 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
             logger.info("Tentando executar INSERT...")
             cur.execute(invoice_sql, invoice_values)
             logger.info("INSERT executado com sucesso")
+            
+            # ALTERAÇÃO FDB4: Obter ID e CREATED_AT diretamente do RETURNING (compatível com Firebird 4 e 5)
+            invoice_row = cur.fetchone()
+            if not invoice_row:
+                if should_close_conn:
+                    conn.rollback()
+                return (False, "DATABASE_ERROR", "Erro ao criar nota fiscal - não foi possível recuperar ID")
+            
+            invoice_id = invoice_row[0]
+            created_at = invoice_row[1]
+            
         except fdb.Error as e:
             logger.error(f"ERRO FDB ao executar INSERT: {e}", exc_info=True)
             logger.error(f"SQLCODE: {e.args[1] if len(e.args) > 1 else 'N/A'}")
@@ -256,45 +269,15 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
                 logger.info("Teste TIMESTAMP com purchase_date: OK")
             except Exception as test_e:
                 logger.error(f"Teste TIMESTAMP com purchase_date FALHOU: {test_e}")
-            raise
+            if should_close_conn and conn:
+                conn.rollback()
+            return (False, "DATABASE_ERROR", f"Erro no banco de dados: {str(e)}")
         except Exception as e:
             logger.error(f"ERRO GERAL ao executar INSERT: {e}", exc_info=True)
             logger.error(f"Tipo de erro: {type(e).__name__}")
-            raise
-        
-        # ALTERAÇÃO: Buscar ID gerado - Firebird não suporta RETURNING da mesma forma
-        
-        # Agora buscar o ID recém-criado (será max_id_before + 1 se for identity)
-        # Mas para garantir, buscar pelo invoice_number que acabamos de inserir
-        cur.execute("""
-            SELECT ID, CREATED_AT 
-            FROM PURCHASE_INVOICES 
-            WHERE INVOICE_NUMBER = ? 
-            AND CREATED_BY = ?
-            AND ID > ?
-            ORDER BY ID DESC
-            ROWS 1
-        """, (invoice_data['invoice_number'], created_by_user_id, max_id_before))
-        
-        invoice_row = cur.fetchone()
-        if not invoice_row:
-            # Fallback: buscar apenas pelo invoice_number (menos seguro mas funciona)
-            cur.execute("""
-                SELECT ID, CREATED_AT 
-                FROM PURCHASE_INVOICES 
-                WHERE INVOICE_NUMBER = ?
-                ORDER BY CREATED_AT DESC
-                ROWS 1
-            """, (invoice_data['invoice_number'],))
-            invoice_row = cur.fetchone()
-        
-        if not invoice_row:
-            if should_close_conn:
+            if should_close_conn and conn:
                 conn.rollback()
-            return (False, "DATABASE_ERROR", "Erro ao criar nota fiscal - não foi possível recuperar ID")
-        
-        invoice_id = invoice_row[0]
-        created_at = invoice_row[1]
+            return (False, "INTERNAL_ERROR", f"Erro interno: {str(e)}")
         
         # 2. Inserir itens e dar entrada no estoque
         # ALTERAÇÃO: Otimização de performance - validar todos os ingredientes em uma única query
@@ -560,11 +543,13 @@ def get_purchase_invoices(filters=None):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         base_sql = """
             SELECT 
                 pi.ID, pi.INVOICE_NUMBER, pi.SUPPLIER_NAME, pi.TOTAL_AMOUNT,
                 pi.PURCHASE_DATE, pi.PAYMENT_STATUS, pi.PAYMENT_METHOD,
-                pi.PAYMENT_DATE, pi.NOTES, pi.CREATED_AT, pi.UPDATED_AT,
+                pi.PAYMENT_DATE, CAST(COALESCE(pi.NOTES, '') AS VARCHAR(1000)) as NOTES,
+                pi.CREATED_AT, pi.UPDATED_AT,
                 u.FULL_NAME as created_by_name
             FROM PURCHASE_INVOICES pi
             LEFT JOIN USERS u ON pi.CREATED_BY = u.ID
@@ -653,12 +638,14 @@ def get_purchase_invoice_by_id(invoice_id):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         # Buscar nota fiscal
         cur.execute("""
             SELECT 
                 pi.ID, pi.INVOICE_NUMBER, pi.SUPPLIER_NAME, pi.TOTAL_AMOUNT,
                 pi.PURCHASE_DATE, pi.PAYMENT_STATUS, pi.PAYMENT_METHOD,
-                pi.PAYMENT_DATE, pi.NOTES, pi.CREATED_AT, pi.UPDATED_AT,
+                pi.PAYMENT_DATE, CAST(COALESCE(pi.NOTES, '') AS VARCHAR(1000)) as NOTES,
+                pi.CREATED_AT, pi.UPDATED_AT,
                 u.FULL_NAME as created_by_name
             FROM PURCHASE_INVOICES pi
             LEFT JOIN USERS u ON pi.CREATED_BY = u.ID
@@ -752,10 +739,12 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
         if not allowed:
             return (False, error_code, message)
         
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         # Verificar se nota fiscal existe e buscar valores antigos para auditoria
         cur.execute("""
             SELECT ID, INVOICE_NUMBER, SUPPLIER_NAME, TOTAL_AMOUNT, PURCHASE_DATE,
-                   PAYMENT_STATUS, PAYMENT_METHOD, PAYMENT_DATE, NOTES
+                   PAYMENT_STATUS, PAYMENT_METHOD, PAYMENT_DATE,
+                   CAST(COALESCE(NOTES, '') AS VARCHAR(1000)) as NOTES
             FROM PURCHASE_INVOICES WHERE ID = ?
         """, (invoice_id,))
         invoice_row = cur.fetchone()
@@ -901,8 +890,12 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
             update_values.append(invoice_data['payment_method'])
         
         if 'notes' in invoice_data:
+            # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB
+            notes_value = invoice_data['notes']
+            if notes_value is None:
+                notes_value = ''  # String vazia ao invés de None para BLOB
             update_fields.append("NOTES = ?")
-            update_values.append(invoice_data['notes'])
+            update_values.append(notes_value)
         
         if not update_fields and 'items' not in invoice_data:
             return (False, "NO_CHANGES", "Nenhum campo para atualizar")
@@ -1028,9 +1021,11 @@ def _log_audit_entry(invoice_id, action_type, changed_by, old_values=None, new_v
         else:
             should_commit = False
         
-        old_values_json = json.dumps(old_values, default=str) if old_values else None
-        new_values_json = json.dumps(new_values, default=str) if new_values else None
-        changed_fields_str = ', '.join(changed_fields) if changed_fields else None
+        # ALTERAÇÃO FDB4: Tratar BLOB - Firebird 4 não aceita None em BLOB, usar string vazia
+        old_values_json = json.dumps(old_values, default=str) if old_values else ''
+        new_values_json = json.dumps(new_values, default=str) if new_values else ''
+        changed_fields_str = ', '.join(changed_fields) if changed_fields else ''
+        notes_value = notes if notes else ''  # String vazia ao invés de None para BLOB
         
         cur.execute("""
             INSERT INTO PURCHASE_INVOICES_AUDIT (
@@ -1038,7 +1033,7 @@ def _log_audit_entry(invoice_id, action_type, changed_by, old_values=None, new_v
                 OLD_VALUES, NEW_VALUES, CHANGED_FIELDS, NOTES
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (invoice_id, action_type, changed_by, old_values_json, new_values_json, changed_fields_str, notes))
+        """, (invoice_id, action_type, changed_by, old_values_json, new_values_json, changed_fields_str, notes_value))
         
         if should_commit:
             conn.commit()
@@ -1289,10 +1284,12 @@ def delete_purchase_invoice(invoice_id, deleted_by_user_id):
         if not allowed:
             return (False, error_code, message)
         
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         # Verificar se nota fiscal existe e buscar dados para auditoria
         cur.execute("""
             SELECT ID, INVOICE_NUMBER, SUPPLIER_NAME, TOTAL_AMOUNT, PURCHASE_DATE,
-                   PAYMENT_STATUS, PAYMENT_METHOD, PAYMENT_DATE, NOTES
+                   PAYMENT_STATUS, PAYMENT_METHOD, PAYMENT_DATE,
+                   CAST(COALESCE(NOTES, '') AS VARCHAR(1000)) as NOTES
             FROM PURCHASE_INVOICES WHERE ID = ?
         """, (invoice_id,))
         invoice_row = cur.fetchone()

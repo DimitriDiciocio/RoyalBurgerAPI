@@ -81,6 +81,11 @@ def create_recurrence_rule(rule_data, created_by_user_id):
             RETURNING ID, CREATED_AT
         """
         
+        # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB
+        notes_value = rule_data.get('notes')
+        if notes_value is None:
+            notes_value = ''  # String vazia ao invés de None para BLOB
+        
         cur.execute(sql, (
             rule_data['name'],
             rule_data.get('description'),
@@ -91,7 +96,7 @@ def create_recurrence_rule(rule_data, created_by_user_id):
             recurrence_type,
             recurrence_day,
             rule_data.get('sender_receiver'),
-            rule_data.get('notes'),
+            notes_value,  # ALTERAÇÃO FDB4: String vazia ao invés de None
             created_by_user_id
         ))
         
@@ -142,10 +147,12 @@ def get_recurrence_rules(active_only=True):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         sql = """
             SELECT ID, NAME, DESCRIPTION, TYPE, CATEGORY, SUBCATEGORY,
                    "VALUE", RECURRENCE_TYPE, RECURRENCE_DAY, IS_ACTIVE,
-                   SENDER_RECEIVER, NOTES, CREATED_AT, UPDATED_AT
+                   SENDER_RECEIVER, CAST(COALESCE(NOTES, '') AS VARCHAR(1000)) as NOTES,
+                   CREATED_AT, UPDATED_AT
             FROM RECURRENCE_RULES
         """
         
@@ -275,8 +282,12 @@ def update_recurrence_rule(rule_id, rule_data, updated_by_user_id=None):
             params.append(rule_data['sender_receiver'])
         
         if 'notes' in rule_data:
+            # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB
+            notes_value = rule_data['notes']
+            if notes_value is None:
+                notes_value = ''  # String vazia ao invés de None para BLOB
             updates.append("NOTES = ?")
-            params.append(rule_data['notes'])
+            params.append(notes_value)
         
         if not updates:
             return (False, "NO_UPDATES", "Nenhum campo para atualizar")

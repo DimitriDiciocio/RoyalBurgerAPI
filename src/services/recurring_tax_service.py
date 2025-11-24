@@ -59,6 +59,11 @@ def create_recurring_tax(tax_data, created_by_user_id):
             RETURNING ID, CREATED_AT
         """
         
+        # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB
+        notes_value = tax_data.get('notes')
+        if notes_value is None:
+            notes_value = ''  # String vazia ao invés de None para BLOB
+        
         cur.execute(sql, (
             tax_data['name'],
             tax_data.get('description'),
@@ -67,7 +72,7 @@ def create_recurring_tax(tax_data, created_by_user_id):
             value,
             payment_day,
             tax_data.get('sender_receiver'),
-            tax_data.get('notes'),
+            notes_value,  # ALTERAÇÃO FDB4: String vazia ao invés de None
             created_by_user_id
         ))
         
@@ -217,7 +222,8 @@ def get_recurring_taxes(active_only=True):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        sql = "SELECT ID, NAME, DESCRIPTION, CATEGORY, SUBCATEGORY, \"VALUE\", PAYMENT_DAY, IS_ACTIVE, SENDER_RECEIVER, NOTES FROM RECURRING_TAXES"
+        # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
+        sql = "SELECT ID, NAME, DESCRIPTION, CATEGORY, SUBCATEGORY, \"VALUE\", PAYMENT_DAY, IS_ACTIVE, SENDER_RECEIVER, CAST(COALESCE(NOTES, '') AS VARCHAR(1000)) as NOTES FROM RECURRING_TAXES"
         
         if active_only:
             sql += " WHERE IS_ACTIVE = TRUE"
@@ -317,8 +323,12 @@ def update_recurring_tax(tax_id, tax_data, updated_by_user_id=None):
             params.append(tax_data['sender_receiver'])
         
         if 'notes' in tax_data:
+            # ALTERAÇÃO FDB4: Tratar NOTES (BLOB) - Firebird 4 não aceita None em BLOB
+            notes_value = tax_data['notes']
+            if notes_value is None:
+                notes_value = ''  # String vazia ao invés de None para BLOB
             updates.append("NOTES = ?")
-            params.append(tax_data['notes'])
+            params.append(notes_value)
         
         if not updates:
             return (False, "NO_UPDATES", "Nenhum campo para atualizar")
