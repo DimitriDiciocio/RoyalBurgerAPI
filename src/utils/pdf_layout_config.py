@@ -6,61 +6,61 @@ Todas as constantes podem ser ajustadas para personalizar o layout
 # ============================================================================
 # MARGENS DA PÁGINA (em mm)
 # ============================================================================
-MARGIN_LEFT = 12
-MARGIN_RIGHT = 12
-MARGIN_TOP = 15
-MARGIN_BOTTOM = 15
+MARGIN_LEFT = 15
+MARGIN_RIGHT = 15
+MARGIN_TOP = 20
+MARGIN_BOTTOM = 20
 
 # ============================================================================
 # ESPAÇAMENTOS (em mm)
 # ============================================================================
 # Espaçamento pequeno: entre elementos relacionados (ex: título e tabela)
-PADDING_SMALL = 2
+PADDING_SMALL = 3
 
 # Espaçamento médio: entre seções diferentes
-PADDING_MEDIUM = 3
+PADDING_MEDIUM = 5
 
 # Espaçamento grande: entre blocos principais
-PADDING_LARGE = 5
+PADDING_LARGE = 8
 
 # ============================================================================
 # TAMANHOS DE FONTE
 # ============================================================================
-FONT_SIZE_TINY = 7       # Textos muito pequenos (rodapé, notas)
-FONT_SIZE_SMALL = 8      # Textos pequenos (legendas, subtítulos)
-FONT_SIZE_NORMAL = 9     # Texto padrão (corpo do relatório)
-FONT_SIZE_MEDIUM = 10    # Textos médios (cabeçalhos de tabela)
-FONT_SIZE_LARGE = 11     # Textos grandes (subtítulos de seção)
-FONT_SIZE_XLARGE = 12    # Títulos de seção
-FONT_SIZE_XXLARGE = 14   # Títulos principais
-FONT_SIZE_TITLE = 16     # Título do relatório
+FONT_SIZE_TINY = 8      # Textos muito pequenos (rodapé, notas)
+FONT_SIZE_SMALL = 9     # Textos pequenos (legendas, subtítulos)
+FONT_SIZE_NORMAL = 10   # Texto padrão (corpo do relatório)
+FONT_SIZE_MEDIUM = 11   # Textos médios (cabeçalhos de tabela)
+FONT_SIZE_LARGE = 12    # Textos grandes (subtítulos de seção)
+FONT_SIZE_XLARGE = 14   # Títulos de seção
+FONT_SIZE_XXLARGE = 16  # Títulos principais
+FONT_SIZE_TITLE = 20    # Título do relatório
 
 # ============================================================================
 # PROPORÇÕES E RATIOS
 # ============================================================================
-# Ratio de altura de linha (1.15 = 15% maior que a fonte - mais compacto)
-LINE_HEIGHT_RATIO = 1.15
+# Ratio de altura de linha (1.2 = 20% maior que a fonte)
+LINE_HEIGHT_RATIO = 1.2
 
 # Padding vertical em células de tabela
-CELL_PADDING_V = 1.5
+CELL_PADDING_V = 2
 
 # Padding horizontal em células de tabela
-CELL_PADDING_H = 2
+CELL_PADDING_H = 3
 
 # ============================================================================
 # TAMANHOS DE GRÁFICOS (proporcionais)
 # ============================================================================
-# Largura do gráfico como proporção da largura útil (0.80 = 80% - mais compacto)
-CHART_WIDTH_RATIO = 0.80
+# Largura do gráfico como proporção da largura útil (0.85 = 85%)
+CHART_WIDTH_RATIO = 0.85
 
-# Altura base dos gráficos (em mm) - reduzido para evitar sobreposição
-CHART_HEIGHT_BASE = 80
+# Altura base dos gráficos (em mm)
+CHART_HEIGHT_BASE = 120
 
 # Altura mínima dos gráficos (em mm)
-CHART_HEIGHT_MIN = 60
+CHART_HEIGHT_MIN = 80
 
 # Altura máxima dos gráficos (em mm)
-CHART_HEIGHT_MAX = 100
+CHART_HEIGHT_MAX = 150
 
 # ============================================================================
 # TAMANHOS DE CARDS DE MÉTRICAS
@@ -96,30 +96,30 @@ CARDS_PER_ROW = 2
 # Cards por página (padrão: 8 para grid 2x4)
 CARDS_PER_PAGE = 8
 
-# Altura padrão de card de dados (em mm) - reduzido para evitar sobreposição
-DATA_CARD_HEIGHT = 35
+# Altura padrão de card de dados (em mm)
+DATA_CARD_HEIGHT = 50
 
-# Altura padrão de card de métrica (em mm) - reduzido para evitar sobreposição
-METRIC_CARD_HEIGHT = 45
+# Altura padrão de card de métrica (em mm)
+METRIC_CARD_HEIGHT = 70
 
 # Largura fixa de card de métrica (em mm) - quando em linha única
-METRIC_CARD_WIDTH_FULL = 180
+METRIC_CARD_WIDTH_FULL = 195
 
 # Largura fixa de card de dados em grid (em mm)
-DATA_CARD_WIDTH = 85
+DATA_CARD_WIDTH = 90
 
-# Altura de linha fixa para cards (em mm) - reduzido
-CARD_LINE_HEIGHT = 4
+# Altura de linha fixa para cards (em mm)
+CARD_LINE_HEIGHT = 5
 
-# Espaçamento entre cards em grid (em mm) - reduzido
-CARD_GRID_SPACING_X = 7
-CARD_GRID_SPACING_Y = 7
+# Espaçamento entre cards em grid (em mm)
+CARD_GRID_SPACING_X = 10
+CARD_GRID_SPACING_Y = 10
 
 # Margem lateral dos cards (em mm)
-CARD_MARGIN_X = 8
+CARD_MARGIN_X = 10
 
-# Posição Y inicial após header (em mm) - reduzido
-PAGE_START_Y = 30
+# Posição Y inicial após header (em mm)
+PAGE_START_Y = 35
 
 # ============================================================================
 # TABELAS
