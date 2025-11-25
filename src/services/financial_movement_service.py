@@ -234,7 +234,7 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
         # Inserir movimentação
         sql = """
             INSERT INTO FINANCIAL_MOVEMENTS (
-                TYPE, "VALUE", CATEGORY, SUBCATEGORY, DESCRIPTION,
+                MOVEMENT_TYPE, FINANCIAL_VALUE, CATEGORY, SUBCATEGORY, DESCRIPTION,
                 MOVEMENT_DATE, PAYMENT_STATUS, PAYMENT_METHOD,
                 SENDER_RECEIVER, RELATED_ENTITY_TYPE, RELATED_ENTITY_ID,
                 NOTES, CREATED_BY,
@@ -479,7 +479,7 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
         # Registrar RECEITA diretamente no banco (sem chamar create_financial_movement para evitar overhead)
         revenue_sql = """
             INSERT INTO FINANCIAL_MOVEMENTS (
-                TYPE, "VALUE", CATEGORY, SUBCATEGORY, DESCRIPTION,
+                MOVEMENT_TYPE, FINANCIAL_VALUE, CATEGORY, SUBCATEGORY, DESCRIPTION,
                 MOVEMENT_DATE, PAYMENT_STATUS, PAYMENT_METHOD,
                 RELATED_ENTITY_TYPE, RELATED_ENTITY_ID, CREATED_BY
             )
@@ -509,7 +509,7 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
         if total_cmv > 0:
             cmv_sql = """
                 INSERT INTO FINANCIAL_MOVEMENTS (
-                    TYPE, "VALUE", CATEGORY, SUBCATEGORY, DESCRIPTION,
+                    MOVEMENT_TYPE, FINANCIAL_VALUE, CATEGORY, SUBCATEGORY, DESCRIPTION,
                     MOVEMENT_DATE, PAYMENT_STATUS,
                     RELATED_ENTITY_TYPE, RELATED_ENTITY_ID, CREATED_BY
                 )
@@ -586,7 +586,7 @@ def register_order_revenue_and_cmv(order_id, order_total, payment_method, paymen
                     # Registrar despesa de taxa diretamente no banco
                     fee_sql = """
                         INSERT INTO FINANCIAL_MOVEMENTS (
-                            TYPE, "VALUE", CATEGORY, SUBCATEGORY, DESCRIPTION,
+                            MOVEMENT_TYPE, FINANCIAL_VALUE, CATEGORY, SUBCATEGORY, DESCRIPTION,
                             MOVEMENT_DATE, PAYMENT_STATUS, PAYMENT_METHOD,
                             RELATED_ENTITY_TYPE, RELATED_ENTITY_ID, CREATED_BY
                         )
@@ -686,7 +686,7 @@ def get_financial_movements(filters=None):
         # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         base_sql = """
             SELECT 
-                fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
+                fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.CATEGORY, fm.SUBCATEGORY,
                 fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
                 fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
                 fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
@@ -736,7 +736,7 @@ def get_financial_movements(filters=None):
             
             # Filtro por tipo
             if filters.get('type'):
-                conditions.append("fm.TYPE = ?")
+                conditions.append("fm.MOVEMENT_TYPE = ?")
                 params.append(filters['type'])
             
             # Filtro por categoria
@@ -809,7 +809,7 @@ def get_financial_movements(filters=None):
         # Reconstruir a query com FIRST/SKIP no lugar correto
         # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         fields_clause = """
-                fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
+                fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.CATEGORY, fm.SUBCATEGORY,
                 fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
                 fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
                 fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
@@ -926,7 +926,7 @@ def get_financial_movement_by_id(movement_id):
         # ALTERAÇÃO FDB4: Usar CAST para BLOB NOTES (compatibilidade Firebird 4)
         sql = """
             SELECT 
-                fm.ID, fm.TYPE, fm."VALUE", fm.CATEGORY, fm.SUBCATEGORY,
+                fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.CATEGORY, fm.SUBCATEGORY,
                 fm.DESCRIPTION, fm.MOVEMENT_DATE, fm.PAYMENT_STATUS,
                 fm.PAYMENT_METHOD, fm.SENDER_RECEIVER,
                 fm.RELATED_ENTITY_TYPE, fm.RELATED_ENTITY_ID,
@@ -1022,7 +1022,7 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
             valid_types = [TYPE_REVENUE, TYPE_EXPENSE, TYPE_CMV, TYPE_TAX]
             if movement_data['type'] not in valid_types:
                 return (False, "INVALID_TYPE", f"Tipo deve ser um de: {', '.join(valid_types)}")
-            update_fields.append("TYPE = ?")
+            update_fields.append("MOVEMENT_TYPE = ?")
             params.append(movement_data['type'])
         
         if 'value' in movement_data:
@@ -1030,7 +1030,7 @@ def update_financial_movement(movement_id, movement_data, updated_by_user_id=Non
                 value = float(movement_data['value'])
                 if value <= 0:
                     return (False, "INVALID_VALUE", "Valor deve ser maior que zero")
-                update_fields.append('"VALUE" = ?')
+                update_fields.append('FINANCIAL_VALUE = ?')
                 params.append(value)
             except (ValueError, TypeError):
                 return (False, "INVALID_VALUE", "Valor deve ser um número válido")
@@ -1203,13 +1203,13 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
         # Firebird precisa de alias e tipo explícito para funções agregadas
         sql = f"""
             SELECT 
-                fm.TYPE,
-                CAST(COALESCE(SUM(fm."VALUE"), 0) AS DECIMAL(15,2)) AS TOTAL
+                fm.MOVEMENT_TYPE,
+                CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS DECIMAL(15,2)) AS TOTAL
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.PAYMENT_STATUS = 'Paid'
             AND fm.MOVEMENT_DATE IS NOT NULL
             AND ({date_filter})
-            GROUP BY fm.TYPE
+            GROUP BY fm.MOVEMENT_TYPE
         """
         
         # ALTERAÇÃO: Tratamento robusto para evitar erro -804 (SQLDA inconsistente)
@@ -1319,12 +1319,12 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
             try:
                 cur.execute(f"""
                     SELECT 
-                        fm.TYPE,
-                        CAST(COALESCE(SUM(fm."VALUE"), 0) AS DECIMAL(15,2)) AS TOTAL
+                        fm.MOVEMENT_TYPE,
+                        CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS DECIMAL(15,2)) AS TOTAL
                     FROM FINANCIAL_MOVEMENTS fm
                     WHERE fm.PAYMENT_STATUS = 'Pending'
                     AND ({pending_filter})
-                    GROUP BY fm.TYPE
+                    GROUP BY fm.MOVEMENT_TYPE
                 """)
                 
                 pending_results = cur.fetchall()
@@ -1710,7 +1710,7 @@ def reconcile_financial_movement(movement_id, reconciled=True, updated_by_user_i
                 RECONCILED_AT = ?,
                 UPDATED_AT = CURRENT_TIMESTAMP
             WHERE ID = ?
-            RETURNING ID, TYPE, "VALUE", DESCRIPTION, RECONCILED, RECONCILED_AT
+            RETURNING ID, MOVEMENT_TYPE, FINANCIAL_VALUE, DESCRIPTION, RECONCILED, RECONCILED_AT
         """
         
         cur.execute(sql, (reconciled, reconciled_at, movement_id))
@@ -1897,8 +1897,8 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
                 CAST(COUNT(*) AS INTEGER) as total,
                 CAST(SUM(CASE WHEN fm.RECONCILED = TRUE THEN 1 ELSE 0 END) AS INTEGER) as reconciled_count,
                 CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = FALSE THEN 1 ELSE 0 END) AS INTEGER) as unreconciled_count,
-                CAST(SUM(CASE WHEN fm.RECONCILED = TRUE THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as reconciled_amount,
-                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = FALSE THEN CAST(fm."VALUE" AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as unreconciled_amount
+                CAST(SUM(CASE WHEN fm.RECONCILED = TRUE THEN CAST(fm.FINANCIAL_VALUE AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as reconciled_amount,
+                CAST(SUM(CASE WHEN fm.RECONCILED IS NULL OR fm.RECONCILED = FALSE THEN CAST(fm.FINANCIAL_VALUE AS DECIMAL(15,2)) ELSE 0 END) AS DECIMAL(15,2)) as unreconciled_amount
             FROM FINANCIAL_MOVEMENTS fm
         """ + where_clause
         
@@ -1915,7 +1915,7 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
         # Buscar movimentações
         movements_sql = """
             SELECT 
-                fm.ID, fm.TYPE, fm."VALUE", fm.DESCRIPTION, fm.MOVEMENT_DATE,
+                fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.DESCRIPTION, fm.MOVEMENT_DATE,
                 fm.PAYMENT_STATUS, fm.PAYMENT_METHOD, fm.PAYMENT_GATEWAY_ID,
                 fm.TRANSACTION_ID, fm.BANK_ACCOUNT, fm.RECONCILED, fm.RECONCILED_AT
             FROM FINANCIAL_MOVEMENTS fm
