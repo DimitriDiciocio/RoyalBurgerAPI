@@ -531,9 +531,14 @@ def validate_stock_for_items(items, cur, cart_id=None):
         for row in cur.fetchall():
             ing_id, ing_name, stock_unit = row
             needed = required_ingredients.get(ing_id, Decimal('0'))
-            # ALTERAÇÃO: Usar get_ingredient_available_stock que considera reservas
-            # Se cart_id fornecido, exclui reservas temporárias do próprio carrinho
-            available = get_ingredient_available_stock(ing_id, cur, exclude_cart_id=cart_id)
+            # ALTERAÇÃO CRÍTICA: Na finalização do pedido, NÃO devemos subtrair reservas confirmadas
+            # porque o estoque JÁ FOI DEDUZIDO quando os pedidos foram criados.
+            # As reservas confirmadas representam estoque que já foi deduzido do CURRENT_STOCK,
+            # então subtraí-las novamente causaria dupla contagem.
+            # Devemos considerar apenas:
+            # - Estoque físico (CURRENT_STOCK) - que já reflete as deduções dos pedidos confirmados
+            # - Reservas temporárias de OUTROS carrinhos (excluindo as do próprio carrinho)
+            available = get_ingredient_available_stock(ing_id, cur, exclude_cart_id=cart_id, exclude_confirmed_reservations=True)
             
             if needed > available:
                 return (
@@ -1619,17 +1624,22 @@ def clear_temporary_reservations(session_id=None, user_id=None, cart_id=None):
             conn.close()
 
 
-def get_ingredient_available_stock(ingredient_id, cur=None, exclude_cart_id=None):
+def get_ingredient_available_stock(ingredient_id, cur=None, exclude_cart_id=None, exclude_confirmed_reservations=False):
     """
     Obtém estoque disponível de um insumo considerando reservas.
     
     ALTERAÇÃO: Adicionado parâmetro exclude_cart_id para excluir reservas temporárias
     de um carrinho específico (útil na validação antes de finalizar pedido).
     
+    ALTERAÇÃO: Adicionado parâmetro exclude_confirmed_reservations para não subtrair
+    reservas confirmadas (útil na validação de adição ao carrinho, onde reservas confirmadas
+    não devem bloquear a adição de novos itens).
+    
     Args:
         ingredient_id: ID do insumo
         cur: Cursor do banco (opcional, se None cria nova conexão)
         exclude_cart_id: ID do carrinho cujas reservas temporárias devem ser excluídas (opcional)
+        exclude_confirmed_reservations: Se True, não subtrai reservas confirmadas (padrão: False)
     
     Returns:
         Decimal: Estoque disponível na unidade do estoque
@@ -1668,39 +1678,43 @@ def get_ingredient_available_stock(ingredient_id, cur=None, exclude_cart_id=None
         
         
         # Calcula reservas confirmadas (pedidos pendentes/confirmados/preparando)
-        # IMPORTANTE: Precisa considerar conversão de unidades usando calculate_consumption_in_stock_unit
-        # Mas por enquanto, vamos simplificar assumindo que já está na unidade correta
-        cur.execute("""
-            SELECT 
-                oi.QUANTITY,
-                pi.PORTIONS,
-                i2.BASE_PORTION_QUANTITY,
-                i2.BASE_PORTION_UNIT,
-                i2.STOCK_UNIT
-            FROM ORDER_ITEMS oi
-            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
-            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
-            JOIN ORDERS o ON oi.ORDER_ID = o.ID
-            WHERE pi.INGREDIENT_ID = ?
-              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
-        """, (ingredient_id,))
-        
+        # ALTERAÇÃO: Se exclude_confirmed_reservations=True, não subtrai reservas confirmadas
+        # Isso é útil para validação de adição ao carrinho, onde reservas confirmadas não devem bloquear
         confirmed_reservations = Decimal('0')
-        for row in cur.fetchall():
-            oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
-            try:
-                # Calcula consumo convertido para unidade do estoque
-                consumption = calculate_consumption_in_stock_unit(
-                    portions=portions or 0,
-                    base_portion_quantity=base_portion_quantity or 1,
-                    base_portion_unit=base_portion_unit or 'un',
-                    stock_unit=stock_unit or 'un',
-                    item_quantity=oi_quantity or 1
-                )
-                confirmed_reservations += consumption
-            except ValueError as e:
-                logger.warning(f"Erro ao calcular reserva confirmada: {e}")
-                continue
+        
+        if not exclude_confirmed_reservations:
+            # IMPORTANTE: Precisa considerar conversão de unidades usando calculate_consumption_in_stock_unit
+            # Mas por enquanto, vamos simplificar assumindo que já está na unidade correta
+            cur.execute("""
+                SELECT 
+                    oi.QUANTITY,
+                    pi.PORTIONS,
+                    i2.BASE_PORTION_QUANTITY,
+                    i2.BASE_PORTION_UNIT,
+                    i2.STOCK_UNIT
+                FROM ORDER_ITEMS oi
+                JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
+                JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
+                JOIN ORDERS o ON oi.ORDER_ID = o.ID
+                WHERE pi.INGREDIENT_ID = ?
+                  AND o.STATUS IN ('pending', 'confirmed', 'preparing')
+            """, (ingredient_id,))
+            
+            for row in cur.fetchall():
+                oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
+                try:
+                    # Calcula consumo convertido para unidade do estoque
+                    consumption = calculate_consumption_in_stock_unit(
+                        portions=portions or 0,
+                        base_portion_quantity=base_portion_quantity or 1,
+                        base_portion_unit=base_portion_unit or 'un',
+                        stock_unit=stock_unit or 'un',
+                        item_quantity=oi_quantity or 1
+                    )
+                    confirmed_reservations += consumption
+                except ValueError as e:
+                    logger.warning(f"Erro ao calcular reserva confirmada: {e}")
+                    continue
         
         # Calcula reservas temporárias ativas
         # ALTERAÇÃO: Se exclude_cart_id for fornecido, exclui reservas temporárias desse carrinho
@@ -1712,6 +1726,10 @@ def get_ingredient_available_stock(ingredient_id, cur=None, exclude_cart_id=None
             # Primeiro verifica se há registros antes de fazer o SUM
             if exclude_cart_id:
                 # Exclui reservas temporárias do carrinho especificado
+                # ALTERAÇÃO: Usar condição mais explícita para garantir que reservas do carrinho sejam excluídas
+                # Se CART_ID é NULL, inclui (não é do carrinho especificado)
+                # Se CART_ID é diferente de exclude_cart_id, inclui (é de outro carrinho)
+                # Se CART_ID é igual a exclude_cart_id, exclui (é do mesmo carrinho)
                 cur.execute("""
                     SELECT CAST(COALESCE(SUM(QUANTITY), 0) AS NUMERIC(18, 3))
                     FROM TEMPORARY_RESERVATIONS

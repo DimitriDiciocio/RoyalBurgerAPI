@@ -509,7 +509,8 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
         rules = _get_product_rules(cur, product_id)
         
         # Verifica estoque suficiente para o produto
-        stock_check = _check_product_stock_availability(cur, product_id, quantity)
+        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+        stock_check = _check_product_stock_availability(cur, product_id, quantity, cart_id=cart_id)
         if not stock_check[0]:
             return (False, "INSUFFICIENT_STOCK", stock_check[1])
         
@@ -650,7 +651,8 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                 
                 # OTIMIZAÇÃO: Valida estoque apenas para a quantidade adicional (não recalcula tudo)
                 # Isso evita validar novamente o que já estava no carrinho
-                stock_check_additional = _check_product_stock_availability(cur, product_id, quantity)  # Apenas quantidade adicional
+                # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+                stock_check_additional = _check_product_stock_availability(cur, product_id, quantity, cart_id=cart_id)  # Apenas quantidade adicional
                 if not stock_check_additional[0]:
                     return (False, "INSUFFICIENT_STOCK", stock_check_additional[1])
                 
@@ -661,7 +663,8 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                     extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
                     if extra_ingredient_ids:
                         # Revalida disponibilidade com a nova quantidade total
-                        ingredient_availability_total = _batch_get_ingredient_availability(extra_ingredient_ids, new_total_quantity, cur)
+                        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+                        ingredient_availability_total = _batch_get_ingredient_availability(extra_ingredient_ids, new_total_quantity, cur, cart_id=cart_id)
                         
                         # Reutiliza ingredient_names se já foi carregado
                         for extra in extras:
@@ -859,7 +862,15 @@ def add_item_to_cart(user_id, product_id, quantity, extras=None, notes=None, bas
                         stock_unit = str(ing_row[2] or 'un')
                         
                         # Obtém estoque disponível (considerando reservas temporárias)
-                        available_stock = get_ingredient_available_stock(ing_id, cur)
+                        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+                        # ALTERAÇÃO CRÍTICA: exclude_confirmed_reservations=True para não subtrair reservas confirmadas
+                        # Reservas confirmadas não devem bloquear adição ao carrinho
+                        available_stock = get_ingredient_available_stock(
+                            ing_id, 
+                            cur, 
+                            exclude_cart_id=cart_id,
+                            exclude_confirmed_reservations=True
+                        )
                         if not isinstance(available_stock, Decimal):
                             available_stock = Decimal(str(available_stock or 0))
                         
@@ -986,7 +997,8 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
             return (False, "PRODUCT_NOT_FOUND", "Produto não encontrado ou inativo")
 
         # Verifica estoque suficiente para o produto
-        stock_check = _check_product_stock_availability(cur, product_id, quantity)
+        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+        stock_check = _check_product_stock_availability(cur, product_id, quantity, cart_id=cart_id)
         if not stock_check[0]:
             return (False, "INSUFFICIENT_STOCK", stock_check[1])
 
@@ -999,7 +1011,8 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
             extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
             
             # Busca disponibilidade de todos os ingredientes de uma vez (1 query ao invés de N)
-            ingredient_availability = _batch_get_ingredient_availability(extra_ingredient_ids, quantity, cur)
+            # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+            ingredient_availability = _batch_get_ingredient_availability(extra_ingredient_ids, quantity, cur, cart_id=cart_id)
             
             # Busca nomes de ingredientes de uma vez para mensagens de erro
             ingredient_names = {}
@@ -1112,7 +1125,8 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 new_total_quantity = existing_quantity + quantity
                 
                 # Valida estoque para a nova quantidade total do produto
-                stock_check_total = _check_product_stock_availability(cur, product_id, new_total_quantity)
+                # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+                stock_check_total = _check_product_stock_availability(cur, product_id, new_total_quantity, cart_id=cart_id)
                 if not stock_check_total[0]:
                     return (False, "INSUFFICIENT_STOCK", stock_check_total[1])
                 
@@ -1120,7 +1134,8 @@ def add_item_to_cart_by_cart_id(cart_id, product_id, quantity, extras=None, note
                 if extras:
                     # Revalida disponibilidade com a nova quantidade total
                     extra_ingredient_ids = [extra.get("ingredient_id") for extra in extras if extra.get("ingredient_id")]
-                    ingredient_availability_total = _batch_get_ingredient_availability(extra_ingredient_ids, new_total_quantity, cur)
+                    # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+                    ingredient_availability_total = _batch_get_ingredient_availability(extra_ingredient_ids, new_total_quantity, cur, cart_id=cart_id)
                     
                     # Busca nomes de ingredientes de uma vez
                     ingredient_names = {}
@@ -1385,7 +1400,7 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
         
         # Verifica se o item pertence ao usuário e busca informações necessárias
         sql = """
-            SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY FROM CART_ITEMS ci
+            SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY, ci.CART_ID FROM CART_ITEMS ci
             JOIN CARTS c ON ci.CART_ID = c.ID
             WHERE ci.ID = ? AND c.USER_ID = ? AND c.IS_ACTIVE = TRUE;
         """
@@ -1395,6 +1410,7 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no seu carrinho")
         
         current_product_id = row[1]
+        cart_id = row[3]  # ALTERAÇÃO: Obtém cart_id para passar para validação de estoque
         
         # CORREÇÃO: Se quantidade está sendo atualizada, valida estoque para a nova quantidade
         if quantity is not None:
@@ -1402,7 +1418,8 @@ def update_cart_item(user_id, cart_item_id, quantity=None, extras=None, notes=No
                 return (False, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
             
             # Valida estoque do produto para a nova quantidade
-            stock_check = _check_product_stock_availability(cur, current_product_id, quantity)
+            # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+            stock_check = _check_product_stock_availability(cur, current_product_id, quantity, cart_id=cart_id)
             if not stock_check[0]:
                 return (False, "INSUFFICIENT_STOCK", stock_check[1])
             
@@ -1612,7 +1629,7 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
 
         # Verifica se o item pertence ao carrinho convidado e busca informações necessárias
         sql = (
-            "SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY FROM CART_ITEMS ci "
+            "SELECT ci.ID, ci.PRODUCT_ID, ci.QUANTITY, ci.CART_ID FROM CART_ITEMS ci "
             "JOIN CARTS c ON ci.CART_ID = c.ID "
             "WHERE ci.ID = ? AND c.ID = ? AND c.USER_ID IS NULL AND c.IS_ACTIVE = TRUE;"
         )
@@ -1622,6 +1639,7 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
             return (False, "ITEM_NOT_FOUND", "Item não encontrado no carrinho informado")
 
         current_product_id = row[1]
+        # ALTERAÇÃO: cart_id já está disponível como parâmetro da função
 
         # CORREÇÃO: Se quantidade está sendo atualizada, valida estoque para a nova quantidade
         if quantity is not None:
@@ -1629,7 +1647,8 @@ def update_cart_item_by_cart(cart_id, cart_item_id, quantity=None, extras=None, 
                 return (False, "INVALID_QUANTITY", "Quantidade deve ser maior que zero")
             
             # Valida estoque do produto para a nova quantidade
-            stock_check = _check_product_stock_availability(cur, current_product_id, quantity)
+            # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+            stock_check = _check_product_stock_availability(cur, current_product_id, quantity, cart_id=cart_id)
             if not stock_check[0]:
                 return (False, "INSUFFICIENT_STOCK", stock_check[1])
             
@@ -2154,7 +2173,16 @@ def _create_temporary_reservations_for_item(cart_id, product_id, quantity, extra
         # Cria reserva temporária para cada insumo
         for ingredient_id, consumption_qty in consumption.items():
             # Verifica se há estoque disponível antes de criar reserva
-            available_stock = stock_service.get_ingredient_available_stock(ingredient_id, cur)
+            # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+            # Isso garante que não bloqueie a criação de reservas quando já há reservas temporárias do mesmo carrinho
+            # ALTERAÇÃO CRÍTICA: exclude_confirmed_reservations=True para não subtrair reservas confirmadas
+            # Reservas confirmadas não devem bloquear criação de reservas temporárias no carrinho
+            available_stock = stock_service.get_ingredient_available_stock(
+                ingredient_id, 
+                cur, 
+                exclude_cart_id=cart_id,
+                exclude_confirmed_reservations=True
+            )
             
             if available_stock < consumption_qty:
                 # Estoque insuficiente - limpa reservas já criadas e retorna erro
@@ -2431,7 +2459,7 @@ def _recreate_temporary_reservations_for_cart(cart_id, user_id=None, cur=None):
             conn.close()
 
 
-def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur):
+def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur, cart_id=None):
     """
     OTIMIZAÇÃO DE PERFORMANCE: Busca disponibilidade de múltiplos ingredientes em uma única query.
     Evita N+1 queries quando validando extras em batch.
@@ -2479,13 +2507,15 @@ def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur):
         # IMPORTANTE: Para extras (portions = 0), usa get_ingredient_max_available_quantity
         # que já calcula corretamente considerando estoque e quantidade do produto
         # Como não temos max_quantity_from_rule aqui, passa None (será aplicado depois na validação)
+        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
         try:
             max_available_info = get_ingredient_max_available_quantity(
                 ingredient_id=ing_id,
                 max_quantity_from_rule=None,  # Será aplicado na validação individual
                 item_quantity=item_quantity,
                 base_portions=0,  # Extras sempre têm portions = 0
-                cur=cur  # Reutiliza conexão existente
+                cur=cur,  # Reutiliza conexão existente
+                cart_id=cart_id  # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias
             )
             
             ingredients_data[ing_id] = max_available_info
@@ -2507,10 +2537,20 @@ def _batch_get_ingredient_availability(ingredient_ids, item_quantity, cur):
     return ingredients_data
 
 
-def _check_product_stock_availability(cur, product_id, quantity):
+def _check_product_stock_availability(cur, product_id, quantity, cart_id=None):
     """
     Verifica se há estoque suficiente para um produto.
     Faz conversão correta de unidades antes de verificar.
+    
+    ALTERAÇÃO: Usa get_ingredient_available_stock que considera reservas confirmadas e temporárias.
+    Se cart_id for fornecido, exclui reservas temporárias do próprio carrinho.
+    
+    Args:
+        cur: Cursor do banco de dados
+        product_id: ID do produto
+        quantity: Quantidade do produto
+        cart_id: ID do carrinho (opcional) - usado para excluir reservas temporárias do próprio carrinho
+    
     Retorna (is_available, message)
     """
     try:
@@ -2520,7 +2560,6 @@ def _check_product_stock_availability(cur, product_id, quantity):
                 i.ID, 
                 i.NAME, 
                 pi.PORTIONS, 
-                i.CURRENT_STOCK, 
                 i.STOCK_UNIT,
                 i.BASE_PORTION_QUANTITY,
                 i.BASE_PORTION_UNIT
@@ -2534,12 +2573,12 @@ def _check_product_stock_availability(cur, product_id, quantity):
             return (True, "Produto sem ingredientes cadastrados")
         
         for row in ingredients:
+            ing_id = row[0]
             name = row[1]
             portions = row[2] or 0
-            current_stock = row[3] or 0
-            stock_unit = row[4] or 'un'
-            base_portion_quantity = row[5] or 1
-            base_portion_unit = row[6] or 'un'
+            stock_unit = row[3] or 'un'
+            base_portion_quantity = row[4] or 1
+            base_portion_unit = row[5] or 'un'
             
             # Calcula consumo convertido para unidade do estoque
             try:
@@ -2553,11 +2592,20 @@ def _check_product_stock_availability(cur, product_id, quantity):
             except ValueError as e:
                 return (False, f"Erro na conversão de unidades para '{name}': {str(e)}")
             
-            # Converte current_stock para Decimal para comparação precisa
-            current_stock_decimal = Decimal(str(current_stock))
+            # ALTERAÇÃO: Usa get_ingredient_available_stock que considera reservas temporárias
+            # Se cart_id for fornecido, exclui reservas temporárias do próprio carrinho
+            # ALTERAÇÃO CRÍTICA: exclude_confirmed_reservations=True para não subtrair reservas confirmadas
+            # Reservas confirmadas são para pedidos já finalizados e não devem bloquear adição ao carrinho
+            # A validação final de estoque acontece apenas na finalização do pedido
+            available_stock = stock_service.get_ingredient_available_stock(
+                ing_id, 
+                cur, 
+                exclude_cart_id=cart_id,
+                exclude_confirmed_reservations=True  # ALTERAÇÃO: Não subtrair reservas confirmadas na validação de carrinho
+            )
             
-            if current_stock_decimal < required_quantity:
-                return (False, f"Estoque insuficiente de '{name}'. Necessário: {required_quantity:.3f} {stock_unit}, Disponível: {current_stock_decimal:.3f} {stock_unit}")
+            if available_stock < required_quantity:
+                return (False, f"Estoque insuficiente para '{name}'. Disponível: {available_stock:.3f} {stock_unit}, Necessário: {required_quantity:.3f} {stock_unit}")
         
         return (True, "Estoque disponível")
         

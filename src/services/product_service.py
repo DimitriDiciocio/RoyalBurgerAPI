@@ -1025,7 +1025,7 @@ def check_product_availability(product_id, quantity=1):
             conn.close()
 
 
-def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1, base_portions=0, cur=None):
+def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=None, item_quantity=1, base_portions=0, cur=None, cart_id=None):
     """
     Calcula a quantidade máxima disponível de um ingrediente extra baseado em:
     1. MAX_QUANTITY definido na regra do produto (se fornecido)
@@ -1099,7 +1099,15 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
         
         # IMPORTANTE: Usar estoque disponível (já considera reservas), não apenas CURRENT_STOCK
         from .stock_service import get_ingredient_available_stock
-        available_stock_result = get_ingredient_available_stock(ingredient_id, cur)
+        # ALTERAÇÃO: Passa cart_id para excluir reservas temporárias do próprio carrinho
+        # ALTERAÇÃO CRÍTICA: exclude_confirmed_reservations=True para não subtrair reservas confirmadas
+        # Reservas confirmadas não devem bloquear cálculo de disponibilidade para listagem/extras
+        available_stock_result = get_ingredient_available_stock(
+            ingredient_id, 
+            cur, 
+            exclude_cart_id=cart_id,
+            exclude_confirmed_reservations=True
+        )
         # get_ingredient_available_stock retorna Decimal diretamente, não um dicionário
         available_stock_decimal = available_stock_result if isinstance(available_stock_result, Decimal) else Decimal(str(available_stock_result or 0))
         
@@ -1254,7 +1262,9 @@ def get_ingredient_max_available_quantity(ingredient_id, max_quantity_from_rule=
             'max_available': max_available,
             'limited_by': 'both' if len(limited_by) == 2 else (limited_by[0] if limited_by else 'none'),
             'stock_info': {
-                'current_stock': current_stock_decimal,
+                # ALTERAÇÃO: Retorna available_stock (estoque disponível) em vez de current_stock (estoque físico)
+                # Isso garante que a validação use o estoque disponível considerando reservas
+                'current_stock': available_stock_decimal,  # ALTERAÇÃO: Usar available_stock em vez de current_stock
                 'stock_unit': stock_unit_str,
                 'base_portion_quantity': base_portion_quantity_decimal,
                 'base_portion_unit': base_portion_unit_str
