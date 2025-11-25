@@ -2945,6 +2945,24 @@ def claim_guest_cart(guest_cart_id, user_id):
             cur.execute("UPDATE CARTS SET USER_ID = ? WHERE ID = ? AND USER_ID IS NULL;", (user_id, guest_cart_id))
             if cur.rowcount == 0:
                 return (False, "CONFLICT", "Carrinho já foi reivindicado")
+            
+            # ALTERAÇÃO: Recria reservas temporárias após transferir carrinho para usuário
+            # Isso garante que:
+            # 1. Reservas expiradas sejam renovadas
+            # 2. session_id seja atualizado de cart_{cart_id} para user_{user_id}_cart_{cart_id}
+            # 3. Estoque seja revalidado após possível expiração
+            success, error_code, message = _recreate_temporary_reservations_for_cart(
+                cart_id=guest_cart_id,
+                user_id=user_id,
+                cur=cur
+            )
+            
+            if not success:
+                # Se falhar ao recriar reservas, faz rollback e retorna erro
+                logger.error(f"Erro ao recriar reservas temporárias ao transferir carrinho: {message}")
+                conn.rollback()
+                return (False, error_code, message or "Erro ao validar estoque do carrinho")
+            
             conn.commit()
             return (True, None, "Carrinho reivindicado com sucesso")
 

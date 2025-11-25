@@ -1790,6 +1790,11 @@ def get_ingredient_physical_stock(ingredient_id, cur=None):
     """
     Obtém estoque físico de um insumo SEM considerar reservas temporárias.
     
+    ALTERAÇÃO: Para listagem de produtos, retorna CURRENT_STOCK diretamente,
+    sem subtrair reservas confirmadas. Isso permite que produtos apareçam
+    no mostruário mesmo quando há pedidos confirmados, pois a validação
+    final de estoque será feita na finalização do pedido.
+    
     Usado para cálculo de disponibilidade na listagem de produtos.
     A reserva temporária só é considerada na validação ao adicionar/atualizar na cesta.
     
@@ -1798,7 +1803,7 @@ def get_ingredient_physical_stock(ingredient_id, cur=None):
         cur: Cursor do banco (opcional, se None cria nova conexão)
     
     Returns:
-        Decimal: Estoque físico (sem reservas temporárias, mas com reservas confirmadas)
+        Decimal: Estoque físico (CURRENT_STOCK do banco, sem subtrair reservas)
     """
     conn = None
     should_close = False
@@ -1831,46 +1836,21 @@ def get_ingredient_physical_stock(ingredient_id, cur=None):
         
         current_stock_decimal = Decimal(str(current_stock or 0))
         
-        # Calcula reservas confirmadas (pedidos pendentes/confirmados/preparando)
-        # IMPORTANTE: Considera apenas reservas confirmadas, NÃO reservas temporárias
-        cur.execute("""
-            SELECT 
-                oi.QUANTITY,
-                pi.PORTIONS,
-                i2.BASE_PORTION_QUANTITY,
-                i2.BASE_PORTION_UNIT,
-                i2.STOCK_UNIT
-            FROM ORDER_ITEMS oi
-            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
-            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
-            JOIN ORDERS o ON oi.ORDER_ID = o.ID
-            WHERE pi.INGREDIENT_ID = ?
-              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
-        """, (ingredient_id,))
+        # ALTERAÇÃO: Para listagem de produtos, retorna CURRENT_STOCK diretamente
+        # sem subtrair reservas confirmadas. Isso permite que produtos apareçam
+        # no mostruário mesmo quando há pedidos confirmados, pois:
+        # 1. A validação final de estoque será feita na finalização do pedido
+        # 2. Pedidos confirmados podem ser cancelados ou modificados
+        # 3. O estoque pode ser reposto antes da produção
+        # 
+        # As reservas confirmadas serão validadas apenas na finalização do pedido,
+        # não na listagem de produtos.
+        # 
+        # TODO: REVISAR - Se necessário, adicionar parâmetro para controlar se
+        # deve ou não subtrair reservas confirmadas (para casos específicos)
         
-        confirmed_reservations = Decimal('0')
-        for row in cur.fetchall():
-            oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
-            try:
-                # Calcula consumo convertido para unidade do estoque
-                consumption = calculate_consumption_in_stock_unit(
-                    portions=portions or 0,
-                    base_portion_quantity=base_portion_quantity or 1,
-                    base_portion_unit=base_portion_unit or 'un',
-                    stock_unit=stock_unit or 'un',
-                    item_quantity=oi_quantity or 1
-                )
-                confirmed_reservations += consumption
-            except ValueError as e:
-                logger.warning(f"Erro ao calcular reserva confirmada: {e}")
-                continue
-        
-        # Estoque físico = estoque_real - reservas_confirmadas (SEM reservas temporárias)
-        # NOTA: MIN_STOCK_THRESHOLD é apenas um indicador de alerta para reabastecimento
-        physical_stock = current_stock_decimal - confirmed_reservations
-        
-        # Retorna estoque físico (garantindo que não seja negativo)
-        return max(Decimal('0'), physical_stock)
+        # Retorna CURRENT_STOCK diretamente (sem subtrair reservas confirmadas)
+        return current_stock_decimal
         
     except fdb.Error as e:
         logger.error(f"Erro ao obter estoque físico: {e}", exc_info=True)
@@ -2131,14 +2111,17 @@ def _batch_get_ingredient_physical_stock(ingredient_ids, cur):
     OTIMIZAÇÃO: Obtém estoque físico para múltiplos ingredientes de uma vez.
     SEM considerar reservas temporárias (usado para listagem de produtos).
     
-    Evita N+1 queries ao buscar estoque e reservas confirmadas em batch.
+    ALTERAÇÃO: Retorna CURRENT_STOCK diretamente, sem subtrair reservas confirmadas.
+    Isso permite que produtos apareçam no mostruário mesmo quando há pedidos confirmados.
+    
+    Evita N+1 queries ao buscar estoque em batch.
     
     Args:
         ingredient_ids: Lista de IDs de ingredientes
         cur: Cursor do banco
     
     Returns:
-        dict: {ingredient_id: Decimal(estoque_físico)}
+        dict: {ingredient_id: Decimal(CURRENT_STOCK)}
     """
     if not ingredient_ids:
         return {}
@@ -2177,61 +2160,36 @@ def _batch_get_ingredient_physical_stock(ingredient_ids, cur):
                     'stock_unit': stock_unit,
                 }
         
-        # OTIMIZAÇÃO: Busca reservas confirmadas de todos os ingredientes de uma vez
-        # IMPORTANTE: Considera apenas reservas confirmadas, NÃO reservas temporárias
-        cur.execute(f"""
-            SELECT 
-                pi.INGREDIENT_ID,
-                oi.QUANTITY,
-                pi.PORTIONS,
-                i2.BASE_PORTION_QUANTITY,
-                i2.BASE_PORTION_UNIT,
-                i2.STOCK_UNIT
-            FROM ORDER_ITEMS oi
-            JOIN PRODUCT_INGREDIENTS pi ON oi.PRODUCT_ID = pi.PRODUCT_ID
-            JOIN INGREDIENTS i2 ON pi.INGREDIENT_ID = i2.ID
-            JOIN ORDERS o ON oi.ORDER_ID = o.ID
-            WHERE pi.INGREDIENT_ID IN ({placeholders})
-              AND o.STATUS IN ('pending', 'confirmed', 'preparing')
-        """, tuple(ingredient_ids))
+        # ALTERAÇÃO: Para listagem de produtos, retorna CURRENT_STOCK diretamente
+        # sem subtrair reservas confirmadas. Isso permite que produtos apareçam
+        # no mostruário mesmo quando há pedidos confirmados.
+        # 
+        # As reservas confirmadas serão validadas apenas na finalização do pedido,
+        # não na listagem de produtos.
         
-        # Calcula reservas confirmadas por ingrediente
-        confirmed_reservations = {ing_id: Decimal('0') for ing_id in ingredient_ids}
-        confirmed_rows = cur.fetchall()
-        
-        for row in confirmed_rows:
-            ing_id, oi_quantity, portions, base_portion_quantity, base_portion_unit, stock_unit = row
-            if ing_id not in ingredients_info:
-                continue
-            
-            try:
-                # Calcula consumo convertido para unidade do estoque
-                consumption = calculate_consumption_in_stock_unit(
-                    portions=portions or 0,
-                    base_portion_quantity=base_portion_quantity or 1,
-                    base_portion_unit=base_portion_unit or 'un',
-                    stock_unit=stock_unit or 'un',
-                    item_quantity=oi_quantity or 1
-                )
-                confirmed_reservations[ing_id] += consumption
-            except ValueError as e:
-                logger.warning(f"[STOCK_SERVICE] Erro ao calcular reserva confirmada para ingrediente {ing_id}: {e}", exc_info=True)
-                continue
-        
-        # Calcula estoque físico para cada ingrediente (SEM reservas temporárias)
+        # Calcula estoque físico para cada ingrediente (CURRENT_STOCK direto)
         physical_stock_map = {}
         for ing_id in ingredient_ids:
             if ing_id not in ingredients_info:
                 physical_stock_map[ing_id] = Decimal('0')
+                logger.warning(f"[STOCK_SERVICE] Ingrediente {ing_id} não encontrado no banco")
                 continue
             
             info = ingredients_info[ing_id]
             current_stock = info['current_stock']
-            confirmed = confirmed_reservations.get(ing_id, Decimal('0'))
             
-            # Estoque físico = estoque_real - reservas_confirmadas (SEM reservas temporárias)
-            physical_stock = current_stock - confirmed
-            physical_stock_map[ing_id] = max(Decimal('0'), physical_stock)
+            # ALTERAÇÃO: Retorna CURRENT_STOCK diretamente (sem subtrair reservas confirmadas)
+            # para permitir que produtos apareçam no mostruário
+            physical_stock_map[ing_id] = current_stock
+            
+            # LOG: Estoque físico (CURRENT_STOCK) para diagnóstico
+            if current_stock <= 0:
+                logger.warning(f"[STOCK_SERVICE] ⚠️ CURRENT_STOCK ZERO para ingrediente {ing_id}: "
+                             f"CURRENT_STOCK={current_stock}. "
+                             f"Verificar se o estoque foi cadastrado corretamente no banco.")
+            else:
+                logger.debug(f"[STOCK_SERVICE] Estoque físico (CURRENT_STOCK) para ingrediente {ing_id}: "
+                           f"CURRENT_STOCK={current_stock}")
         
         return physical_stock_map
     except Exception as e:
@@ -2369,8 +2327,41 @@ def calculate_product_capacity(product_id, cur=None, include_extras=True, for_li
             if consumption_per_unit <= 0:
                 continue
             
-            # Calcula capacidade para este insumo
-            capacity = int(available_stock / consumption_per_unit)
+            try:
+                # Converte para Decimal para cálculos precisos
+                available_stock_decimal = Decimal(str(available_stock))
+                consumption_per_unit_decimal = Decimal(str(consumption_per_unit))
+                
+                # LOG: Valores antes do cálculo
+                logger.debug(f"[STOCK_SERVICE] Calculando capacidade para {name} (ingrediente {ing_id}): "
+                           f"estoque={available_stock_decimal} {stock_unit}, "
+                           f"consumo={consumption_per_unit_decimal} {stock_unit}")
+                
+                # CORREÇÃO CRÍTICA: Se estoque >= consumo, capacidade deve ser pelo menos 1
+                # Verifica ANTES de fazer a divisão para evitar problemas de precisão
+                if available_stock_decimal >= consumption_per_unit_decimal:
+                    # Calcula capacidade usando Decimal (divisão precisa)
+                    capacity_decimal = available_stock_decimal / consumption_per_unit_decimal
+                    capacity = int(math.floor(capacity_decimal))
+                    
+                    # Garante que capacidade seja pelo menos 1 quando estoque >= consumo
+                    if capacity < 1:
+                        logger.warning(f"[STOCK_SERVICE] ⚠️ Correção aplicada para {name}: "
+                                     f"estoque={available_stock_decimal} >= consumo={consumption_per_unit_decimal}, "
+                                     f"mas capacity calculada={capacity}, ajustando para 1")
+                        capacity = 1
+                else:
+                    # Estoque < consumo, calcula capacidade normalmente
+                    capacity_decimal = available_stock_decimal / consumption_per_unit_decimal
+                    capacity = int(math.floor(capacity_decimal))
+                
+                # LOG: Resultado do cálculo
+                logger.debug(f"[STOCK_SERVICE] Capacidade calculada para {name}: {capacity} unidades "
+                           f"(ratio: {available_stock_decimal / consumption_per_unit_decimal})")
+                    
+            except (ValueError, TypeError, ZeroDivisionError) as e:
+                logger.error(f"Erro ao calcular capacidade para {name} (ingrediente {ing_id}): {e}", exc_info=True)
+                continue
             
             ingredient_info = {
                 'ingredient_id': ing_id,
@@ -2420,7 +2411,7 @@ def calculate_product_capacity(product_id, cur=None, include_extras=True, for_li
             conn.close()
 
 
-def calculate_product_capacity_with_extras(product_id, extras=None, base_modifications=None, cur=None):
+def calculate_product_capacity_with_extras(product_id, extras=None, base_modifications=None, cur=None, for_listing=False):
     """
     Calcula capacidade de produção considerando extras e modificações da receita base.
     
@@ -2435,6 +2426,8 @@ def calculate_product_capacity_with_extras(product_id, extras=None, base_modific
                           delta positivo = adiciona à receita base
                           delta negativo = remove da receita base
         cur: Cursor do banco (opcional)
+        for_listing: Se True, usa estoque físico (sem reservas temporárias) para listagem.
+                     Se False, usa estoque disponível (com reservas temporárias) para validação.
     
     Returns:
         dict: Mesmo formato de calculate_product_capacity, mas considerando extras e base_modifications
@@ -2450,7 +2443,7 @@ def calculate_product_capacity_with_extras(product_id, extras=None, base_modific
         
         # Se não há extras nem base_modifications, retorna capacidade base
         if not extras and not base_modifications:
-            return calculate_product_capacity(product_id, cur, include_extras=False)
+            return calculate_product_capacity(product_id, cur, include_extras=False, for_listing=for_listing)
         
         # NOVO: Processa base_modifications para criar mapa de deltas por ingrediente
         base_mods_map = {}  # {ingredient_id: delta_total}
@@ -2638,8 +2631,12 @@ def calculate_product_capacity_with_extras(product_id, extras=None, base_modific
             if not is_available:
                 continue
             
-            # Obtém estoque disponível
-            available_stock = get_ingredient_available_stock(ing_id, cur)
+            # ALTERAÇÃO: Para listagem, usa estoque físico (sem reservas temporárias)
+            # Para validação, usa estoque disponível (com reservas temporárias)
+            if for_listing:
+                available_stock = get_ingredient_physical_stock(ing_id, cur)
+            else:
+                available_stock = get_ingredient_available_stock(ing_id, cur)
             
             # Calcula consumo da receita por unidade do produto
             try:
@@ -2722,7 +2719,12 @@ def calculate_product_capacity_with_extras(product_id, extras=None, base_modific
             
             # Ingrediente extra que não está na receita
             extra_info = extras_info[ing_id]
-            available_stock = get_ingredient_available_stock(ing_id, cur)
+            # ALTERAÇÃO: Para listagem, usa estoque físico (sem reservas temporárias)
+            # Para validação, usa estoque disponível (com reservas temporárias)
+            if for_listing:
+                available_stock = get_ingredient_physical_stock(ing_id, cur)
+            else:
+                available_stock = get_ingredient_available_stock(ing_id, cur)
             
             if extra_consumption <= 0:
                 continue

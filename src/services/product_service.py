@@ -1,5 +1,6 @@
 import fdb  
 import logging
+import math
 from ..database import get_db_connection
 from . import groups_service, stock_service
 from ..utils.image_handler import get_product_image_url
@@ -603,9 +604,10 @@ def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
                 ingredient_availability = stock_service._batch_get_ingredient_available_stock(list(all_ingredient_ids), cur)
             logger.info(f"[PRODUCT_SERVICE] Estoque {'físico' if for_listing else 'disponível'} retornado para {len(ingredient_availability)} ingredientes")
             
-            # LOG: Estoque de alguns ingredientes
-            for ing_id, stock in list(ingredient_availability.items())[:5]:
-                logger.debug(f"[PRODUCT_SERVICE] Ingrediente {ing_id}: estoque disponível = {stock}")
+            # LOG: Estoque de ingredientes (apenas em debug)
+            for ing_id, stock in ingredient_availability.items():
+                if len(list(ingredient_availability.items())) <= 10:  # Se poucos ingredientes, logar todos
+                    logger.debug(f"[PRODUCT_SERVICE] Ingrediente {ing_id}: estoque {'físico' if for_listing else 'disponível'} = {stock}")
         else:
             logger.warning(f"[PRODUCT_SERVICE] Nenhum ingrediente para buscar estoque!")
         
@@ -651,7 +653,8 @@ def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
                                  f"ESTOQUE DISPONÍVEL ZERO! "
                                  f"estoque_disponivel={available_stock}, portions={portions}, "
                                  f"base_portion_quantity={base_portion_quantity}, base_portion_unit={base_portion_unit}, "
-                                 f"stock_unit={stock_unit}")
+                                 f"stock_unit={stock_unit}. "
+                                 f"Verificar: 1) CURRENT_STOCK no banco, 2) Reservas confirmadas, 3) IS_AVAILABLE")
                 else:
                     logger.debug(f"[PRODUCT_SERVICE] Produto {product_id}, Ingrediente {ing_id} ({name}): "
                                f"estoque_disponivel={available_stock}, portions={portions}, "
@@ -677,8 +680,53 @@ def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
                     logger.warning(f"[PRODUCT_SERVICE] Consumo por unidade <= 0 para {name} (ingrediente {ing_id}): {consumption_per_unit}")
                     continue
                 
-                # Calcula capacidade para este ingrediente
-                capacity = int(available_stock / consumption_per_unit)
+                # ALTERAÇÃO: Calcula capacidade usando Decimal para precisão (mesma correção de calculate_product_capacity)
+                # Problema identificado: int() truncava valores ligeiramente menores que 1.0
+                # devido a erros de precisão de ponto flutuante
+                try:
+                    # Converte para Decimal para cálculos precisos
+                    # ALTERAÇÃO: Se já for Decimal, não precisa converter novamente
+                    if isinstance(available_stock, Decimal):
+                        available_stock_decimal = available_stock
+                    else:
+                        available_stock_decimal = Decimal(str(available_stock))
+                    
+                    if isinstance(consumption_per_unit, Decimal):
+                        consumption_per_unit_decimal = consumption_per_unit
+                    else:
+                        consumption_per_unit_decimal = Decimal(str(consumption_per_unit))
+                    
+                    # LOG: Valores antes do cálculo
+                    logger.debug(f"[PRODUCT_SERVICE] Calculando capacidade para produto {product_id}, {name} (ingrediente {ing_id}): "
+                               f"estoque={available_stock_decimal} {stock_unit}, "
+                               f"consumo={consumption_per_unit_decimal} {stock_unit}")
+                    
+                    # CORREÇÃO CRÍTICA: Se estoque >= consumo, capacidade deve ser pelo menos 1
+                    # Verifica ANTES de fazer a divisão para evitar problemas de precisão
+                    if available_stock_decimal >= consumption_per_unit_decimal:
+                        # Calcula capacidade usando Decimal (divisão precisa)
+                        capacity_decimal = available_stock_decimal / consumption_per_unit_decimal
+                        capacity = int(math.floor(capacity_decimal))
+                        
+                        # Garante que capacidade seja pelo menos 1 quando estoque >= consumo
+                        if capacity < 1:
+                            logger.debug(f"[PRODUCT_SERVICE] Correção aplicada para produto {product_id}, {name}: "
+                                         f"estoque={available_stock_decimal} >= consumo={consumption_per_unit_decimal}, "
+                                         f"mas capacity calculada={capacity}, ajustando para 1")
+                            capacity = 1
+                    else:
+                        # Estoque < consumo, calcula capacidade normalmente
+                        capacity_decimal = available_stock_decimal / consumption_per_unit_decimal
+                        capacity = int(math.floor(capacity_decimal))
+                    
+                    # LOG: Resultado do cálculo
+                    logger.debug(f"[PRODUCT_SERVICE] Capacidade calculada para produto {product_id}, {name}: {capacity} unidades "
+                               f"(ratio: {float(available_stock_decimal / consumption_per_unit_decimal)})")
+                        
+                except (ValueError, TypeError, ZeroDivisionError) as e:
+                    logger.error(f"[PRODUCT_SERVICE] Erro ao calcular capacidade para {name} (ingrediente {ing_id}): {e}", exc_info=True)
+                    continue
+                
                 capacities.append(capacity)
                 
                 logger.debug(f"[PRODUCT_SERVICE] Capacidade calculada para {name}: {capacity} unidades "
@@ -696,7 +744,7 @@ def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
                         'stock_unit': stock_unit
                     }
             
-            # LOG: Capacidades calculadas (SEMPRE logar detalhes para diagnóstico)
+            # LOG: Capacidades calculadas (apenas para produtos indisponíveis)
             if not capacities or min_capacity is None or min_capacity < 1:
                 logger.warning(f"[PRODUCT_SERVICE] ❌ Produto {product_id} INDISPONÍVEL: "
                              f"capacities={capacities}, min_capacity={min_capacity}, "
@@ -706,15 +754,36 @@ def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
                 for ing in ingredients:
                     ing_id = ing['ingredient_id']
                     ing_stock = ingredient_availability.get(ing_id, Decimal('0'))
-                    if ing_stock <= 0:
-                        logger.warning(f"[PRODUCT_SERVICE]   → Ingrediente {ing_id} ({ing['name']}): "
-                                     f"estoque_disponivel={ing_stock} {ing['stock_unit']}")
-            else:
-                logger.info(f"[PRODUCT_SERVICE] ✅ Produto {product_id} disponível: "
-                           f"capacities={capacities}, min_capacity={min_capacity}")
+                    ing_consumption = stock_service.calculate_consumption_in_stock_unit(
+                        portions=ing['portions'],
+                        base_portion_quantity=ing['base_portion_quantity'],
+                        base_portion_unit=ing['base_portion_unit'],
+                        stock_unit=ing['stock_unit'],
+                        item_quantity=1,
+                        loss_percentage=ing.get('loss_percentage', 0)
+                    )
+                    logger.debug(f"[PRODUCT_SERVICE]   → Ingrediente {ing_id} ({ing['name']}): "
+                                 f"estoque={ing_stock} {ing['stock_unit']}, "
+                                 f"consumo={ing_consumption} {ing['stock_unit']}, "
+                                 f"ratio={float(ing_stock) / float(ing_consumption) if ing_consumption > 0 else 0}")
             
             # Determina status de disponibilidade
-            if not capacities or min_capacity is None or min_capacity < 1:
+            # ALTERAÇÃO: Verifica se min_capacity foi calculado corretamente
+            # Se capacities está vazio, significa que nenhum ingrediente foi processado
+            if not capacities:
+                logger.error(f"[PRODUCT_SERVICE] ⚠️ CRÍTICO: Produto {product_id} sem capacidades calculadas! "
+                           f"Total de ingredientes: {len(ingredients)}")
+                result[product_id] = {
+                    'status': 'unavailable',
+                    'capacity': 0,
+                    'is_available': False,
+                    'limiting_ingredient': None
+                }
+                continue
+            
+            if min_capacity is None or min_capacity < 1:
+                logger.debug(f"[PRODUCT_SERVICE] Produto {product_id} marcado como INDISPONÍVEL: "
+                             f"min_capacity={min_capacity}, capacities={capacities}")
                 result[product_id] = {
                     'status': 'unavailable',
                     'capacity': 0,
@@ -722,7 +791,7 @@ def _batch_get_product_availability_status(product_ids, cur, for_listing=False):
                     'limiting_ingredient': None
                 }
             elif min_capacity == 1:
-                logger.info(f"[PRODUCT_SERVICE] Produto {product_id} disponível (limitado): capacity=1")
+                logger.debug(f"[PRODUCT_SERVICE] Produto {product_id} disponível (limitado): capacity=1")
                 result[product_id] = {
                     'status': 'limited',
                     'capacity': 1,

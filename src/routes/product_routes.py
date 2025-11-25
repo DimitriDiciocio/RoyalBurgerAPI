@@ -352,15 +352,26 @@ def simulate_product_capacity_route():
                 except (ValueError, TypeError):
                     return jsonify({"error": "ingredient_id e delta devem ser números válidos"}), 400
         
+        # ALTERAÇÃO: Determina se é para listagem (padrão: True para validação de exibição)
+        # Se for_listing=True, usa estoque físico (sem reservas temporárias) para listagem
+        # Se for_listing=False, usa estoque disponível (com reservas temporárias) para validação de carrinho
+        for_listing = data.get("for_listing", True)  # Padrão: True para validação de exibição
+        
         # Calcula capacidade usando a função existente
         if extras or base_modifications:
+            # ALTERAÇÃO: Passa for_listing para usar estoque físico na listagem
             capacity_result = stock_service.calculate_product_capacity_with_extras(
                 product_id, 
                 extras=extras,
-                base_modifications=base_modifications
+                base_modifications=base_modifications,
+                for_listing=for_listing
             )
         else:
-            capacity_result = stock_service.calculate_product_capacity(product_id)
+            # ALTERAÇÃO: Passa for_listing para usar estoque físico na listagem
+            capacity_result = stock_service.calculate_product_capacity(
+                product_id, 
+                for_listing=for_listing
+            )
         
         # Verifica se houve erro no cálculo
         if not capacity_result or capacity_result.get('capacity') is None:
