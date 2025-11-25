@@ -652,6 +652,60 @@ def cleanup_expired_reservations_route():
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
+@cart_bp.route('/maintenance/scheduler/status', methods=['GET'])
+def get_scheduler_status_route():
+    """
+    Retorna status dos jobs agendados no scheduler.
+    
+    Útil para monitoramento e debugging.
+    """
+    try:
+        from ..utils.scheduler import get_jobs_status
+        
+        jobs = get_jobs_status()
+        
+        return jsonify({
+            "scheduler_active": len(jobs) > 0,
+            "jobs_count": len(jobs),
+            "jobs": jobs
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Erro ao obter status do scheduler: {e}", exc_info=True)
+        return jsonify({"error": "Erro ao obter status do scheduler"}), 500
+
+
+@cart_bp.route('/maintenance/scheduler/run-job/<job_id>', methods=['POST'])
+def run_scheduler_job_now_route(job_id):
+    """
+    Executa um job do scheduler imediatamente (fora do agendamento).
+    
+    Útil para testes e manutenção manual.
+    
+    Exemplos:
+        - POST /api/cart/maintenance/scheduler/run-job/cleanup_expired_reservations
+    """
+    try:
+        from ..utils.scheduler import run_job_now
+        
+        success = run_job_now(job_id)
+        
+        if success:
+            return jsonify({
+                "message": f"Job '{job_id}' executado com sucesso",
+                "job_id": job_id
+            }), 200
+        else:
+            return jsonify({
+                "error": f"Erro ao executar job '{job_id}'",
+                "job_id": job_id
+            }), 404
+    
+    except Exception as e:
+        logger.error(f"Erro ao executar job '{job_id}': {e}", exc_info=True)
+        return jsonify({"error": "Erro ao executar job"}), 500
+
+
 @cart_bp.route('/sync', methods=['POST'])
 @jwt_required()
 def sync_cart_route():

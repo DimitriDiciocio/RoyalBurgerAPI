@@ -3003,6 +3003,23 @@ def claim_guest_cart(guest_cart_id, user_id):
                         (new_user_item_id, bm["ingredient_id"], bm["delta"], unit_price)
                     )
 
+        # CORREÇÃO: Recria reservas temporárias para o carrinho do usuário após mesclar itens
+        # Isso garante que as reservas do carrinho visitante sejam transferidas para o carrinho autenticado
+        # Evita perda de reservas de estoque ao fazer login após adicionar produtos como visitante
+        success, error_code, message = _recreate_temporary_reservations_for_cart(
+            cart_id=user_cart_id,
+            user_id=user_id,
+            cur=cur
+        )
+        
+        if not success:
+            # Se falhar ao recriar reservas, faz rollback e retorna erro
+            logger.error(f"Erro ao recriar reservas temporárias ao mesclar carrinho: {message}")
+            conn.rollback()
+            return (False, error_code, f"Erro ao mesclar carrinho: {message}")
+        
+        logger.info(f"Reservas temporárias recriadas para carrinho {user_cart_id} após mesclar com carrinho convidado {guest_cart_id}")
+
         # Deleta o carrinho convidado após mesclar (os itens já foram copiados)
         # Usa DELETE em vez de UPDATE para evitar violação da constraint UK_CARTS_USER_ACTIVE
         # As foreign keys têm ON DELETE CASCADE, então os itens e extras serão deletados automaticamente

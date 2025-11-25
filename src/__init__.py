@@ -464,4 +464,18 @@ def create_app():
             logger.error(f"Erro ao servir upload: {e}", exc_info=True)
             abort(500)
     
+    # ALTERAÇÃO: Inicializa scheduler de jobs periódicos
+    # Jobs agendados: limpeza de reservas temporárias expiradas (a cada 5 minutos)
+    try:
+        from .utils.scheduler import init_scheduler
+        init_scheduler(app)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Scheduler de jobs periódicos inicializado com sucesso")
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erro ao inicializar scheduler de jobs periódicos: {e}", exc_info=True)
+        # Não bloqueia a aplicação se o scheduler falhar
+    
     return app  

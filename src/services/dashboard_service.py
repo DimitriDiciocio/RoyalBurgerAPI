@@ -2,6 +2,7 @@ import fdb
 import logging
 from datetime import datetime, date, timedelta
 from ..database import get_db_connection
+from . import settings_service  # ALTERAÇÃO: Import para buscar meta mensal
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +140,16 @@ def get_dashboard_metrics():
         active_users_result = cur.fetchone()
         active_users_count = active_users_result[0] if active_users_result and active_users_result[0] is not None else 0
         
+        # ALTERAÇÃO: Buscar meta mensal das configurações
+        try:
+            settings = settings_service.get_all_settings()
+            monthly_goal = settings.get('meta_receita_mensal', 0) if settings else 0
+        except Exception as e:
+            logger.warning(f"Erro ao buscar meta mensal para dashboard: {e}")
+            monthly_goal = 0
+        
         # ALTERAÇÃO: Ajustar índices após remover avg_prep_time da query principal
-        # ALTERAÇÃO: Adicionar active_users_count ao resultado
+        # ALTERAÇÃO: Adicionar active_users_count e monthly_goal ao resultado
         result = {  
             "total_orders_today": metrics_row[0] or 0,
             "revenue_today": float(metrics_row[1]) if metrics_row[1] else 0.0,
@@ -152,7 +161,8 @@ def get_dashboard_metrics():
             "cancelled_orders": metrics_row[4] or 0,
             "order_distribution": order_distribution,
             "recent_orders": recent_orders,
-            "active_users_count": active_users_count  # ALTERAÇÃO: Contagem de usuários ativos
+            "active_users_count": active_users_count,  # ALTERAÇÃO: Contagem de usuários ativos
+            "monthly_goal": float(monthly_goal) if monthly_goal else 0.0  # ALTERAÇÃO: Meta mensal de receita
         }
         
         # OTIMIZAÇÃO: Salva resultado no cache
@@ -173,7 +183,8 @@ def get_dashboard_metrics():
             "cancelled_orders": 0,
             "order_distribution": {},
             "recent_orders": [],
-            "active_users_count": 0  # ALTERAÇÃO: Incluir active_users_count no fallback de erro
+            "active_users_count": 0,  # ALTERAÇÃO: Incluir active_users_count no fallback de erro
+            "monthly_goal": 0.0  # ALTERAÇÃO: Incluir monthly_goal no fallback de erro
         }
     finally:  
         if conn: conn.close()

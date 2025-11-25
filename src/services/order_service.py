@@ -1084,11 +1084,12 @@ def update_order_status(order_id, new_status):
                 
                 # Registrar receita e CMV na mesma transação
                 # ALTERAÇÃO FASE 3: Retorno agora inclui payment_fee_id
+                # ALTERAÇÃO: Usar datetime.now() ao invés de order_created_at para refletir data real do pagamento
                 success, revenue_id, cmv_id, payment_fee_id, error = financial_movement_service.register_order_revenue_and_cmv(
                     order_id=order_id,
                     order_total=float(order_total) if order_total else 0.0,
                     payment_method=payment_method or 'unknown',
-                    payment_date=order_created_at,  # Usar data de criação do pedido
+                    payment_date=None,  # None usa datetime.now() automaticamente (data do pagamento)
                     created_by_user_id=None,  # Sistema registra automaticamente (pode ser melhorado para rastrear usuário)
                     cur=cur  # ALTERAÇÃO: Passar cursor para mesma transação
                 )

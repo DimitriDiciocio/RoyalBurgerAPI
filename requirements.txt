@@ -18,3 +18,4 @@ pywin32; platform_system == "Windows"
 python-socketio
 pandas>=2.1.0
 numpy>=1.26.0
+APScheduler>=3.10.0
