@@ -1445,7 +1445,7 @@ def update_payment_status(movement_id, payment_status, movement_date=None, updat
                 MOVEMENT_DATE = ?,
                 UPDATED_AT = CURRENT_TIMESTAMP
             WHERE ID = ?
-            RETURNING ID, TYPE, "VALUE", DESCRIPTION
+            RETURNING ID, MOVEMENT_TYPE, FINANCIAL_VALUE, DESCRIPTION
         """
         
         cur.execute(sql, (payment_status, movement_date, movement_id))
