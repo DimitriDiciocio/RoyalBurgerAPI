@@ -11,6 +11,7 @@ import fdb
 import logging
 import hashlib
 import json
+import math
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from ..database import get_db_connection
@@ -1189,12 +1190,22 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
                 AND EXTRACT(YEAR FROM MOVEMENT_DATE) = EXTRACT(YEAR FROM CURRENT_DATE)
             """
         elif period == 'last_month':
+            # ALTERAÇÃO: Corrigir cálculo do mês anterior para tratar transição de ano corretamente
+            # Se mês atual é janeiro (1), mês anterior é dezembro do ano anterior
+            # Caso contrário, mês anterior é o mês - 1 do mesmo ano
             date_filter = """
-                EXTRACT(MONTH FROM MOVEMENT_DATE) = EXTRACT(MONTH FROM CURRENT_DATE) - 1
-                AND EXTRACT(YEAR FROM MOVEMENT_DATE) = EXTRACT(YEAR FROM CURRENT_DATE)
+                (EXTRACT(MONTH FROM MOVEMENT_DATE) = CASE 
+                    WHEN EXTRACT(MONTH FROM CURRENT_DATE) = 1 THEN 12
+                    ELSE EXTRACT(MONTH FROM CURRENT_DATE) - 1
+                END
+                AND EXTRACT(YEAR FROM MOVEMENT_DATE) = CASE 
+                    WHEN EXTRACT(MONTH FROM CURRENT_DATE) = 1 THEN EXTRACT(YEAR FROM CURRENT_DATE) - 1
+                    ELSE EXTRACT(YEAR FROM CURRENT_DATE)
+                END)
             """
         elif period == 'last_30_days':
-            date_filter = "MOVEMENT_DATE >= CURRENT_DATE - INTERVAL '30 days'"
+            # ALTERAÇÃO: Últimos 30 dias incluindo hoje (de hoje até 30 dias atrás)
+            date_filter = "MOVEMENT_DATE >= CAST(CURRENT_DATE - 30 AS DATE) AND MOVEMENT_DATE <= CAST(CURRENT_DATE AS DATE)"
         else:
             date_filter = "1=1"  # Todos os registros
         
@@ -1306,12 +1317,22 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
                     AND EXTRACT(YEAR FROM ({pending_date_filter})) = EXTRACT(YEAR FROM CURRENT_DATE)
                 """
             elif period == 'last_month':
+                # ALTERAÇÃO: Corrigir cálculo do mês anterior para tratar transição de ano corretamente
+                # Se mês atual é janeiro (1), mês anterior é dezembro do ano anterior
+                # Caso contrário, mês anterior é o mês - 1 do mesmo ano
                 pending_filter = f"""
-                    EXTRACT(MONTH FROM ({pending_date_filter})) = EXTRACT(MONTH FROM CURRENT_DATE) - 1
-                    AND EXTRACT(YEAR FROM ({pending_date_filter})) = EXTRACT(YEAR FROM CURRENT_DATE)
+                    (EXTRACT(MONTH FROM ({pending_date_filter})) = CASE 
+                        WHEN EXTRACT(MONTH FROM CURRENT_DATE) = 1 THEN 12
+                        ELSE EXTRACT(MONTH FROM CURRENT_DATE) - 1
+                    END
+                    AND EXTRACT(YEAR FROM ({pending_date_filter})) = CASE 
+                        WHEN EXTRACT(MONTH FROM CURRENT_DATE) = 1 THEN EXTRACT(YEAR FROM CURRENT_DATE) - 1
+                        ELSE EXTRACT(YEAR FROM CURRENT_DATE)
+                    END)
                 """
             elif period == 'last_30_days':
-                pending_filter = f"{pending_date_filter} >= CURRENT_DATE - INTERVAL '30 days'"
+                # ALTERAÇÃO: Últimos 30 dias incluindo hoje (de hoje até 30 dias atrás)
+                pending_filter = f"({pending_date_filter}) >= CAST(CURRENT_DATE - 30 AS DATE) AND ({pending_date_filter}) <= CAST(CURRENT_DATE AS DATE)"
             else:
                 pending_filter = "1=1"  # Todos os pendentes
             
@@ -1821,15 +1842,18 @@ def update_financial_movement_gateway_info(movement_id, gateway_data, updated_by
             conn.close()
 
 
-def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, payment_gateway_id=None):
+def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, payment_gateway_id=None, page=1, page_size=100):
     """
     Gera relatório de conciliação bancária
+    ALTERAÇÃO: Adicionado suporte a paginação
     
     Args:
         start_date: datetime/str (opcional)
         end_date: datetime/str (opcional)
         reconciled: bool (opcional) - True para reconciliadas, False para não reconciliadas, None para todas
         payment_gateway_id: str (opcional) - Filtrar por gateway
+        page: int (opcional, default: 1) - Número da página
+        page_size: int (opcional, default: 100) - Itens por página
     
     Returns:
         dict com:
@@ -1838,7 +1862,10 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
             - unreconciled_count: int
             - reconciled_amount: float
             - unreconciled_amount: float
-            - movements: list de movimentações
+            - movements: list de movimentações (paginadas)
+            - page: int - Página atual
+            - page_size: int - Itens por página
+            - total_pages: int - Total de páginas
     """
     conn = None
     try:
@@ -1912,12 +1939,37 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
         reconciled_amount = float(stats_row[3]) if stats_row[3] is not None else 0.0
         unreconciled_amount = float(stats_row[4]) if stats_row[4] is not None else 0.0
         
-        # Buscar movimentações
-        movements_sql = """
-            SELECT 
-                fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.DESCRIPTION, fm.MOVEMENT_DATE,
-                fm.PAYMENT_STATUS, fm.PAYMENT_METHOD, fm.PAYMENT_GATEWAY_ID,
-                fm.TRANSACTION_ID, fm.BANK_ACCOUNT, fm.RECONCILED, fm.RECONCILED_AT
+        # ALTERAÇÃO: Aplicar paginação
+        try:
+            page = int(page)
+            page_size = int(page_size)
+            if page < 1:
+                page = 1
+            if page_size < 1:
+                page_size = 100
+            if page_size > 1000:
+                page_size = 1000  # Limitar para evitar sobrecarga
+        except (ValueError, TypeError):
+            page = 1
+            page_size = 100
+        
+        # Calcular offset
+        offset = (page - 1) * page_size
+        
+        # Buscar movimentações com paginação
+        # ALTERAÇÃO: Adicionar FIRST/SKIP para paginação (sintaxe Firebird)
+        page_size = int(page_size)
+        offset = int(offset)
+        if offset > 0:
+            paginated_sql = f"SELECT FIRST {page_size} SKIP {offset}"
+        else:
+            paginated_sql = f"SELECT FIRST {page_size}"
+        
+        movements_sql = f"""
+            {paginated_sql}
+            fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.DESCRIPTION, fm.MOVEMENT_DATE,
+            fm.PAYMENT_STATUS, fm.PAYMENT_METHOD, fm.PAYMENT_GATEWAY_ID,
+            fm.TRANSACTION_ID, fm.BANK_ACCOUNT, fm.RECONCILED, fm.RECONCILED_AT
             FROM FINANCIAL_MOVEMENTS fm
         """ + where_clause + """
             ORDER BY fm.MOVEMENT_DATE DESC NULLS LAST, fm.CREATED_AT DESC
@@ -1942,13 +1994,19 @@ def get_reconciliation_report(start_date=None, end_date=None, reconciled=None, p
                 "reconciled_at": row[11].isoformat() if row[11] else None
             })
         
+        # ALTERAÇÃO: Calcular total de páginas
+        total_pages = math.ceil(total_movements / page_size) if page_size > 0 else 1
+        
         return {
             "total_movements": total_movements,
             "reconciled_count": reconciled_count,
             "unreconciled_count": unreconciled_count,
             "reconciled_amount": reconciled_amount,
             "unreconciled_amount": unreconciled_amount,
-            "movements": movements
+            "movements": movements,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages
         }
         
     except fdb.Error as e:

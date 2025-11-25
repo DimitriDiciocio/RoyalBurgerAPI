@@ -56,14 +56,14 @@ def generate_cmv_report(filters=None):
         end_datetime = datetime.combine(end_dt.date() + timedelta(days=1), datetime.min.time()) if isinstance(end_dt, date) else end_dt
         
         # 1. CMV TOTAL E POR PERÍODO
-        conditions = ["fm.TYPE = 'CMV'", "fm.PAYMENT_STATUS = 'Paid'", 
+        conditions = ["fm.MOVEMENT_TYPE = 'CMV'", "fm.PAYMENT_STATUS = 'Paid'", 
                      "fm.MOVEMENT_DATE >= ?", "fm.MOVEMENT_DATE < ?"]
         params = [start_datetime, end_datetime]
         
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_cmv,
+                CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total_cmv,
                 CAST(COUNT(*) AS INTEGER) as total_movements
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {' AND '.join(conditions)}
@@ -77,7 +77,7 @@ def generate_cmv_report(filters=None):
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_cmv
+                   CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total_cmv
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {' AND '.join(conditions)}
             GROUP BY fm.CATEGORY
@@ -129,8 +129,8 @@ def generate_cmv_report(filters=None):
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
             SELECT 
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'CMV' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_cmv,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'CMV' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_cmv,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'REVENUE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
@@ -237,7 +237,7 @@ def generate_taxes_report_data(filters=None):
         end_datetime = datetime.combine(end_dt.date() + timedelta(days=1), datetime.min.time()) if isinstance(end_dt, date) else end_dt
         
         # Condições base
-        conditions = ["fm.TYPE = 'TAX'"]
+        conditions = ["fm.MOVEMENT_TYPE = 'TAX'"]
         params = []
         
         if validated_filters.get('status') == 'Paid':
@@ -264,10 +264,10 @@ def generate_taxes_report_data(filters=None):
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute(f"""
             SELECT 
-                CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_taxes,
+                CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total_taxes,
                 CAST(COUNT(*) AS INTEGER) as total_movements,
-                CAST(COALESCE(SUM(CASE WHEN fm.PAYMENT_STATUS = 'Paid' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as paid_taxes,
-                CAST(COALESCE(SUM(CASE WHEN fm.PAYMENT_STATUS = 'Pending' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_taxes
+                CAST(COALESCE(SUM(CASE WHEN fm.PAYMENT_STATUS = 'Paid' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as paid_taxes,
+                CAST(COALESCE(SUM(CASE WHEN fm.PAYMENT_STATUS = 'Pending' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_taxes
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
@@ -282,7 +282,7 @@ def generate_taxes_report_data(filters=None):
         # CORREÇÃO: "count" é palavra reservada, usar alias diferente
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total,
+                   CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total,
                    CAST(COUNT(*) AS INTEGER) as category_count
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
@@ -318,9 +318,9 @@ def generate_taxes_report_data(filters=None):
         # 4. IMPACTO NA RECEITA
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_revenue
+            SELECT CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
-            WHERE fm.TYPE = 'REVENUE'
+            WHERE fm.MOVEMENT_TYPE = 'REVENUE'
             AND fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (start_datetime, end_datetime))

@@ -865,7 +865,8 @@ def generate_complete_financial_report(filters=None):
         params = [start_datetime, end_datetime]
         
         if validated_filters.get('type'):
-            conditions.append("fm.TYPE = ?")
+            # ALTERAÇÃO: Corrigir nome da coluna de TYPE para MOVEMENT_TYPE
+            conditions.append("fm.MOVEMENT_TYPE = ?")
             params.append(validated_filters['type'])
         
         if validated_filters.get('category'):
@@ -880,12 +881,13 @@ def generate_complete_financial_report(filters=None):
         
         # 1. RESUMO EXECUTIVO
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # ALTERAÇÃO: Corrigir nome das colunas TYPE para MOVEMENT_TYPE e "VALUE" para FINANCIAL_VALUE
         cur.execute(f"""
             SELECT 
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_expense,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'CMV' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_cmv,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'TAX' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_taxes
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'REVENUE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'EXPENSE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_expense,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'CMV' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_cmv,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'TAX' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_taxes
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
@@ -912,10 +914,11 @@ def generate_complete_financial_report(filters=None):
         
         prev_params = [prev_start_datetime, prev_end_datetime] + params[2:]
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # ALTERAÇÃO: Corrigir nome das colunas TYPE para MOVEMENT_TYPE e "VALUE" para FINANCIAL_VALUE
         cur.execute(f"""
             SELECT 
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as total_expense
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'REVENUE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_revenue,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'EXPENSE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as total_expense
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(prev_params))
@@ -928,10 +931,11 @@ def generate_complete_financial_report(filters=None):
         
         # 2. FLUXO DE CAIXA DIÁRIO
         # CORREÇÃO: "date" é palavra reservada no Firebird, usar alias diferente
+        # ALTERAÇÃO: Corrigir nome das colunas TYPE para MOVEMENT_TYPE e "VALUE" para FINANCIAL_VALUE
         cur.execute(f"""
             SELECT CAST(fm.MOVEMENT_DATE AS DATE) as movement_date,
-                   CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
-                   CAST(COALESCE(SUM(CASE WHEN fm.TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as expenses
+                   CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'REVENUE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
+                   CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as expenses
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
             GROUP BY CAST(fm.MOVEMENT_DATE AS DATE)
@@ -951,11 +955,12 @@ def generate_complete_financial_report(filters=None):
         
         # 3. RECEITAS POR CATEGORIA
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # ALTERAÇÃO: Corrigir nome das colunas TYPE para MOVEMENT_TYPE e "VALUE" para FINANCIAL_VALUE
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total
+                   CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total
             FROM FINANCIAL_MOVEMENTS fm
-            WHERE {where_clause} AND fm.TYPE = 'REVENUE'
+            WHERE {where_clause} AND fm.MOVEMENT_TYPE = 'REVENUE'
             GROUP BY fm.CATEGORY
             ORDER BY total DESC
         """, tuple(params))
@@ -969,11 +974,12 @@ def generate_complete_financial_report(filters=None):
         
         # 4. DESPESAS POR CATEGORIA
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # ALTERAÇÃO: Corrigir nome das colunas TYPE para MOVEMENT_TYPE e "VALUE" para FINANCIAL_VALUE
         cur.execute(f"""
             SELECT fm.CATEGORY,
-                   CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total
+                   CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total
             FROM FINANCIAL_MOVEMENTS fm
-            WHERE {where_clause} AND fm.TYPE = 'EXPENSE'
+            WHERE {where_clause} AND fm.MOVEMENT_TYPE = 'EXPENSE'
             GROUP BY fm.CATEGORY
             ORDER BY total DESC
         """, tuple(params))
@@ -998,16 +1004,18 @@ def generate_complete_financial_report(filters=None):
             pending_params.append(end_datetime)
         
         if validated_filters.get('type'):
-            pending_conditions.append("fm.TYPE = ?")
+            # ALTERAÇÃO: Corrigir nome da coluna de TYPE para MOVEMENT_TYPE
+            pending_conditions.append("fm.MOVEMENT_TYPE = ?")
             pending_params.append(validated_filters['type'])
         
         pending_where = " AND ".join(pending_conditions)
         
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
+        # ALTERAÇÃO: Corrigir nome das colunas TYPE para MOVEMENT_TYPE e "VALUE" para FINANCIAL_VALUE
         cur.execute(f"""
             SELECT 
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'EXPENSE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_expenses,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'TAX' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_taxes
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'EXPENSE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_expenses,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'TAX' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_taxes
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {pending_where}
         """, tuple(pending_params))

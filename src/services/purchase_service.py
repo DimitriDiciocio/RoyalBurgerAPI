@@ -6,6 +6,7 @@ Gerencia compras de ingredientes e registro automático de despesas
 import fdb
 import logging
 import json
+import math
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from ..database import get_db_connection
@@ -526,7 +527,8 @@ def create_purchase_invoice(invoice_data, created_by_user_id, cur=None):
 
 def get_purchase_invoices(filters=None):
     """
-    Busca notas fiscais de compra com filtros
+    Busca notas fiscais de compra com filtros e paginação
+    ALTERAÇÃO: Adicionado suporte a paginação
     
     Args:
         filters: dict com:
@@ -534,9 +536,16 @@ def get_purchase_invoices(filters=None):
             - end_date: datetime/str
             - supplier_name: str
             - payment_status: 'Pending' ou 'Paid'
+            - page: int (opcional, default: 1) - Número da página
+            - page_size: int (opcional, default: 100) - Itens por página
     
     Returns:
-        list de notas fiscais
+        dict com:
+            - items: list de notas fiscais
+            - total: int - Total de registros
+            - page: int - Página atual
+            - page_size: int - Itens por página
+            - total_pages: int - Total de páginas
     """
     conn = None
     try:
@@ -592,9 +601,54 @@ def get_purchase_invoices(filters=None):
         if conditions:
             base_sql += " WHERE " + " AND ".join(conditions)
         
+        # ALTERAÇÃO: Contar total de registros antes de aplicar paginação
+        count_sql = "SELECT COUNT(*) FROM PURCHASE_INVOICES pi"
+        if conditions:
+            count_sql += " WHERE " + " AND ".join(conditions)
+        
+        cur.execute(count_sql, params)
+        total_count = cur.fetchone()[0] or 0
+        
+        # ALTERAÇÃO: Aplicar paginação
+        page = filters.get('page', 1) if filters else 1
+        page_size = filters.get('page_size', 100) if filters else 100
+        
+        # Validar e limitar page_size
+        try:
+            page = int(page)
+            page_size = int(page_size)
+            if page < 1:
+                page = 1
+            if page_size < 1:
+                page_size = 100
+            if page_size > 1000:
+                page_size = 1000  # Limitar para evitar sobrecarga
+        except (ValueError, TypeError):
+            page = 1
+            page_size = 100
+        
+        # Calcular offset
+        offset = (page - 1) * page_size
+        
+        # ALTERAÇÃO: Adicionar FIRST/SKIP para paginação (sintaxe Firebird)
         base_sql += " ORDER BY pi.PURCHASE_DATE DESC, pi.CREATED_AT DESC"
         
-        cur.execute(base_sql, params)
+        # Firebird não suporta parametrização de FIRST/SKIP, então usar f-string
+        # Garantir que são inteiros para evitar SQL injection
+        page_size = int(page_size)
+        offset = int(offset)
+        if offset > 0:
+            paginated_sql = f"SELECT FIRST {page_size} SKIP {offset}"
+        else:
+            paginated_sql = f"SELECT FIRST {page_size}"
+        
+        # Extrair campos do SELECT original
+        select_fields = base_sql.split("FROM")[0].replace("SELECT", "").strip()
+        from_clause = "FROM" + base_sql.split("FROM", 1)[1]
+        
+        final_sql = f"{paginated_sql} {select_fields} {from_clause}"
+        
+        cur.execute(final_sql, params)
         
         invoices = []
         for row in cur.fetchall():
@@ -613,7 +667,16 @@ def get_purchase_invoices(filters=None):
                 "created_by_name": row[11]
             })
         
-        return invoices
+        # ALTERAÇÃO: Retornar objeto com paginação
+        total_pages = math.ceil(total_count / page_size) if page_size > 0 else 1
+        
+        return {
+            "items": invoices,
+            "total": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages
+        }
         
     except fdb.Error as e:
         logger.error(f"Erro ao buscar notas fiscais: {e}", exc_info=True)

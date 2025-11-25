@@ -979,9 +979,9 @@ def generate_executive_dashboard_data(filters=None):
         # Receita
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_revenue
+            SELECT CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
-            WHERE fm.TYPE = 'REVENUE'
+            WHERE fm.MOVEMENT_TYPE = 'REVENUE'
             AND fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (start_datetime, end_datetime))
@@ -1005,8 +1005,8 @@ def generate_executive_dashboard_data(filters=None):
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
             SELECT 
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE = 'REVENUE' THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
-                CAST(COALESCE(SUM(CASE WHEN fm.TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as expenses
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE = 'REVENUE' THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as revenue,
+                CAST(COALESCE(SUM(CASE WHEN fm.MOVEMENT_TYPE IN ('EXPENSE', 'CMV', 'TAX') THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as expenses
             FROM FINANCIAL_MOVEMENTS fm
             WHERE fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
@@ -1079,9 +1079,9 @@ def generate_executive_dashboard_data(filters=None):
         
         # CORREÇÃO: Adicionar CASTs explícitos para evitar erro SQLDA -804
         cur.execute("""
-            SELECT CAST(COALESCE(SUM(fm."VALUE"), 0) AS NUMERIC(18,2)) as total_revenue
+            SELECT CAST(COALESCE(SUM(fm.FINANCIAL_VALUE), 0) AS NUMERIC(18,2)) as total_revenue
             FROM FINANCIAL_MOVEMENTS fm
-            WHERE fm.TYPE = 'REVENUE'
+            WHERE fm.MOVEMENT_TYPE = 'REVENUE'
             AND fm.MOVEMENT_DATE >= ? AND fm.MOVEMENT_DATE < ?
             AND fm.PAYMENT_STATUS = 'Paid'
         """, (prev_start_datetime, prev_end_datetime))
@@ -1192,8 +1192,8 @@ def generate_reconciliation_report_data(filters=None):
                 CAST(COUNT(*) AS INTEGER) as total_movements,
                 CAST(COUNT(CASE WHEN fm.RECONCILED = TRUE THEN 1 END) AS INTEGER) as reconciled_count,
                 CAST(COUNT(CASE WHEN fm.RECONCILED = FALSE OR fm.RECONCILED IS NULL THEN 1 END) AS INTEGER) as pending_count,
-                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = TRUE THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as reconciled_amount,
-                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = FALSE OR fm.RECONCILED IS NULL THEN fm."VALUE" ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_amount
+                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = TRUE THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as reconciled_amount,
+                CAST(COALESCE(SUM(CASE WHEN fm.RECONCILED = FALSE OR fm.RECONCILED IS NULL THEN fm.FINANCIAL_VALUE ELSE 0 END), 0) AS NUMERIC(18,2)) as pending_amount
             FROM FINANCIAL_MOVEMENTS fm
             WHERE {where_clause}
         """, tuple(params))
@@ -1208,7 +1208,7 @@ def generate_reconciliation_report_data(filters=None):
         # 2. MOVIMENTAÇÕES PENDENTES DE CONCILIAÇÃO
         # ALTERAÇÃO: Comparar diretamente com BOOLEAN FALSE ao invés de CAST para INTEGER
         cur.execute(f"""
-            SELECT fm.ID, fm.TYPE, fm."VALUE", fm.DESCRIPTION,
+            SELECT fm.ID, fm.MOVEMENT_TYPE, fm.FINANCIAL_VALUE, fm.DESCRIPTION,
                    fm.MOVEMENT_DATE, fm.PAYMENT_GATEWAY_ID, fm.TRANSACTION_ID,
                    fm.BANK_ACCOUNT, fm.CREATED_AT
             FROM FINANCIAL_MOVEMENTS fm

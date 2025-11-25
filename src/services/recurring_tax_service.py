@@ -143,10 +143,11 @@ def generate_monthly_taxes(year=None, month=None):
             tax_id, name, description, category, subcategory, value, payment_day, sender_receiver, notes = tax
             
             # Verificar se já foi gerado para este mês
+            # ALTERAÇÃO: Corrigir nome da coluna de TYPE para MOVEMENT_TYPE
             cur.execute("""
                 SELECT COUNT(*)
                 FROM FINANCIAL_MOVEMENTS
-                WHERE TYPE = 'TAX'
+                WHERE MOVEMENT_TYPE = 'TAX'
                 AND RELATED_ENTITY_TYPE = 'recurring_tax'
                 AND RELATED_ENTITY_ID = ?
                 AND EXTRACT(YEAR FROM CREATED_AT) = ?

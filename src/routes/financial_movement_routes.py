@@ -251,6 +251,25 @@ def get_pending_payments_route():
     if request.args.get('type'):
         filters['type'] = request.args.get('type')
     
+    # ALTERAÇÃO: Adicionar suporte a paginação
+    if request.args.get('page'):
+        try:
+            filters['page'] = int(request.args.get('page'))
+            if filters['page'] < 1:
+                filters['page'] = 1
+        except ValueError:
+            return jsonify({"error": "page deve ser um número válido"}), 400
+    
+    if request.args.get('page_size'):
+        try:
+            filters['page_size'] = int(request.args.get('page_size'))
+            if filters['page_size'] < 1:
+                filters['page_size'] = 100
+            if filters['page_size'] > 1000:
+                filters['page_size'] = 1000  # Limitar para evitar sobrecarga
+        except ValueError:
+            return jsonify({"error": "page_size deve ser um número válido"}), 400
+    
     movements = financial_movement_service.get_financial_movements(filters)
     return jsonify(movements), 200
 
@@ -485,11 +504,34 @@ def get_reconciliation_report_route():
     if request.args.get('payment_gateway_id'):
         filters['payment_gateway_id'] = request.args.get('payment_gateway_id')
     
+    # ALTERAÇÃO: Adicionar suporte a paginação
+    page = 1
+    page_size = 100
+    if request.args.get('page'):
+        try:
+            page = int(request.args.get('page'))
+            if page < 1:
+                page = 1
+        except ValueError:
+            return jsonify({"error": "page deve ser um número válido"}), 400
+    
+    if request.args.get('page_size'):
+        try:
+            page_size = int(request.args.get('page_size'))
+            if page_size < 1:
+                page_size = 100
+            if page_size > 1000:
+                page_size = 1000  # Limitar para evitar sobrecarga
+        except ValueError:
+            return jsonify({"error": "page_size deve ser um número válido"}), 400
+    
     report = financial_movement_service.get_reconciliation_report(
         start_date=filters.get('start_date'),
         end_date=filters.get('end_date'),
         reconciled=filters.get('reconciled'),
-        payment_gateway_id=filters.get('payment_gateway_id')
+        payment_gateway_id=filters.get('payment_gateway_id'),
+        page=page,
+        page_size=page_size
     )
     
     return jsonify(report), 200

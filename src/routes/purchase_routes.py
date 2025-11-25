@@ -71,6 +71,25 @@ def get_purchase_invoices_route():
     if request.args.get('payment_status'):
         filters['payment_status'] = request.args.get('payment_status')
     
+    # ALTERAÇÃO: Adicionar suporte a paginação
+    if request.args.get('page'):
+        try:
+            filters['page'] = int(request.args.get('page'))
+            if filters['page'] < 1:
+                filters['page'] = 1
+        except ValueError:
+            return jsonify({"error": "page deve ser um número válido"}), 400
+    
+    if request.args.get('page_size'):
+        try:
+            filters['page_size'] = int(request.args.get('page_size'))
+            if filters['page_size'] < 1:
+                filters['page_size'] = 100
+            if filters['page_size'] > 1000:
+                filters['page_size'] = 1000  # Limitar para evitar sobrecarga
+        except ValueError:
+            return jsonify({"error": "page_size deve ser um número válido"}), 400
+    
     invoices = purchase_service.get_purchase_invoices(filters)
     return jsonify(invoices), 200
 

@@ -411,10 +411,11 @@ def generate_recurring_movements(year=None, month=None, week=None):
             
             if recurrence_type == 'MONTHLY':
                 # Verificar se já foi gerado para este mês
+                # ALTERAÇÃO: Corrigir nome da coluna de TYPE para MOVEMENT_TYPE
                 cur.execute("""
                     SELECT COUNT(*)
                     FROM FINANCIAL_MOVEMENTS
-                    WHERE TYPE = ?
+                    WHERE MOVEMENT_TYPE = ?
                     AND RELATED_ENTITY_TYPE = 'recurrence_rule'
                     AND RELATED_ENTITY_ID = ?
                     AND EXTRACT(YEAR FROM CREATED_AT) = ?
@@ -438,10 +439,11 @@ def generate_recurring_movements(year=None, month=None, week=None):
             
             elif recurrence_type == 'WEEKLY':
                 # Verificar se já foi gerado para esta semana
+                # ALTERAÇÃO: Corrigir nome da coluna de TYPE para MOVEMENT_TYPE
                 cur.execute("""
                     SELECT COUNT(*)
                     FROM FINANCIAL_MOVEMENTS
-                    WHERE TYPE = ?
+                    WHERE MOVEMENT_TYPE = ?
                     AND RELATED_ENTITY_TYPE = 'recurrence_rule'
                     AND RELATED_ENTITY_ID = ?
                     AND EXTRACT(YEAR FROM CREATED_AT) = ?
@@ -466,10 +468,11 @@ def generate_recurring_movements(year=None, month=None, week=None):
             
             elif recurrence_type == 'YEARLY':
                 # Verificar se já foi gerado para este ano
+                # ALTERAÇÃO: Corrigir nome da coluna de TYPE para MOVEMENT_TYPE
                 cur.execute("""
                     SELECT COUNT(*)
                     FROM FINANCIAL_MOVEMENTS
-                    WHERE TYPE = ?
+                    WHERE MOVEMENT_TYPE = ?
                     AND RELATED_ENTITY_TYPE = 'recurrence_rule'
                     AND RELATED_ENTITY_ID = ?
                     AND EXTRACT(YEAR FROM CREATED_AT) = ?
