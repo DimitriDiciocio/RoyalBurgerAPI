@@ -9,7 +9,7 @@ from .printing_service import print_kitchen_ticket, format_order_for_kitchen_jso
 from .. import socketio
 from ..config import Config
 from ..database import get_db_connection
-from ..utils import validators
+from ..utils import validators, event_publisher
 
 logger = logging.getLogger(__name__)
 
@@ -612,6 +612,27 @@ def create_order(user_id, address_id, items, payment_method, amount_paid=None, n
             # Notificação para cozinha
             _notify_kitchen(new_order_id)
             
+            # Publica evento de criação de pedido via WebSocket
+            try:
+                # Garantir que user_id seja inteiro
+                user_id_int = int(user_id) if user_id else None
+                
+                # Monta payload resumido para o evento
+                event_data = {
+                    "order_id": new_order_id,
+                    "total": float(order_total_float),
+                    "status": initial_status,
+                    "items_count": len(items),
+                    "order_type": order_type,
+                    "user_id": user_id_int
+                }
+                
+                logger.info(f"Publicando evento order.created para pedido {new_order_id}: {event_data}")
+                event_publisher.publish_event('order.created', event_data)
+            except Exception as e:
+                # Não falha a criação do pedido se houver erro ao publicar evento
+                logger.error(f"Erro ao publicar evento de criação de pedido {new_order_id}: {e}", exc_info=True)
+            
             # ALTERAÇÃO: Enviar email de confirmação de pedido
             try:
                 customer = user_service.get_user_by_id(user_id)
@@ -1104,6 +1125,25 @@ def update_order_status(order_id, new_status):
         
         # Commit único de tudo (status + movimentações financeiras)
         conn.commit()
+        
+        # Publica evento de mudança de status via WebSocket
+        try:
+            # Garantir que user_id seja inteiro (pode vir como string do banco)
+            user_id_int = int(user_id) if user_id else None
+            
+            event_data = {
+                "order_id": order_id,
+                "new_status": db_status,
+                "old_status": current_status,
+                "user_id": user_id_int,
+                "order_type": order_type
+            }
+            
+            logger.info(f"Publicando evento order.status_changed para pedido {order_id}: {event_data}")
+            event_publisher.publish_event('order.status_changed', event_data)
+        except Exception as e:
+            # Não falha a atualização se houver erro ao publicar evento
+            logger.error(f"Erro ao publicar evento de mudança de status do pedido {order_id}: {e}", exc_info=True)
         
         # OTIMIZAÇÃO DE PERFORMANCE: Envia notificações de forma assíncrona (não bloqueia resposta)
         # user_id já foi obtido na query inicial, então pode ser usado diretamente

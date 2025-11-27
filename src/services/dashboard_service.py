@@ -88,21 +88,40 @@ def get_dashboard_metrics():
         metrics_row = cur.fetchone()
         
         # ALTERAÇÃO: Calcular tempo médio de preparo em query separada para evitar problemas de tipo SQLDA
-        # CORREÇÃO: Simplificar query para evitar problemas SQLDA com CAST e DATEDIFF aninhados
-        cur.execute("""
-            SELECT COALESCE(AVG(
-                CAST(DATEDIFF(MINUTE FROM CREATED_AT TO UPDATED_AT) AS NUMERIC(18,6))
-            ), 0)
-            FROM ORDERS 
-            WHERE CREATED_AT >= ? AND CREATED_AT < ?
-              AND STATUS = 'delivered' AND UPDATED_AT IS NOT NULL
-              AND CREATED_AT IS NOT NULL
-        """, (start_datetime, end_datetime))
-        avg_prep_time_result = cur.fetchone()
-        # ALTERAÇÃO: Verificar se resultado existe e não é None antes de acessar índice
-        if avg_prep_time_result and len(avg_prep_time_result) > 0 and avg_prep_time_result[0] is not None:
-            avg_prep_time = float(avg_prep_time_result[0])
-        else:
+        # CORREÇÃO: Buscar tempos individuais e calcular média manualmente (evita problemas SQLDA com AVG)
+        try:
+            # Buscar todos os tempos de preparo individualmente
+            cur.execute("""
+                SELECT DATEDIFF(MINUTE FROM CREATED_AT TO UPDATED_AT) as prep_time
+                FROM ORDERS 
+                WHERE CREATED_AT >= ? AND CREATED_AT < ?
+                  AND STATUS = 'delivered' 
+                  AND UPDATED_AT IS NOT NULL
+                  AND CREATED_AT IS NOT NULL
+            """, (start_datetime, end_datetime))
+            prep_times = cur.fetchall()
+            
+            # Calcular média manualmente para evitar problemas SQLDA com AVG
+            if prep_times and len(prep_times) > 0:
+                valid_times = []
+                for row in prep_times:
+                    if row and len(row) > 0 and row[0] is not None:
+                        try:
+                            time_val = float(row[0])
+                            if time_val >= 0:  # Apenas valores válidos (não negativos)
+                                valid_times.append(time_val)
+                        except (ValueError, TypeError):
+                            continue
+                
+                if valid_times:
+                    avg_prep_time = sum(valid_times) / len(valid_times)
+                else:
+                    avg_prep_time = 0.0
+            else:
+                avg_prep_time = 0.0
+        except Exception as e:
+            # ALTERAÇÃO: Se houver erro, logar e usar valor padrão
+            logger.warning(f"Erro ao calcular tempo médio de preparo: {e}. Usando valor padrão 0.", exc_info=True)
             avg_prep_time = 0.0
         
         # Query separada para distribuição por tipo (mais simples que consolidar)

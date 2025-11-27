@@ -1,6 +1,7 @@
 import fdb
 import logging
 from ..database import get_db_connection
+from ..utils import event_publisher
 
 logger = logging.getLogger(__name__)
 
@@ -227,9 +228,33 @@ def update_table(table_id, name=None, status=None):
         values = list(fields_to_update.values())
         values.append(table_id)
 
+        # Busca status anterior e nome antes de atualizar
+        old_status = None
+        table_name = None
+        if 'STATUS' in fields_to_update:
+            cur.execute("SELECT STATUS, NAME FROM RESTAURANT_TABLES WHERE ID = ?", (table_id,))
+            old_row = cur.fetchone()
+            if old_row:
+                old_status = old_row[0]
+                table_name = old_row[1]
+        
         sql = f"UPDATE RESTAURANT_TABLES SET {', '.join(set_parts)}, UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = ?;"
         cur.execute(sql, tuple(values))
         conn.commit()
+        
+        # Publica evento de mudança de status via WebSocket
+        if 'STATUS' in fields_to_update and old_status != fields_to_update['STATUS']:
+            try:
+                event_publisher.publish_event('table.status_changed', {
+                    "table_id": table_id,
+                    "table_name": table_name,
+                    "old_status": old_status,
+                    "new_status": fields_to_update['STATUS']
+                })
+            except Exception as e:
+                # Não falha a atualização se houver erro ao publicar evento
+                logger.warning(f"Erro ao publicar evento de mudança de status da mesa {table_id}: {e}", exc_info=True)
+        
         return (True, None, "Mesa atualizada com sucesso")
     except fdb.Error as e:
         logger.error(f"Erro ao atualizar mesa: {e}", exc_info=True)
@@ -289,6 +314,12 @@ def set_table_occupied(table_id, order_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # Busca status anterior
+        cur.execute("SELECT STATUS, NAME FROM RESTAURANT_TABLES WHERE ID = ?", (table_id,))
+        old_row = cur.fetchone()
+        old_status = old_row[0] if old_row else None
+        table_name = old_row[1] if old_row else None
+        
         cur.execute("""
             UPDATE RESTAURANT_TABLES
             SET STATUS = ?, CURRENT_ORDER_ID = ?, UPDATED_AT = CURRENT_TIMESTAMP
@@ -296,6 +327,20 @@ def set_table_occupied(table_id, order_id):
         """, (TABLE_STATUS_OCCUPIED, order_id, table_id))
         affected = cur.rowcount
         conn.commit()
+        
+        # Publica evento de mudança de status via WebSocket
+        if affected > 0 and old_status != TABLE_STATUS_OCCUPIED:
+            try:
+                event_publisher.publish_event('table.status_changed', {
+                    "table_id": table_id,
+                    "table_name": table_name,
+                    "old_status": old_status,
+                    "new_status": TABLE_STATUS_OCCUPIED,
+                    "order_id": order_id
+                })
+            except Exception as e:
+                logger.warning(f"Erro ao publicar evento de mudança de status da mesa {table_id}: {e}", exc_info=True)
+        
         return affected > 0
     except fdb.Error as e:
         logger.error(f"Erro ao marcar mesa como ocupada: {e}", exc_info=True)
@@ -319,6 +364,12 @@ def set_table_available(table_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # Busca status anterior
+        cur.execute("SELECT STATUS, NAME FROM RESTAURANT_TABLES WHERE ID = ?", (table_id,))
+        old_row = cur.fetchone()
+        old_status = old_row[0] if old_row else None
+        table_name = old_row[1] if old_row else None
+        
         cur.execute("""
             UPDATE RESTAURANT_TABLES
             SET STATUS = ?, CURRENT_ORDER_ID = NULL, UPDATED_AT = CURRENT_TIMESTAMP
@@ -326,6 +377,19 @@ def set_table_available(table_id):
         """, (TABLE_STATUS_AVAILABLE, table_id))
         affected = cur.rowcount
         conn.commit()
+        
+        # Publica evento de mudança de status via WebSocket
+        if affected > 0 and old_status != TABLE_STATUS_AVAILABLE:
+            try:
+                event_publisher.publish_event('table.status_changed', {
+                    "table_id": table_id,
+                    "table_name": table_name,
+                    "old_status": old_status,
+                    "new_status": TABLE_STATUS_AVAILABLE
+                })
+            except Exception as e:
+                logger.warning(f"Erro ao publicar evento de mudança de status da mesa {table_id}: {e}", exc_info=True)
+        
         return affected > 0
     except fdb.Error as e:
         logger.error(f"Erro ao marcar mesa como disponível: {e}", exc_info=True)

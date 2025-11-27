@@ -3,6 +3,7 @@ import logging
 import math
 from decimal import Decimal
 from ..database import get_db_connection
+from ..utils import event_publisher
 
 logger = logging.getLogger(__name__)
 
@@ -608,6 +609,22 @@ def deduct_stock_for_order(order_id, cur=None):
         
         # Verifica se algum ingrediente ficou sem estoque
         _check_and_deactivate_products(updated_ingredients, cur)
+        
+        # Publica eventos de alerta de estoque via WebSocket
+        # Verifica se algum ingrediente ficou com status 'low' ou 'out_of_stock'
+        for ingredient in updated_ingredients:
+            new_status = ingredient.get('new_status')
+            if new_status in ['low', 'out_of_stock']:
+                try:
+                    event_publisher.publish_event('stock.alert', {
+                        "ingredient_id": ingredient.get('ingredient_id'),
+                        "name": ingredient.get('ingredient_name'),
+                        "status": new_status,
+                        "current_stock": float(ingredient.get('new_stock', 0))
+                    })
+                except Exception as e:
+                    # Não falha a dedução se houver erro ao publicar evento
+                    logger.warning(f"Erro ao publicar evento de alerta de estoque para ingrediente {ingredient.get('ingredient_id')}: {e}", exc_info=True)
         
         # Log das alterações (substituído print por logger)
         _log_stock_changes(order_id, updated_ingredients)

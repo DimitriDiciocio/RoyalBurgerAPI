@@ -4,13 +4,9 @@ from flask_socketio import join_room, leave_room, emit
 from .. import socketio  
 from ..services import chat_service  
 
-@socketio.on('connect')  
-def handle_connect():  
-    print(f"Cliente conectado: {request.sid}")  
-
-@socketio.on('disconnect')  
-def handle_disconnect():  
-    print(f"Cliente desconectado: {request.sid}")  
+# NOTA: O handler de 'connect' foi movido para system_events.py
+# para centralizar a autenticação e gerenciamento de salas do sistema.
+# Este arquivo agora contém apenas eventos específicos de chat.
 
 @socketio.on('join_chat')  
 def handle_join_chat(data):  
