@@ -12,7 +12,14 @@ import src.services.auth_service as auth_service
 from flask_cors import CORS  
 from .routes.swagger_route import swagger_bp, swaggerui_blueprint  
 
-socketio = SocketIO(cors_allowed_origins="*")  
+# ALTERAÇÃO: Configurar SocketIO com async_mode='threading' para compatibilidade com servidor de desenvolvimento
+# Em produção, considere usar 'eventlet' ou 'gevent' para melhor performance
+socketio = SocketIO(
+    cors_allowed_origins="*",
+    async_mode='threading',  # Usa threading para compatibilidade com servidor de desenvolvimento
+    logger=True,
+    engineio_logger=False
+)  
 mail = Mail()
 compress = Compress()  
 
