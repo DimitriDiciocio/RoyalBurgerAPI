@@ -696,12 +696,14 @@ def get_orders_by_user_id(user_id, page=1, page_size=50):
         total = cur.fetchone()[0] or 0
         
         # Query otimizada que inclui total_amount e agrega items básicos
+        # ALTERAÇÃO: Incluir UPDATED_AT para reiniciar cronômetro quando status muda
         sql = f"""
             SELECT FIRST {page_size} SKIP {offset}
                 o.ID, 
                 o.STATUS, 
                 o.CONFIRMATION_CODE, 
                 o.CREATED_AT, 
+                o.UPDATED_AT,
                 o.ORDER_TYPE, 
                 o.TOTAL_AMOUNT,
                 a.STREET, 
@@ -755,17 +757,18 @@ def get_orders_by_user_id(user_id, page=1, page_size=50):
             })
         
         # Monta resposta com items e total
+        # ALTERAÇÃO: Índices ajustados após adicionar UPDATED_AT
         orders = []
         for row in order_rows:
             order_id = row[0]
-            order_type = row[4] if row[4] else ORDER_TYPE_DELIVERY
+            order_type = row[5] if row[5] else ORDER_TYPE_DELIVERY  # ALTERAÇÃO: Índice ajustado
             
             # Formata endereço como objeto para compatibilidade
             address_obj = None
             if order_type == ORDER_TYPE_PICKUP:
                 address_obj = {"street": "Retirada no balcão"}
-            elif row[6] and row[7]:  # STREET e NUMBER não nulos
-                address_obj = {"street": row[6], "number": row[7]}
+            elif row[7] and row[8]:  # ALTERAÇÃO: STREET e NUMBER não nulos (índices ajustados)
+                address_obj = {"street": row[7], "number": row[8]}
             else:
                 address_obj = {"street": "Endereço não informado"}
             
@@ -774,10 +777,11 @@ def get_orders_by_user_id(user_id, page=1, page_size=50):
                 "id": order_id,  # Alias para compatibilidade
                 "status": row[1],
                 "confirmation_code": row[2],
-                "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
+                "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+                "updated_at": row[4].strftime('%Y-%m-%d %H:%M:%S') if row[4] else None,  # ALTERAÇÃO: Incluir updated_at
                 "order_type": order_type,
-                "total_amount": float(row[5]) if row[5] is not None else None,
-                "total": float(row[5]) if row[5] is not None else None,  # Alias para compatibilidade
+                "total_amount": float(row[6]) if row[6] is not None else None,  # ALTERAÇÃO: Índice ajustado
+                "total": float(row[6]) if row[6] is not None else None,  # ALTERAÇÃO: Alias para compatibilidade (índice ajustado)
                 "address": address_obj,
                 "items": items_by_order.get(order_id, [])
             }
@@ -889,9 +893,10 @@ def get_all_orders(page=1, page_size=50, search=None, status=None, channel=None,
         
         # OTIMIZAÇÃO: Query com paginação usando FIRST/SKIP do Firebird
         # ALTERAÇÃO: Incluir TOTAL_AMOUNT para permitir cálculos de receita no frontend
+        # ALTERAÇÃO: Incluir UPDATED_AT para reiniciar cronômetro quando status muda
         sql = f"""
             SELECT FIRST {page_size} SKIP {offset}
-                o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.ORDER_TYPE, o.TOTAL_AMOUNT, u.FULL_NAME, a.STREET, a."NUMBER"
+                o.ID, o.STATUS, o.CONFIRMATION_CODE, o.CREATED_AT, o.UPDATED_AT, o.ORDER_TYPE, o.TOTAL_AMOUNT, u.FULL_NAME, a.STREET, a."NUMBER"
             FROM ORDERS o
             JOIN USERS u ON o.USER_ID = u.ID
             LEFT JOIN ADDRESSES a ON o.ADDRESS_ID = a.ID
@@ -904,23 +909,25 @@ def get_all_orders(page=1, page_size=50, search=None, status=None, channel=None,
         orders = []
         for row in cur.fetchall():
             # CORREÇÃO: Consistência com get_orders_by_user_id - extrair order_type primeiro
-            order_type = row[4] if row[4] else ORDER_TYPE_DELIVERY
+            # ALTERAÇÃO: Índices ajustados após adicionar UPDATED_AT
+            order_type = row[5] if row[5] else ORDER_TYPE_DELIVERY
             address_str = None
             if order_type == ORDER_TYPE_PICKUP:
                 address_str = "Retirada no balcão"
-            elif row[7] and row[8]:  # STREET e NUMBER não nulos (índices ajustados após adicionar TOTAL_AMOUNT)
-                address_str = f"{row[7]}, {row[8]}"
+            elif row[8] and row[9]:  # STREET e NUMBER não nulos (índices ajustados após adicionar UPDATED_AT e TOTAL_AMOUNT)
+                address_str = f"{row[8]}, {row[9]}"
             else:
                 address_str = "Endereço não informado"
             
-            # ALTERAÇÃO: Incluir total_amount no retorno
+            # ALTERAÇÃO: Incluir total_amount e updated_at no retorno
             orders.append({
                 "id": row[0],  # Adicionado para compatibilidade com frontend
                 "order_id": row[0], "status": row[1], "confirmation_code": row[2],
-                "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S'),
+                "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+                "updated_at": row[4].strftime('%Y-%m-%d %H:%M:%S') if row[4] else None,  # ALTERAÇÃO: Incluir updated_at
                 "order_type": order_type,
-                "total_amount": float(row[5]) if row[5] else 0.0,  # ALTERAÇÃO: Incluir total_amount
-                "customer_name": row[6],  # Índice ajustado após adicionar TOTAL_AMOUNT
+                "total_amount": float(row[6]) if row[6] else 0.0,  # ALTERAÇÃO: Índice ajustado após adicionar UPDATED_AT
+                "customer_name": row[7],  # Índice ajustado após adicionar UPDATED_AT e TOTAL_AMOUNT
                 "address": address_str
             })
         
@@ -1005,8 +1012,9 @@ def update_order_status(order_id, new_status):
             return True
         
         # Atualiza o status usando o valor mapeado para o banco
+        # ALTERAÇÃO: Atualizar também UPDATED_AT para reiniciar cronômetro quando status muda
         # Se 'ready' não estiver na constraint, tenta usar 'in_progress' como fallback para pickup
-        sql_update = "UPDATE ORDERS SET STATUS = ? WHERE ID = ?;"
+        sql_update = "UPDATE ORDERS SET STATUS = ?, UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = ?;"
         try:
             cur.execute(sql_update, (db_status, order_id))
             rows_updated = cur.rowcount  # Salva o rowcount logo após o UPDATE
@@ -1227,9 +1235,10 @@ def get_order_details(order_id, user_id, user_role):
         cur = conn.cursor()
 
         
+        # ALTERAÇÃO: Incluir UPDATED_AT para reiniciar cronômetro quando status muda
         sql_order = """
             SELECT o.ID, o.USER_ID, o.ADDRESS_ID, o.STATUS, o.CONFIRMATION_CODE, o.NOTES,
-                   o.PAYMENT_METHOD, o.TOTAL_AMOUNT, o.CREATED_AT, o.ORDER_TYPE, o.CHANGE_FOR_AMOUNT,
+                   o.PAYMENT_METHOD, o.TOTAL_AMOUNT, o.CREATED_AT, o.UPDATED_AT, o.ORDER_TYPE, o.CHANGE_FOR_AMOUNT,
                    u.FULL_NAME
             FROM ORDERS o
             LEFT JOIN USERS u ON o.USER_ID = u.ID
@@ -1242,19 +1251,22 @@ def get_order_details(order_id, user_id, user_role):
             return None 
 
         # Calcula amount_paid quando há troco (amount_paid = total + change)
+        # ALTERAÇÃO: Índices ajustados após adicionar UPDATED_AT
         total = float(order_row[7]) if order_row[7] is not None else 0.0
-        change = float(order_row[10]) if order_row[10] is not None else None
+        change = float(order_row[11]) if order_row[11] is not None else None  # ALTERAÇÃO: Índice ajustado
         amount_paid = (total + change) if change is not None else (total if total > 0 else None)
         
+        # ALTERAÇÃO: Incluir updated_at no retorno (índices ajustados após adicionar UPDATED_AT)
         order_details = {
             "id": order_row[0], "user_id": order_row[1], "address_id": order_row[2],
             "status": order_row[3], "confirmation_code": order_row[4], "notes": order_row[5],
             "payment_method": order_row[6], "total_amount": total,
             "created_at": order_row[8].strftime('%Y-%m-%d %H:%M:%S') if order_row[8] else None,
-            "order_type": order_row[9] if order_row[9] else 'delivery',
-            "change_for_amount": change,
+            "updated_at": order_row[9].strftime('%Y-%m-%d %H:%M:%S') if order_row[9] else None,  # ALTERAÇÃO: Incluir updated_at
+            "order_type": order_row[10] if order_row[10] else 'delivery',  # ALTERAÇÃO: Índice ajustado
+            "change_for_amount": change,  # ALTERAÇÃO: Índice ajustado (order_row[11])
             "amount_paid": amount_paid,
-            "customer_name": order_row[11] if order_row[11] else None
+            "customer_name": order_row[12] if order_row[12] else None  # ALTERAÇÃO: Índice ajustado
         }
 
         # Verificação de segurança: cliente só pode ver seus próprios pedidos

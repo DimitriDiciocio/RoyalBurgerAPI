@@ -47,7 +47,7 @@ def _invalidate_financial_movements_cache():
         cache.clear_pattern('financial_movements:*')
         # ALTERAÇÃO: Limpar também cache do resumo do fluxo de caixa
         cache.clear_pattern('cash_flow_summary:*')
-        logger.debug("Cache de movimentações financeiras e resumo do fluxo de caixa invalidado")
+        # ALTERAÇÃO: Log removido - não é necessário em produção
     except Exception as e:
         logger.warning(f"Erro ao invalidar cache de movimentações: {e}")
 
@@ -164,8 +164,7 @@ def create_financial_movement(movement_data, created_by_user_id, cur=None):
             cur = conn.cursor()
             should_close_conn = True
         
-        # ALTERAÇÃO: Log dos dados recebidos para debug
-        logger.info(f"create_financial_movement recebeu: {movement_data}")
+        # ALTERAÇÃO: Log removido - pode expor dados sensíveis e não é necessário em produção
         
         # Validações
         # ALTERAÇÃO: category agora é opcional (pode ser None ou string vazia)
@@ -673,10 +672,8 @@ def get_financial_movements(filters=None):
     # Cache mais curto para garantir dados atualizados
     cached_result = cache.get(cache_key)
     if cached_result is not None:
-        logger.debug(f"Cache hit para movimentações financeiras: {cache_key}")
+        # ALTERAÇÃO: Log removido - não é necessário em produção
         return cached_result
-    
-    logger.debug(f"Cache miss para movimentações financeiras: {cache_key}")
     
     conn = None
     try:
@@ -704,34 +701,78 @@ def get_financial_movements(filters=None):
         params = []
         
         if filters:
+            # ALTERAÇÃO: Filtro por data de movimento melhorado para garantir filtro correto
             # Filtro por data de movimento (para fluxo de caixa real)
             if filters.get('start_date'):
                 start_date = filters['start_date']
+                # ALTERAÇÃO: Melhorar parsing de datas para aceitar múltiplos formatos
                 if isinstance(start_date, str):
                     try:
-                        start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                    except (ValueError, AttributeError):
-                        # ALTERAÇÃO: Especificar exceções ao invés de bare except
-                        # Se não conseguir parsear, manter como string e deixar o SQL tratar
+                        # Tentar parsear como ISO format com hora
+                        if 'T' in start_date or len(start_date) > 10:
+                            start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                        else:
+                            # Formato simples YYYY-MM-DD - parsear como data sem hora
+                            date_parts = start_date.split('-')
+                            if len(date_parts) == 3:
+                                year = int(date_parts[0])
+                                month = int(date_parts[1])
+                                day = int(date_parts[2])
+                                start_date = datetime.combine(date(year, month, day), datetime.min.time())
+                            else:
+                                # Tentar parsear como datetime completo
+                                start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                    except (ValueError, AttributeError, TypeError, IndexError) as e:
+                        logger.warning(f"Erro ao parsear start_date '{filters.get('start_date')}': {e}")
+                        # ALTERAÇÃO: Se falhar, tentar usar diretamente (pode ser formato que SQL aceita)
                         pass
+                
+                # ALTERAÇÃO: Garantir que seja datetime com hora zerada
                 if isinstance(start_date, date) and not isinstance(start_date, datetime):
                     start_date = datetime.combine(start_date, datetime.min.time())
+                elif isinstance(start_date, datetime):
+                    # ALTERAÇÃO: Normalizar hora para início do dia para filtro consistente
+                    start_date = datetime.combine(start_date.date(), datetime.min.time())
+                
+                # ALTERAÇÃO: Garantir que a condição use MOVEMENT_DATE (campo correto para filtrar por data de movimento)
                 conditions.append("fm.MOVEMENT_DATE >= ?")
                 params.append(start_date)
             
             if filters.get('end_date'):
                 end_date = filters['end_date']
+                # ALTERAÇÃO: Melhorar parsing de datas para aceitar múltiplos formatos
                 if isinstance(end_date, str):
                     try:
-                        end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                    except (ValueError, AttributeError):
-                        # ALTERAÇÃO: Especificar exceções ao invés de bare except
-                        # Se não conseguir parsear, manter como string e deixar o SQL tratar
+                        # Tentar parsear como ISO format com hora
+                        if 'T' in end_date or len(end_date) > 10:
+                            end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                        else:
+                            # Formato simples YYYY-MM-DD - parsear como data sem hora
+                            date_parts = end_date.split('-')
+                            if len(date_parts) == 3:
+                                year = int(date_parts[0])
+                                month = int(date_parts[1])
+                                day = int(date_parts[2])
+                                end_date = datetime.combine(date(year, month, day), datetime.min.time())
+                            else:
+                                # Tentar parsear como datetime completo
+                                end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                    except (ValueError, AttributeError, TypeError, IndexError) as e:
+                        logger.warning(f"Erro ao parsear end_date '{filters.get('end_date')}': {e}")
+                        # ALTERAÇÃO: Se falhar, tentar usar diretamente (pode ser formato que SQL aceita)
                         pass
+                
+                # ALTERAÇÃO: Garantir que seja datetime
                 if isinstance(end_date, date) and not isinstance(end_date, datetime):
                     end_date = datetime.combine(end_date, datetime.min.time())
-                # Adiciona 1 dia para incluir o dia final
-                end_date = end_date + timedelta(days=1)
+                elif isinstance(end_date, datetime):
+                    # ALTERAÇÃO: Normalizar hora para início do dia
+                    end_date = datetime.combine(end_date.date(), datetime.min.time())
+                
+                # ALTERAÇÃO: O frontend já envia o início do próximo dia como end_date
+                # Por exemplo, para filtrar "hoje", o frontend envia start_date=hoje 00:00 e end_date=amanhã 00:00
+                # Portanto, não precisamos adicionar 1 dia - usar diretamente no filtro exclusivo
+                # Filtro: MOVEMENT_DATE < end_date (exclui registros do dia end_date)
                 conditions.append("fm.MOVEMENT_DATE < ?")
                 params.append(end_date)
             
@@ -1173,10 +1214,8 @@ def get_cash_flow_summary(period='this_month', include_pending=False):
     # Cache mais curto para garantir dados atualizados
     cached_result = cache.get(cache_key)
     if cached_result is not None:
-        logger.debug(f"Cache hit para resumo do fluxo de caixa: {cache_key}")
+        # ALTERAÇÃO: Log removido - não é necessário em produção
         return cached_result
-    
-    logger.debug(f"Cache miss para resumo do fluxo de caixa: {cache_key}")
     
     conn = None
     try:
@@ -1515,7 +1554,7 @@ def update_payment_status(movement_id, payment_status, movement_date=None, updat
                         # Verificar se a compra foi atualizada
                         if cur.rowcount > 0:
                             purchase_updated = True
-                            logger.info(f"Status da compra {related_entity_id} sincronizado com movimentação {movement_id}: {payment_status}")
+                            # ALTERAÇÃO: Log removido - não é necessário em produção
                         else:
                             logger.warning(f"Falha ao atualizar compra {related_entity_id} (nenhuma linha afetada)")
                             
@@ -1635,10 +1674,7 @@ def delete_financial_movement(movement_id, deleted_by_user_id=None):
                     )
                     
                     if success:
-                        logger.info(
-                            f"Movimentação {movement_id} e compra relacionada {related_entity_id} "
-                            f"excluídas com sucesso"
-                        )
+                        # ALTERAÇÃO: Log removido - não é necessário em produção
                         # ALTERAÇÃO: Invalidar cache após excluir movimentação
                         _invalidate_financial_movements_cache()
                         return (
@@ -1678,8 +1714,7 @@ def delete_financial_movement(movement_id, deleted_by_user_id=None):
         cur.execute("DELETE FROM FINANCIAL_MOVEMENTS WHERE ID = ?", (movement_id,))
         conn.commit()
         
-        logger.info(f"Movimentação {movement_id} excluída com sucesso")
-        
+        # ALTERAÇÃO: Log removido - não é necessário em produção
         # ALTERAÇÃO: Invalidar cache após excluir movimentação
         _invalidate_financial_movements_cache()
         
