@@ -918,10 +918,10 @@ def update_purchase_invoice(invoice_id, invoice_data, updated_by_user_id):
             movement_row = cur.fetchone()
             if movement_row:
                 movement_id = movement_row[0]
-                # ALTERAÇÃO: Usar "VALUE" com aspas duplas (identificador delimitado no Firebird)
+                # ALTERAÇÃO: Usar FINANCIAL_VALUE (nome correto da coluna na tabela)
                 cur.execute("""
                     UPDATE FINANCIAL_MOVEMENTS
-                    SET "VALUE" = ?, UPDATED_AT = ?
+                    SET FINANCIAL_VALUE = ?, UPDATED_AT = ?
                     WHERE ID = ?
                 """, (new_total, datetime.now(), movement_id))
         
