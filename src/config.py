@@ -20,6 +20,13 @@ class Config:
     # ALTERAÇÃO: DEBUG deve ser False em produção por padrão
     DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes')
     
+    # CORREÇÃO: Modo de desenvolvimento - ignora verificação de horário de funcionamento
+    # Quando DEV_MODE=True, a API não verifica horário de funcionamento, permitindo pedidos a qualquer hora
+    FLASK_ENV = os.environ.get('FLASK_ENV', 'development')
+    DEV_MODE = os.environ.get('DEV_MODE', '').lower() in ('true', '1', 'yes') or \
+               FLASK_ENV.lower() in ('development', 'dev', 'test') or \
+               DEBUG
+    
     # ALTERAÇÃO: JWT_SECRET_KEY deve ser obrigatória via variável de ambiente
     _jwt_secret_key = os.environ.get('JWT_SECRET_KEY')
     if not _jwt_secret_key:

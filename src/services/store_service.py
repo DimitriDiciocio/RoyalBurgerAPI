@@ -1,6 +1,7 @@
 import fdb  
 from datetime import datetime  
-from ..database import get_db_connection  
+from ..database import get_db_connection
+from ..config import Config  
 
 # Cache de horários em memória para melhor performance
 _store_hours_cache = None
@@ -46,7 +47,15 @@ def _load_hours_into_cache(force_refresh=False):
             conn.close()  
 
 def is_store_open():  
-    """Verifica se a loja está aberta no momento atual"""
+    """Verifica se a loja está aberta no momento atual
+    
+    CORREÇÃO: Em modo DEV (DEV_MODE=True ou FLASK_ENV=development), ignora verificação
+    de horário e sempre retorna que a loja está aberta.
+    """
+    # CORREÇÃO: Em modo dev, sempre retorna que a loja está aberta
+    if Config.DEV_MODE:
+        return (True, "Modo de desenvolvimento ativo - horário de funcionamento ignorado.")
+    
     _load_hours_into_cache()
     
     if not _store_hours_cache:

@@ -156,9 +156,21 @@ def earn_points_for_order_with_details(user_id, order_id, subtotal, discount_amo
         cur: Cursor do banco de dados
     
     Returns:
-        int: Pontos ganhos
+        int: Pontos ganhos (0 se já foram creditados anteriormente)
     """
     try:
+        # CORREÇÃO: Verificar se já existem pontos creditados para este pedido
+        # Isso previne crédito duplicado se o status mudar múltiplas vezes para 'delivered'
+        cur.execute("""
+            SELECT COUNT(*) FROM LOYALTY_POINTS_HISTORY 
+            WHERE ORDER_ID = ? AND POINTS > 0
+        """, (order_id,))
+        existing_points_count = cur.fetchone()[0]
+        
+        if existing_points_count > 0:
+            print(f"Pedido #{order_id}: Pontos já foram creditados anteriormente. Pulando crédito para evitar duplicação.")
+            return 0
+        
         create_loyalty_account_if_not_exists(user_id, cur)
         
         # Obter taxas de conversão das configurações
